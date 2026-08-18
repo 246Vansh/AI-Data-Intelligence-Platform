@@ -25,6 +25,16 @@ from ai.adapter import (
     convert_to_analysis_plan,
 )
 
+from ai.insights import generate_insights
+
+from data_engine.insight_context import (
+    build_insight_context,
+)
+
+from ai.insight_validator import (
+    validate_insights,
+)
+
 
 router = APIRouter(
     prefix="/api/analyze",
@@ -48,7 +58,6 @@ def analyze_dataset(
     question = request.question.strip()
 
     if not question:
-
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty.",
@@ -71,14 +80,12 @@ def analyze_dataset(
     # =========================================
 
     try:
-
         ai_plan = create_analysis_plan(
             user_question=question,
             metadata=metadata,
         )
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=500,
             detail=f"AI planning failed: {exc}",
@@ -89,16 +96,13 @@ def analyze_dataset(
     # =========================================
 
     if ai_plan.status == "invalid":
-
         return {
             "success": False,
             "question": question,
             "error": {
                 "type": "invalid_request",
                 "message": (
-                    ai_plan.reason
-                    or "The requested analysis "
-                       "cannot be performed."
+                    ai_plan.reason or "The requested analysis cannot be performed."
                 ),
             },
             "ai_plan": ai_plan.model_dump(),
@@ -109,13 +113,9 @@ def analyze_dataset(
     # =========================================
 
     try:
-
-        plan = convert_to_analysis_plan(
-            ai_plan
-        )
+        plan = convert_to_analysis_plan(ai_plan)
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
@@ -126,14 +126,12 @@ def analyze_dataset(
     # =========================================
 
     try:
-
         validate_plan(
             df,
             plan,
         )
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
             detail=f"Invalid analysis plan: {exc}",
@@ -144,87 +142,94 @@ def analyze_dataset(
     # =========================================
 
     try:
-
         result = execute_plan(
             df,
             plan,
         )
 
-    except ValueError as exc:
+        analysis_result = {
+            "columns": result.columns.tolist(),
+            "rows": result.to_dict(orient="records"),
+            "row_count": len(result),
+        }
 
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Analysis execution failed: {exc}",
         ) from exc
 
     # =========================================
-    # 9. Visualization
+    # 9. Generate Insights
+    # =========================================
+
+    metric_column = f"{plan.aggregation}_{plan.metric}"
+
+    insight_context = build_insight_context(
+        result=result,
+        metric_column=metric_column,
+        group_by=plan.group_by,
+    )
+
+    try:
+        insight_response = generate_insights(
+            question=question,
+            result=analysis_result,
+            context=insight_context,
+        )
+
+        validate_insights(insight_response, insight_context)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"Insight validation failed: {exc}"),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"Insight generation failed: {exc}"),
+        ) from exc
+
+    # =========================================
+    # 10. Visualization
     # =========================================
 
     if not plan.group_by:
         visualization_type = "table"
 
     else:
-        visualization_type = (
-        plan.visualization
-        or "table"
-    )
-        
+        visualization_type = plan.visualization or "table"
+
     visualization_title = None
 
     if ai_plan.visualization is not None:
-
-        visualization_title = (
-            ai_plan.visualization.title
-        )
+        visualization_title = ai_plan.visualization.title
 
     try:
-
-        visualization_spec = (
-            create_visualization_spec(
-                result=result,
-                visualization_type=(
-                    visualization_type
-                ),
-                title=visualization_title,
-            )
+        visualization_spec = create_visualization_spec(
+            result=result,
+            visualization_type=(visualization_type),
+            title=visualization_title,
         )
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Visualization creation failed: "
-                f"{exc}"
-            ),
+            detail=(f"Visualization creation failed: {exc}"),
         ) from exc
 
     # =========================================
-    # 10. Return final response
+    # 11. Return final response
     # =========================================
 
     return {
         "success": True,
-
         "question": question,
-
-        "data": {
-            "columns": (
-                result.columns.tolist()
-            ),
-
-            "rows": (
-                result.to_dict(
-                    orient="records"
-                )
-            ),
-
-            "row_count": len(result),
-        },
-
+        "data": analysis_result,
+        "insights": (insight_response.model_dump()),
         "visualization": visualization_spec,
-
         "plan": {
             "filters": [
                 {
@@ -234,19 +239,11 @@ def analyze_dataset(
                 }
                 for condition in plan.filters
             ],
-
             "group_by": plan.group_by,
-
             "metric": plan.metric,
-
             "aggregation": plan.aggregation,
-
             "sort": plan.sort,
-
             "limit": plan.limit,
-
-            "visualization": (
-                plan.visualization
-            ),
+            "visualization": (plan.visualization),
         },
     }
