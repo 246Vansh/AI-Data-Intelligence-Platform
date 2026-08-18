@@ -58,6 +58,15 @@ def execute_plan(
             working_df,
             condition,
         )
+        
+    # -----------------------------------------
+    # Apply time transformation
+    # -----------------------------------------
+
+    working_df = apply_time_granularity(
+        working_df,
+        plan,
+    )
 
     # -----------------------------------------
     # Perform analysis
@@ -75,11 +84,79 @@ def execute_plan(
         metric=plan.metric,
         aggregation=plan.aggregation,
         sort=plan.sort,
+        sort_by=plan.sort_by,
         limit=plan.limit,
     )
 
     # -----------------------------------------
     # Return result
     # -----------------------------------------
+
+    return result
+
+def apply_time_granularity(
+    df: pd.DataFrame,
+    plan: AnalysisPlan,
+) -> pd.DataFrame:
+
+    if plan.time_granularity is None:
+        return df
+
+    if "Date" not in df.columns:
+        raise ValueError(
+            "Time analysis requires a Date column."
+        )
+
+    result = df.copy()
+
+    granularity = (
+        plan.time_granularity
+    )
+
+    if granularity == "day":
+
+        result["Date"] = (
+            result["Date"]
+            .dt.floor("D")
+        )
+
+    elif granularity == "week":
+
+        result["Date"] = (
+            result["Date"]
+            .dt.to_period("W")
+            .dt.start_time
+        )
+
+    elif granularity == "month":
+
+        result["Date"] = (
+            result["Date"]
+            .dt.to_period("M")
+            .dt.start_time
+        )
+
+    elif granularity == "quarter":
+
+        result["Date"] = (
+            result["Date"]
+            .dt.to_period("Q")
+            .dt.start_time
+        )
+
+    elif granularity == "year":
+
+        result["Date"] = (
+            result["Date"]
+            .dt.to_period("Y")
+            .dt.start_time
+        )
+
+    else:
+
+        raise ValueError(
+            f"Unsupported time granularity: "
+            f"{granularity}"
+        )
 
     return result

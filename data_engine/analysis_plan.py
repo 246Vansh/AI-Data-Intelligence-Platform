@@ -11,9 +11,14 @@ class FilterCondition:
 
 @dataclass
 class AnalysisPlan:
-    filters: list[FilterCondition] = field(default_factory=list)
 
-    group_by: list[str] = field(default_factory=list)
+    filters: list[FilterCondition] = field(
+        default_factory=list
+    )
+
+    group_by: list[str] = field(
+        default_factory=list
+    )
 
     metric: str | None = None
 
@@ -21,6 +26,14 @@ class AnalysisPlan:
 
     sort: str = "desc"
 
+    sort_by: str = "metric"
+
     limit: int | None = None
 
     visualization: str | None = None
+
+    # -----------------------------------------
+    # Time analysis
+    # -----------------------------------------
+
+    time_granularity: str | None = None

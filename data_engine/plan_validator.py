@@ -29,6 +29,19 @@ ALLOWED_VISUALIZATIONS = {
     "table",
 }
 
+ALLOWED_TIME_GRANULARITIES = {
+    "day",
+    "week",
+    "month",
+    "quarter",
+    "year",
+}
+
+ALLOWED_SORT_BY = {
+    "metric",
+    "time",
+}
+
 
 def validate_plan(
     df: pd.DataFrame,
@@ -107,3 +120,66 @@ def validate_plan(
             f"Unsupported visualization: "
             f"{plan.visualization}"
         )
+        
+    # -----------------------------------------
+    # Validate time granularity
+    # -----------------------------------------
+
+    if plan.time_granularity is not None:
+
+        if plan.time_granularity not in (
+            ALLOWED_TIME_GRANULARITIES
+        ):
+            raise ValueError(
+                "Unsupported time granularity: "
+                f"{plan.time_granularity}"
+            )
+
+        if "Date" not in plan.group_by:
+
+            raise ValueError(
+                "Time granularity requires "
+                "'Date' in group_by."
+            )
+            
+            
+    # -----------------------------------------
+    # Validate sort
+    # -----------------------------------------
+
+    if plan.sort.lower() not in {
+        "asc",
+        "desc",
+    }:
+        raise ValueError(
+            f"Unsupported sort direction: "
+            f"{plan.sort}"
+        )
+
+    # -----------------------------------------
+    # Validate sort field
+    # -----------------------------------------
+
+    if plan.sort_by not in ALLOWED_SORT_BY:
+        raise ValueError(
+            f"Unsupported sort field: "
+            f"{plan.sort_by}"
+        )
+
+    # -----------------------------------------
+    # Time sorting requires time analysis
+    # -----------------------------------------
+
+    if plan.sort_by == "time":
+
+        if plan.time_granularity is None:
+            raise ValueError(
+                "Time sorting requires "
+                "time_granularity."
+            )
+
+        if "Date" not in plan.group_by:
+            raise ValueError(
+                "Time sorting requires "
+                "'Date' in group_by."
+            )
