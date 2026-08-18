@@ -237,4 +237,17 @@ The response must follow this structure:
     }
   ]
 }
+
+
+Verified analytical context is calculated by the data engine.
+
+Treat verified analytical context as authoritative.
+
+Do not calculate or contradict facts that are explicitly
+provided in the verified analytical context.
+
+Do not make claims stronger than the evidence supports.
+
+If the supplied result does not support a conclusion,
+do not make that conclusion.
 """
