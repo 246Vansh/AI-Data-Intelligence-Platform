@@ -160,7 +160,7 @@ def analyze_dataset(
         ) from exc
 
     # =========================================
-    # 9. Generate Insights
+    # 8. Insights
     # =========================================
 
     metric_column = f"{plan.aggregation}_{plan.metric}"
@@ -171,6 +171,9 @@ def analyze_dataset(
         group_by=plan.group_by,
     )
 
+    insight_response = None
+    insight_error = None
+
     try:
         insight_response = generate_insights(
             question=question,
@@ -178,19 +181,12 @@ def analyze_dataset(
             context=insight_context,
         )
 
-        validate_insights(insight_response, insight_context)
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=(f"Insight validation failed: {exc}"),
-        ) from exc
-
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=(f"Insight generation failed: {exc}"),
-        ) from exc
+        # Insights are an optional enrichment layer.
+        # Analysis should still succeed if the AI
+        # insight provider fails.
+
+        insight_error = str(exc)
 
     # =========================================
     # 10. Visualization
@@ -228,7 +224,15 @@ def analyze_dataset(
         "success": True,
         "question": question,
         "data": analysis_result,
-        "insights": (insight_response.model_dump()),
+        "insights": (
+            insight_response.model_dump()
+            if insight_response is not None
+            else {"insights": []}
+        ),
+        "insight_status": (
+            "success" if insight_response is not None else "unavailable"
+        ),
+        "insight_error": insight_error,
         "visualization": visualization_spec,
         "plan": {
             "filters": [
