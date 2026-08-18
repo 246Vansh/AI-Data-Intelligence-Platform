@@ -36,7 +36,23 @@ class AnalysisPlanResponse(BaseModel):
     aggregation: str | None = None
 
     sort: str = "desc"
+    
+    sort_by: Literal[
+    "metric",
+    "time"] = "metric"
 
     limit: int | None = None
+
+    # -----------------------------------------
+    # Time analysis
+    # -----------------------------------------
+
+    time_granularity: Literal[
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+    ] | None = None
 
     visualization: VisualizationPlan | None = None

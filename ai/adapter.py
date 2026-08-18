@@ -110,8 +110,17 @@ def convert_to_analysis_plan(
         ),
 
         sort=ai_plan.sort,
+        sort_by=ai_plan.sort_by,
 
         limit=ai_plan.limit,
 
         visualization=visualization,
+
+        # -------------------------------------
+        # Time analysis
+        # -------------------------------------
+
+        time_granularity=(
+            ai_plan.time_granularity
+        ),
     )
