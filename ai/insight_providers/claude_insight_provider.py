@@ -49,7 +49,6 @@ class ClaudeInsightProvider:
         # -----------------------------------------
         # JSON response example
         # -----------------------------------------
-
         example_json = """
 {
   "insights": [
@@ -67,12 +66,56 @@ class ClaudeInsightProvider:
       }
     },
     {
+      "type": "trend",
+      "title": "Sales increased from March to December",
+      "description": "Sales increased between the selected months.",
+      "evidence": {
+        "rows": [
+          {
+            "Date": "2010-03-01",
+            "sum_Weekly_Sales": 181919802.5
+          },
+          {
+            "Date": "2010-04-01",
+            "sum_Weekly_Sales": 231412368.05
+          },
+          {
+            "Date": "2010-12-01",
+            "sum_Weekly_Sales": 288760532.72
+          }
+        ]
+      }
+    },
+    {
       "type": "difference",
       "title": "Large gap between peak and lowest months",
-      "description": "The difference between the highest and lowest months is substantial.",
+      "description": "There is a large difference between the highest and lowest months.",
       "evidence": null
     }
   ]
+},
+{
+  "type": "coverage",
+  "title": "Data coverage is incomplete",
+  "description": "Only 4 of the 11 expected monthly periods are present.",
+  "evidence": {
+    "date_column": "Date",
+    "frequency": "month",
+    "min_date": "2010-02-01T00:00:00",
+    "max_date": "2010-12-01T00:00:00",
+    "observed_periods": 4,
+    "expected_periods": 11,
+    "missing_periods": [
+      "2010-05",
+      "2010-06",
+      "2010-07",
+      "2010-08",
+      "2010-09",
+      "2010-10",
+      "2010-11"
+    ],
+    "is_continuous": false
+  }
 }
 """
 
@@ -102,37 +145,64 @@ class ClaudeInsightProvider:
             + "\n\n"
             + "EVIDENCE RULES:\n\n"
             + "1. Every factual insight must include evidence when "
-            "the claim can be tied to a specific result row.\n\n"
-            + "2. Evidence must be either:\n"
-            + "   a) null\n"
-            + "   OR\n"
-            + "   b) a complete evidence object containing:\n"
-            + "      - column\n"
-            + "      - value\n"
-            + "      - row\n\n"
-            + "3. NEVER return an evidence object with a null value.\n\n"
-            + "4. NEVER return an evidence object with a null row "
-            "when the evidence is supposed to identify a specific "
-            "result row.\n\n" + "5. If the insight cannot be supported by a single "
-            "result row, return:\n\n"
-            + '   "evidence": null\n\n'
-            + "6. The evidence column must be an exact column from "
+            "the claim can be supported by the supplied result.\n\n"
+            + "2. Evidence must be exactly one of:\n\n"
+            + "   a) null\n\n"
+            + "   b) a single-row evidence object:\n\n"
+            + "      {\n"
+            + '        "column": "...",\n'
+            + '        "value": ...,\n'
+            + '        "row": {...}\n'
+            + "      }\n\n"
+            + "   c) a multi-row evidence object:\n\n"
+            + "      {\n"
+            + '        "rows": [\n'
+            + "          {...},\n"
+            + "          {...}\n"
+            + "        ]\n"
+            + "      }\n\n"
+            + "3. Never create partial evidence objects.\n\n"
+            + "4. Never use null for column, value, or row inside "
+            "a single-row evidence object.\n\n"
+            + "5. If a claim depends on multiple observations, "
+            "use multi-row evidence.\n\n"
+            + "6. Multi-row evidence rows MUST come directly from "
             "the supplied analysis result.\n\n"
-            + "7. The evidence value must come from the supplied result.\n\n"
-            + "8. The evidence row must come from the supplied result.\n\n"
-            + "9. Never invent evidence.\n\n"
-            + "10. Never modify a value from the supplied result.\n\n"
-            + "11. The verified analytical context is authoritative.\n\n"
-            + "12. Do not contradict the verified analytical context.\n\n"
-            + "13. Do not create partial evidence objects.\n\n"
-            + "14. Use evidence null when row-level evidence is not "
-            "available or appropriate.\n\n"
-            + "15. Do not make claims stronger than the available "
+            + "7. Do not invent rows.\n\n"
+            + "8. Do not modify values.\n\n"
+            + "9. Do not round evidence values.\n\n"
+            + "10. The evidence must contain only rows that actually "
+            "support the insight.\n\n"
+            + "11. For a trend, provide at least two rows when the "
+            "trend can be established from the supplied result.\n\n"
+            + "12. For a comparison involving multiple observations, "
+            "provide all relevant comparison rows.\n\n"
+            + "13. If an insight cannot be supported by the supplied "
+            "result, return:\n\n"
+            + '    "evidence": null\n\n'
+            + "14. The verified analytical context is authoritative.\n\n"
+            + "15. Do not contradict the verified analytical context.\n\n"
+            + "16. Do not make claims stronger than the available "
             "evidence supports.\n\n"
-            + "16. Use the actual computed result when describing "
-            "values, dates, rankings, differences, and trends.\n\n"
-            + "17. Do not assume that missing dates or incomplete "
-            "time periods exist in the dataset.\n\n" + "Return ONLY valid JSON."
+            + "17. Do not assume missing dates or missing observations "
+            "exist.\n\n" + "18. Date coverage information supplied in the "
+            "verified analytical context is authoritative.\n\n"
+            + "19. If date_coverage reports missing_periods, "
+            "you may state that those periods are missing.\n\n"
+            + "20. Do not infer missing periods from only the "
+            "visible result rows when date_coverage is available.\n\n"
+            + "21. If you make a data coverage claim, use "
+            "evidence: null unless the claim is directly "
+            "supported by supplied verified context.\n\n"
+            + "22. Do not invent dates, periods, or coverage statistics.\n\n"
+            + "24. For a coverage insight, evidence MUST be a "
+            "CoverageEvidence object.\n\n"
+            + "25. Coverage evidence MUST exactly match the "
+            "verified date_coverage context.\n\n"
+            + "26. Never invent missing periods.\n\n"
+            + "27. Never modify observed_periods or expected_periods.\n\n"
+            + "28. Never claim continuous data when is_continuous is false.\n\n"
+            + "29. Return ONLY valid JSON."
         )
 
         # -----------------------------------------
