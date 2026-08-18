@@ -48,8 +48,7 @@ def main():
     # =========================================
 
     question = (
-        "Show me the top 5 stores by average "
-        "weekly sales during holidays."
+        "Show me monthly sales trends."
     )
 
     print()
