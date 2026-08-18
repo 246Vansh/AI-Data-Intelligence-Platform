@@ -239,6 +239,17 @@ The response must follow this structure:
 }
 
 
+NUMBER FORMATTING RULES:
+
+1. Preserve evidence values exactly as supplied.
+2. In descriptions, format numeric values for readability.
+3. Do not expose floating-point artifacts such as
+   106840730.22000003.
+4. For decimal values, use at most 2 decimal places.
+5. Use thousands separators where appropriate.
+6. Never change the underlying evidence value.
+
+
 Verified analytical context is calculated by the data engine.
 
 Treat verified analytical context as authoritative.
