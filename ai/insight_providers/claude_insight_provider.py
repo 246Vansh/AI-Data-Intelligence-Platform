@@ -8,6 +8,7 @@ from anthropic import Anthropic
 from ai.insight_models import InsightResponse
 from ai.prompts import INSIGHT_SYSTEM_PROMPT
 
+from time import perf_counter
 
 load_dotenv()
 
@@ -209,6 +210,8 @@ class ClaudeInsightProvider:
         # Call Claude
         # -----------------------------------------
 
+        api_start = perf_counter()
+
         response = self.client.messages.create(
             model=self.model,
             max_tokens=2000,
@@ -220,6 +223,13 @@ class ClaudeInsightProvider:
                 }
             ],
         )
+
+        api_time = (perf_counter() - api_start) * 1000
+        print("\nAI INSIGHT PERFORMANCE")
+        print("----------------------")
+        print(f"model: {self.model}")
+        print(f"prompt_chars: {len(user_prompt)}")
+        print(f"api_request: {api_time:.2f} ms")
 
         # -----------------------------------------
         # Extract text blocks
