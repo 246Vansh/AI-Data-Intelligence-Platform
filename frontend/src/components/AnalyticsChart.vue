@@ -1,8 +1,6 @@
 <script setup>
 import { computed } from "vue";
-
 import VChart from "vue-echarts";
-
 import { use } from "echarts/core";
 
 import {
@@ -19,10 +17,7 @@ import {
     TitleComponent,
 } from "echarts/components";
 
-import {
-    CanvasRenderer,
-} from "echarts/renderers";
-
+import { CanvasRenderer } from "echarts/renderers";
 
 use([
     BarChart,
@@ -36,7 +31,6 @@ use([
     CanvasRenderer,
 ]);
 
-
 const props = defineProps({
     result: {
         type: Object,
@@ -44,67 +38,34 @@ const props = defineProps({
     },
 });
 
-
 const chartOption = computed(() => {
+    const rows = props.result?.data?.rows || [];
+    const visualization = props.result?.visualization;
 
-    const rows =
-        props.result?.data?.rows || [];
-
-    const visualization =
-        props.result?.visualization;
-
-
-    if (
-        !rows.length ||
-        !visualization
-    ) {
+    if (!rows.length || !visualization) {
         return {};
     }
 
-
-    const xColumn =
-        visualization.encoding?.x;
-
-    const yColumn =
-        visualization.encoding?.y;
-
+    const xColumn = visualization.encoding?.x;
+    const yColumn = visualization.encoding?.y;
 
     if (!xColumn || !yColumn) {
         return {};
     }
 
+    const categories = rows.map((row) => row[xColumn]);
+    const values = rows.map((row) => row[yColumn]);
 
-    const categories =
-        rows.map(
-            row => row[xColumn]
-        );
-
-
-    const values =
-        rows.map(
-            row => row[yColumn]
-        );
-
-
-    /* =========================================
-       Pie Chart
-    ========================================= */
-
-    if (
-        visualization.type === "pie"
-    ) {
-
+    // Pie chart
+    if (visualization.type === "pie") {
         return {
-
             animation: true,
-
             animationDuration: 700,
 
             title: {
                 text: visualization.title,
                 left: "center",
                 top: 10,
-
                 textStyle: {
                     fontSize: 17,
                     fontWeight: 700,
@@ -114,31 +75,23 @@ const chartOption = computed(() => {
 
             tooltip: {
                 trigger: "item",
-
                 backgroundColor: "rgba(23, 32, 51, 0.94)",
-
                 borderWidth: 0,
-
                 textStyle: {
                     color: "#ffffff",
                     fontSize: 12,
                 },
-
                 formatter: "{b}<br/>Value: {c} ({d}%)",
             },
 
             legend: {
                 type: "scroll",
-
                 bottom: 4,
-
                 left: "center",
-
                 textStyle: {
                     color: "#667085",
                     fontSize: 11,
                 },
-
                 itemWidth: 10,
                 itemHeight: 10,
             },
@@ -146,17 +99,8 @@ const chartOption = computed(() => {
             series: [
                 {
                     type: "pie",
-
-                    radius: [
-                        "38%",
-                        "68%",
-                    ],
-
-                    center: [
-                        "50%",
-                        "48%",
-                    ],
-
+                    radius: ["38%", "68%"],
+                    center: ["50%", "48%"],
                     avoidLabelOverlap: true,
 
                     itemStyle: {
@@ -173,53 +117,34 @@ const chartOption = computed(() => {
                     emphasis: {
                         scale: true,
                         scaleSize: 5,
-
                         itemStyle: {
                             shadowBlur: 18,
-                            shadowColor:
-                                "rgba(15, 23, 42, 0.16)",
+                            shadowColor: "rgba(15, 23, 42, 0.16)",
                         },
                     },
 
-                    data: rows.map(
-                        row => ({
-                            name: row[xColumn],
-                            value: row[yColumn],
-                        })
-                    ),
+                    data: rows.map((row) => ({
+                        name: row[xColumn],
+                        value: row[yColumn],
+                    })),
                 },
             ],
         };
     }
 
-
-    /* =========================================
-       Standard Charts
-    ========================================= */
-
-    const isBar =
-        visualization.type === "bar";
-
-    const isLine =
-        visualization.type === "line";
-
-    const isScatter =
-        visualization.type === "scatter";
-
+    // Standard charts
+    const isBar = visualization.type === "bar";
+    const isLine = visualization.type === "line";
+    const isScatter = visualization.type === "scatter";
 
     return {
-
         animation: true,
-
         animationDuration: 700,
 
         title: {
             text: visualization.title,
-
             left: 0,
-
             top: 0,
-
             textStyle: {
                 fontSize: 17,
                 fontWeight: 700,
@@ -227,55 +152,32 @@ const chartOption = computed(() => {
             },
         },
 
-
         tooltip: {
-
-            trigger:
-                isScatter
-                    ? "item"
-                    : "axis",
-
-            backgroundColor:
-                "rgba(23, 32, 51, 0.94)",
-
+            trigger: isScatter ? "item" : "axis",
+            backgroundColor: "rgba(23, 32, 51, 0.94)",
             borderWidth: 0,
-
             textStyle: {
                 color: "#ffffff",
                 fontSize: 12,
             },
 
             axisPointer: {
-                type:
-                    isLine
-                        ? "line"
-                        : "shadow",
+                type: isLine ? "line" : "shadow",
             },
         },
 
-
         grid: {
-
             left: "2%",
-
             right: "2%",
-
             top: 55,
-
             bottom: 65,
-
             containLabel: true,
         },
 
-
         xAxis: {
-
             type: "category",
-
             data: categories,
-
-            boundaryGap:
-                isBar,
+            boundaryGap: isBar,
 
             axisLine: {
                 lineStyle: {
@@ -289,27 +191,18 @@ const chartOption = computed(() => {
 
             axisLabel: {
                 color: "#667085",
-
                 fontSize: 11,
-
                 margin: 12,
-
-                rotate:
-                    categories.length > 7
-                        ? 25
-                        : 0,
+                rotate: categories.length > 7 ? 25 : 0,
             },
         },
 
-
         yAxis: {
-
             type: "value",
 
             splitLine: {
                 lineStyle: {
                     color: "#edf0f5",
-
                     type: "dashed",
                 },
             },
@@ -324,227 +217,75 @@ const chartOption = computed(() => {
 
             axisLabel: {
                 color: "#667085",
-
                 fontSize: 11,
             },
         },
 
-
         series: [
-
             {
-
-                type:
-                    visualization.type,
-
+                type: visualization.type,
                 data: values,
-
-                smooth:
-                    isLine,
-
-                symbol:
-                    isLine
-                        ? "circle"
-                        : undefined,
-
-                symbolSize:
-                    isLine
-                        ? 7
-                        : undefined,
-
-                barMaxWidth:
-                    isBar
-                        ? 42
-                        : undefined,
+                smooth: isLine,
+                symbol: isLine ? "circle" : undefined,
+                symbolSize: isLine ? 7 : undefined,
+                barMaxWidth: isBar ? 42 : undefined,
 
                 itemStyle: {
-
-                    borderRadius:
-                        isBar
-                            ? [7, 7, 0, 0]
-                            : undefined,
+                    borderRadius: isBar ? [7, 7, 0, 0] : undefined,
                 },
 
-                lineStyle:
-                    isLine
-                        ? {
-                            width: 3,
-                        }
-                        : undefined,
+                lineStyle: isLine
+                    ? {
+                          width: 3,
+                      }
+                    : undefined,
 
-                areaStyle:
-                    isLine
-                        ? {
-                            opacity: 0.08,
-                        }
-                        : undefined,
+                areaStyle: isLine
+                    ? {
+                          opacity: 0.08,
+                      }
+                    : undefined,
 
                 emphasis: {
-
                     focus: "series",
 
                     itemStyle: {
                         shadowBlur: 10,
-                        shadowColor:
-                            "rgba(79, 70, 229, 0.16)",
+                        shadowColor: "rgba(79, 70, 229, 0.16)",
                     },
                 },
             },
         ],
     };
 });
-
 </script>
 
-
 <template>
-
-    <section class="chart-container">
-
-        <div class="chart-toolbar">
-
-            <div class="chart-info">
-
-                <span class="chart-indicator"></span>
+    <section
+        class="mt-1 w-full box-border rounded-2xl border border-[#edf0f5] bg-white p-5"
+    >
+        <div class="mb-1 flex items-center justify-between">
+            <div
+                class="flex items-center gap-2 text-[11px] font-semibold capitalize text-[#667085]"
+            >
+                <span
+                    class="h-[7px] w-[7px] rounded-full bg-[#7c3aed] shadow-[0_0_0_4px_rgba(124,58,237,0.10)]"
+                ></span>
 
                 <span>
                     {{ result?.visualization?.type || "Chart" }}
                 </span>
-
             </div>
 
-            <span class="data-count">
+            <span
+                class="whitespace-nowrap rounded-[7px] bg-[#f8f7ff] px-[9px] py-[5px] text-[10px] font-semibold text-[#7c3aed]"
+            >
                 {{ result?.data?.row_count || 0 }} results
             </span>
-
         </div>
 
-
-        <div class="chart">
-
+        <div class="h-[440px] w-full max-[700px]:h-[360px] max-[450px]:h-[300px]">
             <VChart :option="chartOption" autoresize />
-
         </div>
-
     </section>
-
 </template>
-
-
-<style scoped>
-.chart-container {
-    width: 100%;
-
-    margin-top: 4px;
-
-    padding: 20px;
-
-    border: 1px solid #edf0f5;
-
-    border-radius: 16px;
-
-    background: #ffffff;
-
-    box-sizing: border-box;
-}
-
-
-/* =========================
-   Toolbar
-========================= */
-
-.chart-toolbar {
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    margin-bottom: 4px;
-}
-
-
-.chart-info {
-    display: flex;
-
-    align-items: center;
-
-    gap: 7px;
-
-    color: #667085;
-
-    font-size: 11px;
-
-    font-weight: 650;
-
-    text-transform: capitalize;
-}
-
-
-.chart-indicator {
-    width: 7px;
-
-    height: 7px;
-
-    border-radius: 50%;
-
-    background: #7c3aed;
-
-    box-shadow:
-        0 0 0 4px rgba(124,
-            58,
-            237,
-            0.10);
-}
-
-
-.data-count {
-    padding: 5px 9px;
-
-    border-radius: 7px;
-
-    background: #f8f7ff;
-
-    color: #7c3aed;
-
-    font-size: 10px;
-
-    font-weight: 650;
-}
-
-
-/* =========================
-   ECharts
-========================= */
-
-.chart {
-    width: 100%;
-
-    height: 440px;
-}
-
-
-/* =========================
-   Responsive
-========================= */
-
-@media (max-width: 700px) {
-
-    .chart-container {
-        padding: 14px;
-    }
-
-    .chart {
-        height: 360px;
-    }
-
-}
-
-@media (max-width: 450px) {
-
-    .chart {
-        height: 300px;
-    }
-
-}
-</style>

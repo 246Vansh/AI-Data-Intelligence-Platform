@@ -1,9 +1,6 @@
 <script setup>
 import { onMounted, ref } from "vue";
-
-import {
-    getDatasetPreview,
-} from "../services/api";
+import { getDatasetPreview } from "../services/api";
 
 const dataset = ref(null);
 const loading = ref(true);
@@ -15,12 +12,9 @@ async function loadPreview() {
         error.value = null;
 
         dataset.value = await getDatasetPreview();
-
     } catch (err) {
         console.error(err);
-
         error.value = "Unable to load dataset.";
-
     } finally {
         loading.value = false;
     }
@@ -32,666 +26,188 @@ onMounted(() => {
 </script>
 
 <template>
-    <section class="preview">
-
-        <!-- =========================
-             Header
-        ========================== -->
-
-        <div class="preview-header">
-
-            <div class="section-title">
-
-                <div class="section-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <section class="mt-[30px] w-full">
+        <!-- Header -->
+        <div
+            class="mb-[18px] flex items-center justify-between gap-5 max-[700px]:flex-col max-[700px]:items-start"
+        >
+            <div class="flex items-center gap-3">
+                <div
+                    class="flex h-10 w-10 items-center justify-center rounded-[11px] bg-gradient-to-br from-[#eff6ff] to-[#e0e7ff] text-[#2563eb]"
+                >
+                    <svg
+                        class="h-[21px] w-[21px]"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                    >
                         <rect x="3" y="3" width="18" height="18" rx="3" />
-
                         <path d="M3 9h18" />
-
                         <path d="M9 9v12" />
-
                         <path d="M13 13h4" />
-
                         <path d="M13 17h4" />
                     </svg>
                 </div>
 
                 <div>
-                    <h2>Data Preview</h2>
+                    <h2
+                        class="m-0 text-xl font-bold tracking-[-0.3px] text-[#172033]"
+                    >
+                        Data Preview
+                    </h2>
 
-                    <p>
+                    <p class="mt-[3px] text-[13px] text-[#7a8496]">
                         Preview the records available in your dataset
                     </p>
                 </div>
-
             </div>
 
-
-            <div v-if="dataset" class="dataset-info">
-                <span class="status-dot"></span>
-
+            <div
+                v-if="dataset"
+                class="flex items-center gap-[7px] whitespace-nowrap rounded-full bg-[#ecfdf5] px-[11px] py-[7px] text-[11px] font-semibold text-[#047857]"
+            >
+                <span class="h-[7px] w-[7px] rounded-full bg-[#10b981]"></span>
                 {{ dataset.rows.length }} records
             </div>
-
         </div>
 
-
-        <!-- =========================
-             Loading
-        ========================== -->
-
-        <div v-if="loading" class="state-card">
-
-            <div class="loader"></div>
+        <!-- Loading -->
+        <div
+            v-if="loading"
+            class="flex items-center gap-[14px] rounded-2xl border border-[#e8eaf1] bg-white px-6 py-[22px] text-[#667085]"
+        >
+            <div
+                class="h-7 w-7 shrink-0 animate-spin rounded-full border-[3px] border-[#ede9fe] border-t-[#7c3aed]"
+            ></div>
 
             <div>
-                <strong>
+                <strong
+                    class="mb-1 block text-sm text-[#172033]"
+                >
                     Loading dataset
                 </strong>
 
-                <p>
+                <p class="m-0 text-[13px]">
                     Preparing your data preview...
                 </p>
             </div>
-
         </div>
 
-
-        <!-- =========================
-             Error
-        ========================== -->
-
-        <div v-else-if="error" class="state-card error-state">
-
-            <div class="error-icon">
+        <!-- Error -->
+        <div
+            v-else-if="error"
+            class="flex items-center gap-[13px] rounded-2xl border border-[#fecaca] bg-[#fffafa] px-6 py-[22px]"
+        >
+            <div
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#fee2e2] font-bold text-[#dc2626]"
+            >
                 !
             </div>
 
             <div>
-                <strong>
+                <strong
+                    class="mb-1 block text-sm text-[#172033]"
+                >
                     Unable to load dataset
                 </strong>
 
-                <p>
+                <p class="m-0 text-[13px] text-[#667085]">
                     {{ error }}
                 </p>
 
-                <button type="button" @click="loadPreview">
+                <button
+                    type="button"
+                    @click="loadPreview"
+                    class="mt-[10px] rounded-lg border-0 bg-[#7c3aed] px-3 py-[7px] text-xs font-semibold text-white transition-colors duration-200 hover:bg-[#6d28d9]"
+                >
                     Try Again
                 </button>
             </div>
-
         </div>
 
-
-        <!-- =========================
-             Dataset
-        ========================== -->
-
-        <div v-else-if="dataset" class="table-card">
-
-            <div class="table-topbar">
-
+        <!-- Dataset -->
+        <div
+            v-else-if="dataset"
+            class="overflow-hidden rounded-[18px] border border-[#e7e9f0] bg-white shadow-[0_5px_15px_rgba(15,23,42,0.03),0_14px_30px_rgba(15,23,42,0.04)]"
+        >
+            <!-- Table Header -->
+            <div
+                class="flex items-center justify-between gap-5 border-b border-[#edf0f5] bg-gradient-to-b from-white to-[#fcfcfe] px-5 py-[18px] max-[700px]:items-start max-[700px]:flex-col"
+            >
                 <div>
-
-                    <h3>
+                    <h3 class="m-0 text-sm font-bold text-[#172033]">
                         Dataset Records
                     </h3>
 
-                    <p>
+                    <p class="mt-1 text-[11px] text-[#98a2b3]">
                         Showing the available dataset preview
                     </p>
-
                 </div>
 
-                <div class="column-count">
+                <div
+                    class="whitespace-nowrap rounded-lg bg-[#f5f3ff] px-[10px] py-1.5 text-[11px] font-semibold text-[#6d28d9]"
+                >
                     {{ dataset.columns.length }} columns
                 </div>
-
             </div>
 
-
-            <div class="table-wrapper">
-
-                <table>
-
+            <!-- Table -->
+            <div class="w-full overflow-x-auto">
+                <table class="min-w-[750px] w-full border-collapse">
                     <thead>
-
                         <tr>
-
-                            <th v-for="column in dataset.columns" :key="column">
-                                <span class="column-name">
+                            <th
+                                v-for="column in dataset.columns"
+                                :key="column"
+                                class="sticky top-0 z-[1] whitespace-nowrap border-b border-[#edf0f5] bg-[#fcf8ff] px-[17px] py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px] text-black"
+                            >
+                                <span
+                                    class="inline-flex max-w-[220px] items-center overflow-hidden text-ellipsis"
+                                >
                                     {{ column }}
                                 </span>
                             </th>
-
                         </tr>
-
                     </thead>
 
-
                     <tbody>
-
-                        <tr v-for="(row, index) in dataset.rows" :key="index">
-
-                            <td v-for="column in dataset.columns" :key="column">
+                        <tr
+                            v-for="(row, index) in dataset.rows"
+                            :key="index"
+                            class="transition-colors duration-150 hover:bg-[#faf9ff]"
+                        >
+                            <td
+                                v-for="column in dataset.columns"
+                                :key="column"
+                                class="whitespace-nowrap border-b border-[#edf0f5] px-[17px] py-[13px] text-left text-xs text-[#475467] last:border-b-0"
+                            >
                                 {{ row[column] }}
                             </td>
-
                         </tr>
-
                     </tbody>
-
                 </table>
-
             </div>
 
-
-            <div class="table-footer">
-
+            <!-- Footer -->
+            <div
+                class="flex items-center justify-between gap-[15px] border-t border-[#edf0f5] bg-[#fcfcfd] px-[18px] py-3 text-[11px] text-[#98a2b3] max-[700px]:items-start max-[700px]:flex-col"
+            >
                 <span>
                     Preview of
-                    <strong>{{ dataset.rows.length }}</strong>
+                    <strong class="font-semibold text-[#667085]">
+                        {{ dataset.rows.length }}
+                    </strong>
                     records
                 </span>
 
                 <span>
-                    <strong>{{ dataset.columns.length }}</strong>
+                    <strong class="font-semibold text-[#667085]">
+                        {{ dataset.columns.length }}
+                    </strong>
                     columns
                 </span>
-
             </div>
-
         </div>
-
     </section>
 </template>
-
-
-<style scoped>
-/* =========================
-   Main
-========================= */
-
-.preview {
-    width: 100%;
-    margin-top: 30px;
-}
-
-
-/* =========================
-   Header
-========================= */
-
-.preview-header {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 20px;
-
-    margin-bottom: 18px;
-}
-
-
-.section-title {
-    display: flex;
-
-    align-items: center;
-
-    gap: 12px;
-}
-
-
-.section-icon {
-    width: 40px;
-    height: 40px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    border-radius: 11px;
-
-    color: #2563eb;
-
-    background:
-        linear-gradient(135deg,
-            #eff6ff,
-            #e0e7ff);
-}
-
-
-.section-icon svg {
-    width: 21px;
-    height: 21px;
-}
-
-
-.section-title h2 {
-    margin: 0;
-
-    color: #172033;
-
-    font-size: 20px;
-
-    font-weight: 700;
-
-    letter-spacing: -0.3px;
-}
-
-
-.section-title p {
-    margin: 3px 0 0;
-
-    color: #7a8496;
-
-    font-size: 13px;
-}
-
-
-/* =========================
-   Dataset Info
-========================= */
-
-.dataset-info {
-    display: flex;
-
-    align-items: center;
-
-    gap: 7px;
-
-    padding: 7px 11px;
-
-    border-radius: 999px;
-
-    background: #ecfdf5;
-
-    color: #047857;
-
-    font-size: 11px;
-
-    font-weight: 650;
-
-    white-space: nowrap;
-}
-
-
-.status-dot {
-    width: 7px;
-    height: 7px;
-
-    border-radius: 50%;
-
-    background: #10b981;
-}
-
-
-/* =========================
-   Table Card
-========================= */
-
-.table-card {
-    overflow: hidden;
-
-    border: 1px solid #e7e9f0;
-
-    border-radius: 18px;
-
-    background: #ffffff;
-
-    box-shadow:
-        0 5px 15px rgba(15, 23, 42, 0.03),
-        0 14px 30px rgba(15, 23, 42, 0.04);
-}
-
-
-/* =========================
-   Table Topbar
-========================= */
-
-.table-topbar {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 20px;
-
-    padding: 18px 20px;
-
-    border-bottom: 1px solid #edf0f5;
-
-    background:
-        linear-gradient(180deg,
-            #ffffff,
-            #fcfcfe);
-}
-
-
-.table-topbar h3 {
-    margin: 0;
-
-    color: #172033;
-
-    font-size: 14px;
-
-    font-weight: 700;
-}
-
-
-.table-topbar p {
-    margin: 4px 0 0;
-
-    color: #98a2b3;
-
-    font-size: 11px;
-}
-
-
-.column-count {
-    padding: 6px 10px;
-
-    border-radius: 8px;
-
-    background: #f5f3ff;
-
-    color: #6d28d9;
-
-    font-size: 11px;
-
-    font-weight: 650;
-
-    white-space: nowrap;
-}
-
-
-/* =========================
-   Table
-========================= */
-
-.table-wrapper {
-    width: 100%;
-
-    overflow-x: auto;
-}
-
-
-table {
-    width: 100%;
-
-    min-width: 750px;
-
-    border-collapse: collapse;
-}
-
-
-th,
-td {
-    padding: 13px 17px;
-
-    text-align: left;
-
-    border-bottom: 1px solid #edf0f5;
-
-    white-space: nowrap;
-}
-
-
-/* Header */
-
-th {
-    position: sticky;
-
-    top: 0;
-
-    z-index: 1;
-
-    background: #fcf8ff;
-
-    color: black;
-
-    font-size: 11px;
-
-    font-weight: 700;
-
-    text-transform: uppercase;
-
-    letter-spacing: 0.35px;
-}
-
-
-.column-name {
-    display: inline-flex;
-
-    align-items: center;
-
-    max-width: 220px;
-
-    overflow: hidden;
-
-    text-overflow: ellipsis;
-}
-
-
-/* Cells */
-
-td {
-    color: #475467;
-
-    font-size: 12px;
-}
-
-
-tbody tr {
-    transition:
-        background-color 0.15s ease;
-}
-
-
-tbody tr:hover {
-    background: #faf9ff;
-}
-
-
-tbody tr:last-child td {
-    border-bottom: none;
-}
-
-
-/* =========================
-   Footer
-========================= */
-
-.table-footer {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 15px;
-
-    padding: 12px 18px;
-
-    border-top: 1px solid #edf0f5;
-
-    background: #fcfcfd;
-
-    color: #98a2b3;
-
-    font-size: 11px;
-}
-
-
-.table-footer strong {
-    color: #667085;
-
-    font-weight: 650;
-}
-
-
-/* =========================
-   Loading / Error
-========================= */
-
-.state-card {
-    display: flex;
-
-    align-items: center;
-
-    gap: 14px;
-
-    padding: 22px 24px;
-
-    border: 1px solid #e8eaf1;
-
-    border-radius: 16px;
-
-    background: #ffffff;
-
-    color: #667085;
-}
-
-
-.state-card strong {
-    display: block;
-
-    margin-bottom: 4px;
-
-    color: #172033;
-
-    font-size: 14px;
-}
-
-
-.state-card p {
-    margin: 0;
-
-    font-size: 13px;
-}
-
-
-/* Loader */
-
-.loader {
-    width: 28px;
-    height: 28px;
-
-    flex-shrink: 0;
-
-    border: 3px solid #ede9fe;
-
-    border-top-color: #7c3aed;
-
-    border-radius: 50%;
-
-    animation:
-        spin 0.8s linear infinite;
-}
-
-
-@keyframes spin {
-
-    to {
-        transform: rotate(360deg);
-    }
-
-}
-
-
-/* =========================
-   Error
-========================= */
-
-.error-state {
-    border-color: #fecaca;
-
-    background: #fffafa;
-}
-
-
-.error-icon {
-    width: 36px;
-    height: 36px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    flex-shrink: 0;
-
-    border-radius: 50%;
-
-    background: #fee2e2;
-
-    color: #dc2626;
-
-    font-weight: 700;
-}
-
-
-.error-state button {
-    margin-top: 10px;
-
-    padding: 7px 12px;
-
-    border: none;
-
-    border-radius: 8px;
-
-    background: #7c3aed;
-
-    color: #ffffff;
-
-    font-size: 12px;
-
-    font-weight: 600;
-
-    cursor: pointer;
-
-    transition:
-        background 0.2s ease;
-}
-
-
-.error-state button:hover {
-    background: #6d28d9;
-}
-
-
-/* =========================
-   Responsive
-========================= */
-
-@media (max-width: 700px) {
-
-    .preview-header {
-        align-items: flex-start;
-
-        flex-direction: column;
-    }
-
-
-    .dataset-info {
-        align-self: flex-start;
-    }
-
-
-    .table-topbar {
-        align-items: flex-start;
-
-        flex-direction: column;
-    }
-
-
-    .table-footer {
-        align-items: flex-start;
-
-        flex-direction: column;
-    }
-
-}
-</style>
