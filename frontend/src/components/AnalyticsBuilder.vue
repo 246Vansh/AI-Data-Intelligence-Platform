@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { analyzeDataset } from "../services/api";
 import AnalyticsChart from "./AnalyticsChart.vue";
+import AnalyticsInsights from "./AnalyticsInsights.vue";
 
 const question = ref(
     "Show me the top 5 stores by average weekly sales during holidays."
@@ -192,113 +193,123 @@ async function analyze() {
         </div>
 
         <!-- Result -->
-        <div
-            v-if="result"
-            class="mt-6 rounded-[20px] border border-[#e7e5f2] bg-white p-6 shadow-[0_5px_18px_rgba(15,23,42,0.04)] max-[700px]:mt-[18px]"
-        >
-            <!-- Result Header -->
+<div
+    v-if="result"
+    class="mt-6 rounded-[20px] border border-[#e7e5f2] bg-white p-6 shadow-[0_5px_18px_rgba(15,23,42,0.04)] max-[700px]:mt-[18px]"
+>
+    <!-- Result Header -->
+    <div
+        class="mb-[22px] flex items-center justify-between gap-5 max-[700px]:flex-col max-[700px]:items-start"
+    >
+        <div class="flex items-start gap-3">
             <div
-                class="mb-[22px] flex items-center justify-between gap-5 max-[700px]:flex-col max-[700px]:items-start"
+                class="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[11px] bg-emerald-50 text-lg font-bold text-emerald-600"
             >
-                <div class="flex items-start gap-3">
-                    <div
-                        class="flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-[11px] bg-emerald-50 text-lg font-bold text-emerald-600"
-                    >
-                        ✓
-                    </div>
-
-                    <div>
-                        <span
-                            class="mb-[3px] block text-[11px] font-semibold uppercase tracking-[0.5px] text-[#7a8496]"
-                        >
-                            Analysis Result
-                        </span>
-
-                        <h3 class="m-0 text-[19px] font-bold text-[#172033]">
-                            {{ result.visualization?.title }}
-                        </h3>
-
-                        <p class="mt-1 text-xs text-[#98a2b3]">
-                            {{ result.data.row_count }} results returned.
-                        </p>
-                    </div>
-                </div>
-
-                <div
-                    class="whitespace-nowrap rounded-full bg-emerald-50 px-[11px] py-[7px] text-[11px] font-semibold text-emerald-700 max-[700px]:self-start"
-                >
-                    Analysis Complete
-                </div>
+                ✓
             </div>
 
-            <!-- Chart -->
-            <div
-                v-if="
-                    result.visualization &&
-                    result.visualization.type !== 'table'
-                "
-                class="w-full rounded-[14px] border border-[#edf0f5] bg-[#fcfcfe] p-[18px]"
-            >
-                <AnalyticsChart :result="result" />
-            </div>
-
-            <!-- Table -->
-            <div
-                v-if="result.visualization?.type === 'table'"
-                class="overflow-hidden rounded-[14px] border border-[#e8eaf1] bg-white"
-            >
-                <div
-                    class="flex items-center justify-between gap-[15px] border-b border-[#edf0f5] px-[18px] py-4"
+            <div>
+                <span
+                    class="mb-[3px] block text-[11px] font-semibold uppercase tracking-[0.5px] text-[#7a8496]"
                 >
-                    <div>
-                        <h4 class="m-0 text-sm font-bold text-[#172033]">
-                            Results
-                        </h4>
+                    Analysis Result
+                </span>
 
-                        <p class="mt-[3px] text-[11px] text-[#98a2b3]">
-                            Data returned from your query
-                        </p>
-                    </div>
+                <h3
+                    class="m-0 text-[19px] font-bold text-[#172033]"
+                >
+                    {{ result.visualization?.title }}
+                </h3>
 
-                    <span
-                        class="whitespace-nowrap rounded-[7px] bg-[#f5f3ff] px-[9px] py-[5px] text-[11px] font-semibold text-[#6d28d9]"
-                    >
-                        {{ result.data.row_count }} rows
-                    </span>
-                </div>
-
-                <div class="w-full overflow-x-auto">
-                    <table class="min-w-[600px] w-full border-collapse">
-                        <thead>
-                            <tr>
-                                <th
-                                    v-for="column in result.data.columns"
-                                    :key="column"
-                                    class="whitespace-nowrap border-b border-[#edf0f5] bg-[#f8f9fc] px-4 py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px] text-[#667085]"
-                                >
-                                    {{ column }}
-                                </th>
-                            </tr>
-                        </thead>
-
-                        <tbody>
-                            <tr
-                                v-for="(row, index) in result.data.rows"
-                                :key="index"
-                                class="transition-colors duration-150 hover:bg-[#faf9ff]"
-                            >
-                                <td
-                                    v-for="column in result.data.columns"
-                                    :key="column"
-                                    class="whitespace-nowrap border-b border-[#edf0f5] px-4 py-[13px] text-left text-xs text-[#475467] last:border-b-0"
-                                >
-                                    {{ row[column] }}
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
+                <p class="mt-1 text-xs text-[#98a2b3]">
+                    {{ result.data.row_count }} results returned.
+                </p>
             </div>
         </div>
+
+        <div
+            class="whitespace-nowrap rounded-full bg-emerald-50 px-[11px] py-[7px] text-[11px] font-semibold text-emerald-700 max-[700px]:self-start"
+        >
+            Analysis Complete
+        </div>
+    </div>
+
+    <!-- AI Insights -->
+    <AnalyticsInsights
+        v-if="result.insights?.insights?.length"
+        :result="result"
+    />
+
+    <!-- Chart -->
+    <div
+        v-if="
+            result.visualization &&
+            result.visualization.type !== 'table'
+        "
+        class="w-full mt-4 rounded-[14px] border border-[#edf0f5] bg-[#fcfcfe] p-[18px]"
+    >
+        <AnalyticsChart :result="result" />
+    </div>
+
+    <!-- Table -->
+    <div
+        v-if="result.visualization?.type === 'table'"
+        class="overflow-hidden rounded-[14px] border border-[#e8eaf1] bg-white"
+    >
+        <!-- Table Header -->
+        <div
+            class="flex items-center justify-between gap-[15px] border-b border-[#edf0f5] px-[18px] py-4"
+        >
+            <div>
+                <h4 class="m-0 text-sm font-bold text-[#172033]">
+                    Results
+                </h4>
+
+                <p class="mt-[3px] text-[11px] text-[#98a2b3]">
+                    Data returned from your query
+                </p>
+            </div>
+
+            <span
+                class="whitespace-nowrap rounded-[7px] bg-[#f5f3ff] px-[9px] py-[5px] text-[11px] font-semibold text-[#6d28d9]"
+            >
+                {{ result.data.row_count }} rows
+            </span>
+        </div>
+
+        <!-- Table -->
+        <div class="w-full overflow-x-auto">
+            <table class="min-w-[600px] w-full border-collapse">
+                <thead>
+                    <tr>
+                        <th
+                            v-for="column in result.data.columns"
+                            :key="column"
+                            class="whitespace-nowrap border-b border-[#edf0f5] bg-[#f8f9fc] px-4 py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px] text-[#667085]"
+                        >
+                            {{ column }}
+                        </th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    <tr
+                        v-for="(row, index) in result.data.rows"
+                        :key="index"
+                        class="transition-colors duration-150 hover:bg-[#faf9ff]"
+                    >
+                        <td
+                            v-for="column in result.data.columns"
+                            :key="column"
+                            class="whitespace-nowrap border-b border-[#edf0f5] px-4 py-[13px] text-left text-xs text-[#475467] last:border-b-0"
+                        >
+                            {{ row[column] }}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
     </section>
 </template>
