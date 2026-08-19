@@ -2,7 +2,13 @@ import os
 
 from dotenv import load_dotenv
 
-from ai.planner_models import AnalysisPlanResponse
+from data_engine.analysis_plan import AnalysisPlan
+
+from ai.fast_planner import FastPlanner
+
+from ai.adapter import (
+    convert_to_analysis_plan,
+)
 
 from ai.providers.openai_provider import (
     OpenAIProvider,
@@ -29,15 +35,10 @@ def get_provider():
         "openai",
     ).lower()
 
-    provider_class = PROVIDERS.get(
-        provider_name
-    )
+    provider_class = PROVIDERS.get(provider_name)
 
     if provider_class is None:
-
-        supported = ", ".join(
-            PROVIDERS.keys()
-        )
+        supported = ", ".join(PROVIDERS.keys())
 
         raise ValueError(
             f"Unsupported AI provider: "
@@ -51,11 +52,44 @@ def get_provider():
 def create_analysis_plan(
     user_question: str,
     metadata: dict,
-) -> AnalysisPlanResponse:
+) -> AnalysisPlan:
+
+    # =====================================================
+    # 1. FAST DETERMINISTIC PLANNER
+    # =====================================================
+
+    fast_planner = FastPlanner()
+
+    fast_plan = fast_planner.create_plan(
+        question=user_question,
+        metadata=metadata,
+    )
+
+    if fast_plan is not None:
+        return fast_plan
+
+    # =====================================================
+    # 2. AI FALLBACK
+    # =====================================================
 
     provider = get_provider()
 
-    return provider.create_analysis_plan(
+    ai_plan = provider.create_analysis_plan(
         user_question=user_question,
         metadata=metadata,
     )
+
+    # =====================================================
+    # 3. INVALID AI PLAN
+    # =====================================================
+
+    if ai_plan.status == "invalid":
+        reason = ai_plan.reason or "The AI could not create a valid analysis plan."
+
+        raise ValueError(f"Invalid analysis request: {reason}")
+
+    # =====================================================
+    # 4. AI PLAN → COMMON DATA ENGINE PLAN
+    # =====================================================
+
+    return convert_to_analysis_plan(ai_plan)
