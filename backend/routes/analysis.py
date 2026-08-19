@@ -23,8 +23,8 @@ from ai.planner import (
     create_analysis_plan,
 )
 
-from ai.adapter import (
-    convert_to_analysis_plan,
+from ai.fast_planner import (
+    FastPlanner,
 )
 
 from data_engine.insight_engine import (
@@ -58,10 +58,13 @@ def analyze_dataset(
     timings = {}
 
     # =========================================
-    # 1. Validate user question
+    # 1. Validate question
     # =========================================
 
-    with measure("question_validation", timings):
+    with measure(
+        "question_validation",
+        timings,
+    ):
         question = request.question.strip()
 
         if not question:
@@ -74,73 +77,139 @@ def analyze_dataset(
     # 2. Load dataset
     # =========================================
 
-    with measure("dataset_loading", timings):
+    with measure(
+        "dataset_loading",
+        timings,
+    ):
         df = get_walmart_data()
 
     # =========================================
     # 3. Generate metadata
     # =========================================
 
-    with measure("metadata_generation", timings):
+    with measure(
+        "metadata_generation",
+        timings,
+    ):
         metadata = get_metadata(df)
 
     # =========================================
-    # 4. AI planning
+    # 4. FAST PLANNER
     # =========================================
 
+    plan = None
+
+    planner_type = None
+    planner_fallback = False
+
     try:
-        with measure("ai_planning", timings):
-            ai_plan = create_analysis_plan(
-                user_question=question,
+        with measure(
+            "fast_planning",
+            timings,
+        ):
+            fast_planner = FastPlanner()
+
+            plan = fast_planner.create_plan(
+                question=question,
                 metadata=metadata,
             )
 
-    except Exception as exc:
+    except Exception:
+        # Fast Planner failure should never
+        # break the complete request.
+
+        plan = None
+
+    # =========================================
+    # 5. CLAUDE FALLBACK
+    # =========================================
+
+    if plan is not None:
+        # -------------------------------------
+        # Fast Planner succeeded
+        # -------------------------------------
+
+        planner_type = "fast"
+
+        planner_fallback = False
+
+    else:
+        # -------------------------------------
+        # Fast Planner could not safely
+        # understand the question.
+        #
+        # Fall back to Claude.
+        # -------------------------------------
+
+        planner_type = "claude"
+
+        planner_fallback = True
+
+        try:
+            with measure(
+                "ai_planning",
+                timings,
+            ):
+                # IMPORTANT:
+                #
+                # create_analysis_plan()
+                # already returns AnalysisPlan.
+                #
+                # It does NOT return
+                # AnalysisPlanResponse anymore.
+
+                plan = create_analysis_plan(
+                    user_question=question,
+                    metadata=metadata,
+                )
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"AI planning failed: {exc}",
+            ) from exc
+
+    # =========================================
+    # 6. SAFETY CHECK
+    # =========================================
+
+    if plan is None:
         raise HTTPException(
             status_code=500,
-            detail=f"AI planning failed: {exc}",
-        ) from exc
+            detail=("Planner could not create an analysis plan."),
+        )
 
     # =========================================
-    # 5. Handle invalid AI request
+    # 7. VALIDATE FINAL PLAN
     # =========================================
-
-    if ai_plan.status == "invalid":
-        return {
-            "success": False,
-            "question": question,
-            "error": {
-                "type": "invalid_request",
-                "message": (
-                    ai_plan.reason or "The requested analysis cannot be performed."
-                ),
-            },
-            "ai_plan": ai_plan.model_dump(),
-            "performance": timings,
-        }
-
-    # =========================================
-    # 6. Convert AI plan
-    # =========================================
-
-    try:
-        with measure("plan_conversion", timings):
-            plan = convert_to_analysis_plan(
-                ai_plan,
-            )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    # =========================================
-    # 7. Validate plan
+    #
+    # BOTH planners reach this point.
+    #
+    # Fast:
+    #
+    # FastPlanner
+    #     ↓
+    # AnalysisPlan
+    #     ↓
+    # Validator
+    #
+    # Claude:
+    #
+    # Claude
+    #     ↓
+    # Adapter
+    #     ↓
+    # AnalysisPlan
+    #     ↓
+    # Validator
+    #
     # =========================================
 
     try:
-        with measure("plan_validation", timings):
+        with measure(
+            "plan_validation",
+            timings,
+        ):
             validate_plan(
                 df,
                 plan,
@@ -149,7 +218,7 @@ def analyze_dataset(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid analysis plan: {exc}",
+            detail=(f"Invalid analysis plan: {exc}"),
         ) from exc
 
     # =========================================
@@ -157,7 +226,10 @@ def analyze_dataset(
     # =========================================
 
     try:
-        with measure("data_execution", timings):
+        with measure(
+            "data_execution",
+            timings,
+        ):
             result = execute_plan(
                 df,
                 plan,
@@ -172,11 +244,11 @@ def analyze_dataset(
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Analysis execution failed: {exc}",
+            detail=(f"Analysis execution failed: {exc}"),
         ) from exc
 
     # =========================================
-    # 9. Build deterministic insight context
+    # 9. Deterministic insight context
     # =========================================
 
     metric_column = f"{plan.aggregation}_{plan.metric}"
@@ -192,7 +264,7 @@ def analyze_dataset(
         )
 
     # =========================================
-    # 10. Generate deterministic insights
+    # 10. Deterministic insights
     # =========================================
 
     insight_response = None
@@ -207,19 +279,14 @@ def analyze_dataset(
                 context=insight_context,
             )
 
-            # -------------------------------------
-            # Validate generated insights
-            # -------------------------------------
-
             validate_insights(
                 insight_response,
                 insight_context,
             )
 
     except Exception as exc:
-        # Insights are an enrichment layer.
-        # The underlying analysis should still
-        # succeed if insight generation fails.
+        # Insight failure must not break
+        # the actual analysis.
 
         insight_error = str(exc)
 
@@ -235,9 +302,6 @@ def analyze_dataset(
 
     visualization_title = None
 
-    if ai_plan.visualization is not None:
-        visualization_title = ai_plan.visualization.title
-
     try:
         with measure(
             "visualization",
@@ -245,7 +309,7 @@ def analyze_dataset(
         ):
             visualization_spec = create_visualization_spec(
                 result=result,
-                visualization_type=visualization_type,
+                visualization_type=(visualization_type),
                 title=visualization_title,
             )
 
@@ -256,22 +320,42 @@ def analyze_dataset(
         ) from exc
 
     # =========================================
-    # 12. Total request time
+    # 12. Total performance
     # =========================================
 
     timings["total"] = round(
-        sum(timings.values()),
+        sum(
+            value
+            for value in timings.values()
+            if isinstance(
+                value,
+                (int, float),
+            )
+        ),
         2,
     )
 
     # =========================================
-    # 13. Return
+    # 13. Return response
     # =========================================
 
     return {
         "success": True,
         "question": question,
+        # -------------------------------------
+        # Planner
+        # -------------------------------------
+        "planner": {
+            "type": planner_type,
+            "fallback": planner_fallback,
+        },
+        # -------------------------------------
+        # Analysis result
+        # -------------------------------------
         "data": analysis_result,
+        # -------------------------------------
+        # Insights
+        # -------------------------------------
         "insights": (
             insight_response.model_dump()
             if insight_response is not None
@@ -282,7 +366,13 @@ def analyze_dataset(
         ),
         "insight_source": "deterministic",
         "insight_error": insight_error,
+        # -------------------------------------
+        # Visualization
+        # -------------------------------------
         "visualization": visualization_spec,
+        # -------------------------------------
+        # Final AnalysisPlan
+        # -------------------------------------
         "plan": {
             "filters": [
                 {
@@ -296,8 +386,13 @@ def analyze_dataset(
             "metric": plan.metric,
             "aggregation": plan.aggregation,
             "sort": plan.sort,
+            "sort_by": plan.sort_by,
             "limit": plan.limit,
             "visualization": plan.visualization,
+            "time_granularity": (plan.time_granularity),
         },
+        # -------------------------------------
+        # Performance
+        # -------------------------------------
         "performance": timings,
     }
