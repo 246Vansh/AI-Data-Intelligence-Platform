@@ -1,4 +1,5 @@
 import os
+import json
 
 from dotenv import load_dotenv
 
@@ -8,6 +9,7 @@ from data_engine.metadata import get_metadata
 
 from ai.planner import create_analysis_plan
 
+from dataclasses import asdict
 
 load_dotenv()
 
@@ -32,9 +34,7 @@ def main():
 
     metadata = get_metadata(df)
 
-    question = (
-        "Show me the top 5 stores by average weekly sales during holidays."
-    )
+    question = "Show me the top 5 stores by average weekly sales during holidays."
 
     print()
     print("=" * 60)
@@ -66,8 +66,10 @@ def main():
     print("=" * 60)
 
     print(
-        plan.model_dump_json(
-            indent=2
+        json.dumps(
+            asdict(plan),
+            indent=2,
+            default=str,
         )
     )
 
