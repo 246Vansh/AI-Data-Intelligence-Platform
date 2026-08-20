@@ -23,11 +23,7 @@ def detect_column_role(
     # Known categorical / dimension patterns
     # -----------------------------------------
 
-    if (
-        "flag" in column_lower
-        or "id" in column_lower
-        or "store" in column_lower
-    ):
+    if "flag" in column_lower or "id" in column_lower or "store" in column_lower:
         return "dimension"
 
     # -----------------------------------------
@@ -35,10 +31,6 @@ def detect_column_role(
     # -----------------------------------------
 
     if pd.api.types.is_numeric_dtype(series):
-
-        if series.nunique() <= 10:
-            return "categorical"
-
         return "metric"
 
     # -----------------------------------------
@@ -72,7 +64,6 @@ def get_allowed_operations(
 ) -> list[str]:
 
     if role == "metric":
-
         return [
             "sum",
             "mean",
@@ -83,7 +74,6 @@ def get_allowed_operations(
         ]
 
     if role == "dimension":
-
         return [
             "group_by",
             "filter",
@@ -91,7 +81,6 @@ def get_allowed_operations(
         ]
 
     if role == "categorical":
-
         return [
             "group_by",
             "filter",
@@ -99,7 +88,6 @@ def get_allowed_operations(
         ]
 
     if role == "time":
-
         return [
             "group_by",
             "filter",
@@ -116,7 +104,6 @@ def get_metadata(
     columns = {}
 
     for column in df.columns:
-
         series = df[column]
 
         role = detect_column_role(
@@ -124,37 +111,16 @@ def get_metadata(
             column,
         )
 
-        data_type = detect_data_type(
-            series
-        )
+        data_type = detect_data_type(series)
 
         columns[column] = {
             "data_type": data_type,
-
             "role": role,
-
-            "allowed_operations": (
-                get_allowed_operations(role)
-            ),
-
-            "nullable": bool(
-                series.isna().any()
-            ),
-
-            "missing_count": int(
-                series.isna().sum()
-            ),
-
-            "unique_values": int(
-                series.nunique()
-            ),
-
-            "sample_values": (
-                series
-                .dropna()
-                .head(5)
-                .tolist()
-            ),
+            "allowed_operations": (get_allowed_operations(role)),
+            "nullable": bool(series.isna().any()),
+            "missing_count": int(series.isna().sum()),
+            "unique_values": int(series.nunique()),
+            "sample_values": (series.dropna().head(5).tolist()),
         }
 
     return {
