@@ -1,3 +1,6 @@
+from dataclasses import asdict
+import json
+
 from data_engine.loader import load_csv
 from data_engine.cleaner import clean_walmart_data
 from data_engine.metadata import get_metadata
@@ -19,9 +22,7 @@ def main():
 
     print("Loading dataset...")
 
-    df = load_csv(
-        INPUT_PATH
-    )
+    df = load_csv(INPUT_PATH)
 
     # =========================================
     # 2. CLEAN DATA
@@ -29,9 +30,7 @@ def main():
 
     print("Cleaning dataset...")
 
-    df = clean_walmart_data(
-        df
-    )
+    df = clean_walmart_data(df)
 
     # =========================================
     # 3. GENERATE METADATA
@@ -39,17 +38,13 @@ def main():
 
     print("Generating metadata...")
 
-    metadata = get_metadata(
-        df
-    )
+    metadata = get_metadata(df)
 
     # =========================================
     # 4. USER QUESTION
     # =========================================
 
-    question = (
-        "Show me monthly sales trends."
-    )
+    question = "Show me monthly sales trends."
 
     print()
     print("=" * 60)
@@ -73,8 +68,10 @@ def main():
     )
 
     print(
-        ai_plan.model_dump_json(
-            indent=2
+        json.dumps(
+            asdict(ai_plan),
+            indent=2,
+            default=str,
         )
     )
 
@@ -87,11 +84,7 @@ def main():
     print("CONVERTING AI PLAN")
     print("=" * 60)
 
-    analysis_plan = (
-        convert_to_analysis_plan(
-            ai_plan
-        )
-    )
+    analysis_plan = convert_to_analysis_plan(ai_plan)
 
     print(analysis_plan)
 
@@ -109,9 +102,7 @@ def main():
         analysis_plan,
     )
 
-    print(
-        "PLAN IS VALID."
-    )
+    print("PLAN IS VALID.")
 
     # =========================================
     # 8. EXECUTE PLAN
@@ -138,13 +129,9 @@ def main():
     print("PIPELINE COMPLETE")
     print("=" * 60)
 
-    print(
-        "AI → Adapter → Validator → Executor"
-    )
+    print("AI → Adapter → Validator → Executor")
 
-    print(
-        "SUCCESS"
-    )
+    print("SUCCESS")
 
 
 if __name__ == "__main__":
