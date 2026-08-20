@@ -2,13 +2,11 @@ import os
 
 from dotenv import load_dotenv
 
+from ai.adapter import convert_to_analysis_plan
 from data_engine.analysis_plan import AnalysisPlan
 
-from ai.fast_planner import FastPlanner
 
-from ai.adapter import (
-    convert_to_analysis_plan,
-)
+from ai.fast_planner import FastPlanner
 
 from ai.providers.openai_provider import (
     OpenAIProvider,

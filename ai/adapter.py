@@ -3,124 +3,114 @@ from data_engine.analysis_plan import (
     FilterCondition,
 )
 
-from ai.planner_models import (
-    AnalysisPlanResponse,
-)
-
-
-# -----------------------------------------
-# AI → Data Engine operator mapping
-# -----------------------------------------
-
-OPERATOR_MAP = {
-    "==": "=",
-    "=": "=",
-    "!=": "!=",
-    ">": ">",
-    ">=": ">=",
-    "<": "<",
-    "<=": "<=",
-}
-
-
-def normalize_operator(
-    operator: str,
-) -> str:
-
-    normalized = OPERATOR_MAP.get(
-        operator.strip()
-    )
-
-    if normalized is None:
-
-        raise ValueError(
-            f"Unsupported AI filter operator: "
-            f"{operator}"
-        )
-
-    return normalized
-
 
 def convert_to_analysis_plan(
-    ai_plan: AnalysisPlanResponse,
+    ai_plan,
 ) -> AnalysisPlan:
 
-    # -----------------------------------------
-    # Reject invalid AI plans
-    # -----------------------------------------
+    # -------------------------------------------------
+    # Validate AI response status
+    # -------------------------------------------------
 
-    if ai_plan.status == "invalid":
-
-        reason = (
-            ai_plan.reason
-            or "The AI could not create a valid "
-               "analysis plan."
+    if getattr(ai_plan, "status", None) == "invalid":
+        reason = getattr(
+            ai_plan,
+            "reason",
+            None,
         )
 
-        raise ValueError(
-            f"Invalid analysis request: {reason}"
-        )
+        raise ValueError(reason or "AI planner returned an invalid request.")
 
-    # -----------------------------------------
-    # Convert filters
-    # -----------------------------------------
+    # -------------------------------------------------
+    # Normalize filters
+    # -------------------------------------------------
 
     filters = []
 
-    for filter_plan in ai_plan.filters:
+    for condition in getattr(
+        ai_plan,
+        "filters",
+        [],
+    ):
+        operator = condition.operator
 
-        operator = normalize_operator(
-            filter_plan.operator
-        )
+        # AI may use == while the Data Engine
+        # uses = as its canonical equality operator.
+        if operator == "==":
+            operator = "="
 
         filters.append(
             FilterCondition(
-                column=filter_plan.column,
+                column=condition.column,
                 operator=operator,
-                value=filter_plan.value,
+                value=condition.value,
             )
         )
 
-    # -----------------------------------------
-    # Convert visualization
-    # -----------------------------------------
+    # -------------------------------------------------
+    # Visualization
+    # -------------------------------------------------
 
     visualization = None
 
-    if ai_plan.visualization is not None:
+    ai_visualization = getattr(
+        ai_plan,
+        "visualization",
+        None,
+    )
 
-        visualization = (
-            ai_plan.visualization.type
-        )
+    if ai_visualization is not None:
+        if hasattr(
+            ai_visualization,
+            "type",
+        ):
+            visualization = ai_visualization.type
 
-    # -----------------------------------------
-    # Create engine AnalysisPlan
-    # -----------------------------------------
+        else:
+            visualization = ai_visualization
+
+    # -------------------------------------------------
+    # Build canonical Data Engine plan
+    # -------------------------------------------------
 
     return AnalysisPlan(
         filters=filters,
-
-        group_by=ai_plan.group_by,
-
-        metric=ai_plan.metric,
-
-        aggregation=(
-            ai_plan.aggregation
-            or "sum"
+        group_by=list(
+            getattr(
+                ai_plan,
+                "group_by",
+                [],
+            )
         ),
-
-        sort=ai_plan.sort,
-        sort_by=ai_plan.sort_by,
-
-        limit=ai_plan.limit,
-
+        metric=getattr(
+            ai_plan,
+            "metric",
+            None,
+        ),
+        aggregation=getattr(
+            ai_plan,
+            "aggregation",
+            "sum",
+        ),
+        sort=getattr(
+            ai_plan,
+            "sort",
+            "desc",
+        ),
+        sort_by=getattr(
+            ai_plan,
+            "sort_by",
+            "metric",
+        ),
+        limit=getattr(
+            ai_plan,
+            "limit",
+            None,
+        ),
         visualization=visualization,
-
-        # -------------------------------------
-        # Time analysis
-        # -------------------------------------
-
-        time_granularity=(
-            ai_plan.time_granularity
+        time_granularity=getattr(
+            ai_plan,
+            "time_granularity",
+            None,
         ),
     )
