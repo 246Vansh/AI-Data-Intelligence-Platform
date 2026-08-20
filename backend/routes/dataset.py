@@ -25,15 +25,15 @@ def get_dataset_preview():
 
     df = get_walmart_data()
 
-    preview = df.head(10)
+    # Get one representative row from each store
+    preview = df.drop_duplicates(subset=["Store"]).head(10)
 
     return {
         "columns": preview.columns.tolist(),
-        "rows": preview.to_dict(
-            orient="records"
-        ),
+        "rows": preview.to_dict(orient="records"),
     }
-    
+
+
 @router.get("/metadata")
 def get_dataset_metadata():
 
