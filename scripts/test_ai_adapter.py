@@ -1,5 +1,7 @@
 import os
 
+from dataclasses import asdict
+import json
 from dotenv import load_dotenv
 
 from data_engine.loader import load_csv
@@ -28,7 +30,7 @@ def main():
 
     metadata = get_metadata(df)
 
-    question = ("Show me the top 5 stores by revenue.")
+    question = "Show me the top 5 stores by total weekly sales."
 
     print()
     print("=" * 60)
@@ -48,8 +50,10 @@ def main():
     )
 
     print(
-        ai_plan.model_dump_json(
-            indent=2
+        json.dumps(
+            asdict(ai_plan),
+            indent=2,
+            default=str,
         )
     )
 
@@ -58,9 +62,7 @@ def main():
     print("CONVERTING AI PLAN")
     print("=" * 60)
 
-    analysis_plan = convert_to_analysis_plan(
-        ai_plan
-    )
+    analysis_plan = convert_to_analysis_plan(ai_plan)
 
     print(analysis_plan)
 
@@ -70,7 +72,7 @@ def main():
     print("=" * 60)
 
     print("AI plan successfully converted.")
-    
+
 
 if __name__ == "__main__":
     main()
