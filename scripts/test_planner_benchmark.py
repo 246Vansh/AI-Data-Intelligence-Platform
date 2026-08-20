@@ -5,7 +5,7 @@ from backend.dependencies import get_walmart_data
 from data_engine.metadata import get_metadata
 
 from ai.fast_planner import FastPlanner
-from ai.planner import create_analysis_plan
+from ai.planner import create_analysis_plan, get_provider
 
 
 # =========================================================
@@ -15,12 +15,12 @@ from ai.planner import create_analysis_plan
 RUNS = 2
 
 QUESTIONS = [
-    "Show total revenue",
-    "Show average revenue",
-    "Show maximum revenue",
-    "Show minimum revenue",
-    "Show the top 5 regions by revenue",
-    "Show the bottom 3 regions by average revenue",
+    "Show total weekly sales",
+    "Show average weekly sales",
+    "Show maximum weekly sales",
+    "Show minimum weekly sales",
+    "Show the top 5 stores by total weekly sales",
+    "Show the bottom 3 stores by average weekly sales",
 ]
 
 
@@ -52,11 +52,11 @@ def benchmark_fast_planner(
 
 
 # =========================================================
-# AI PLANNER BENCHMARK
+# PLANNER ROUTER BENCHMARK
 # =========================================================
 
 
-def benchmark_ai_planner(
+def benchmark_planner_router(
     question,
     metadata,
 ):
@@ -66,6 +66,33 @@ def benchmark_ai_planner(
         start = time.perf_counter()
 
         create_analysis_plan(
+            user_question=question,
+            metadata=metadata,
+        )
+
+        elapsed = (time.perf_counter() - start) * 1000
+
+        timings.append(elapsed)
+
+    return timings
+
+
+# =========================================================
+# DIRECT CLAUDE PLANNER BENCHMARK
+# =========================================================
+
+
+def benchmark_claude_planner(
+    provider,
+    question,
+    metadata,
+):
+    timings = []
+
+    for _ in range(RUNS):
+        start = time.perf_counter()
+
+        provider.create_analysis_plan(
             user_question=question,
             metadata=metadata,
         )
@@ -94,11 +121,8 @@ def print_statistics(
     print("-" * 45)
 
     print(f"runs    : {len(timings)}")
-
     print(f"average : {average:.2f} ms")
-
     print(f"minimum : {minimum:.2f} ms")
-
     print(f"maximum : {maximum:.2f} ms")
 
     return average
@@ -124,7 +148,6 @@ def main():
     df = get_walmart_data()
 
     print(f"Dataset rows    : {len(df)}")
-
     print(f"Dataset columns : {len(df.columns)}")
 
     # -----------------------------------------------------
@@ -136,17 +159,19 @@ def main():
     metadata = get_metadata(df)
 
     # -----------------------------------------------------
-    # Create Fast Planner
+    # Create planners
     # -----------------------------------------------------
 
     fast_planner = FastPlanner()
+    provider = get_provider()
 
     # -----------------------------------------------------
     # Results
     # -----------------------------------------------------
 
     overall_fast = []
-    overall_ai = []
+    overall_router = []
+    overall_claude = []
 
     # =====================================================
     # QUESTION LOOP
@@ -176,19 +201,36 @@ def main():
         )
 
         # =================================================
-        # AI PLANNER
+        # ROUTER
         # =================================================
 
-        print("\nCalling Claude...")
+        print("\nCalling Planner Router...")
 
-        ai_timings = benchmark_ai_planner(
+        router_timings = benchmark_planner_router(
             question=question,
             metadata=metadata,
         )
 
-        ai_average = print_statistics(
-            "AI PLANNER",
-            ai_timings,
+        router_average = print_statistics(
+            "PLANNER ROUTER",
+            router_timings,
+        )
+
+        # =================================================
+        # DIRECT CLAUDE
+        # =================================================
+
+        print("\nCalling Claude directly...")
+
+        claude_timings = benchmark_claude_planner(
+            provider=provider,
+            question=question,
+            metadata=metadata,
+        )
+
+        claude_average = print_statistics(
+            "DIRECT CLAUDE PLANNER",
+            claude_timings,
         )
 
         # -------------------------------------------------
@@ -196,17 +238,26 @@ def main():
         # -------------------------------------------------
 
         overall_fast.append(fast_average)
-
-        overall_ai.append(ai_average)
+        overall_router.append(router_average)
+        overall_claude.append(claude_average)
 
         # =================================================
-        # SPEEDUP
+        # ROUTER vs FAST
         # =================================================
 
         if fast_average > 0:
-            speedup = ai_average / fast_average
+            router_ratio = router_average / fast_average
 
-            print(f"\nSPEEDUP: {speedup:.2f}x")
+            print(f"\nROUTER / FAST: {router_ratio:.2f}x")
+
+        # =================================================
+        # CLAUDE vs FAST
+        # =================================================
+
+        if fast_average > 0:
+            claude_ratio = claude_average / fast_average
+
+            print(f"CLAUDE / FAST: {claude_ratio:.2f}x")
 
     # =====================================================
     # OVERALL RESULTS
@@ -219,15 +270,28 @@ def main():
 
     fast_overall_average = statistics.mean(overall_fast)
 
-    ai_overall_average = statistics.mean(overall_ai)
+    router_overall_average = statistics.mean(overall_router)
 
-    overall_speedup = ai_overall_average / fast_overall_average
+    claude_overall_average = statistics.mean(overall_claude)
 
-    print(f"\nFast Planner average : {fast_overall_average:.2f} ms")
+    print(f"\nFast Planner average    : {fast_overall_average:.2f} ms")
 
-    print(f"AI Planner average   : {ai_overall_average:.2f} ms")
+    print(f"Planner Router average  : {router_overall_average:.2f} ms")
 
-    print(f"Overall speedup      : {overall_speedup:.2f}x")
+    print(f"Direct Claude average   : {claude_overall_average:.2f} ms")
+
+    # -----------------------------------------------------
+    # Performance ratios
+    # -----------------------------------------------------
+
+    if fast_overall_average > 0:
+        router_ratio = router_overall_average / fast_overall_average
+
+        claude_ratio = claude_overall_average / fast_overall_average
+
+        print(f"\nRouter / Fast           : {router_ratio:.2f}x")
+
+        print(f"Claude / Fast           : {claude_ratio:.2f}x")
 
     # =====================================================
     # ARCHITECTURE
@@ -238,17 +302,26 @@ def main():
     print("ARCHITECTURE RESULT")
     print("=" * 60)
 
-    print("\nDeterministic questions\n→ Fast Planner\n→ Plan Validator\n→ Data Engine")
+    print(
+        "\nDeterministic questions"
+        "\n→ Planner Router"
+        "\n→ Fast Planner"
+        "\n→ Plan Validator"
+        "\n→ Data Engine"
+    )
 
     print(
         "\nComplex / ambiguous questions"
+        "\n→ Planner Router"
         "\n→ Claude Planner"
         "\n→ Plan Adapter"
         "\n→ Plan Validator"
         "\n→ Data Engine"
     )
 
-    print("\nThe validator remains mandatory for both paths.")
+    print("\nDirect Claude benchmark\n→ Claude Planner\n→ Provider")
+
+    print("\nThe validator remains mandatory for the actual analysis pipeline.")
 
     print("\n" + "=" * 60)
 
