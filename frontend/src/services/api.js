@@ -12,6 +12,25 @@ const api = axios.create({
 // DATASET
 // =========================================================
 
+export async function uploadDataset(file) {
+    const formData = new FormData();
+
+    formData.append("file", file);
+
+    const response = await api.post(
+        "/dataset/upload",
+        formData,
+        {
+            headers: {
+                "Content-Type": "multipart/form-data",
+            },
+        },
+    );
+
+    return response.data;
+}
+
+
 export async function getDatasetProfile() {
     const response = await api.get("/dataset/profile");
 
@@ -28,6 +47,13 @@ export async function getDatasetPreview() {
 
 export async function getDatasetMetadata() {
     const response = await api.get("/dataset/metadata");
+
+    return response.data;
+}
+
+
+export async function getDatasetQuality() {
+    const response = await api.get("/dataset/quality");
 
     return response.data;
 }
