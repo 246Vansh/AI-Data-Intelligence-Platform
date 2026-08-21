@@ -4,7 +4,53 @@ import { getDatasetProfile } from "../services/api";
 
 const profile = ref(null);
 const loading = ref(true);
+const refreshing = ref(false);
 const error = ref(null);
+
+async function loadProfile(options = {}) {
+    const isRefresh = options.refresh === true;
+
+    try {
+        if (isRefresh) {
+            refreshing.value = true;
+        } else {
+            loading.value = true;
+        }
+
+        error.value = null;
+
+        profile.value = await getDatasetProfile();
+    } catch (err) {
+        console.error("Dataset profile error:", err);
+
+        profile.value = null;
+
+        error.value =
+            err?.response?.data?.detail ||
+            err?.response?.data?.message ||
+            "Unable to load dataset statistics.";
+    } finally {
+        loading.value = false;
+        refreshing.value = false;
+    }
+}
+
+const hasProfile = computed(() => Boolean(profile.value));
+
+const rowCount = computed(() => {
+    const value = Number(profile.value?.rows);
+    return Number.isFinite(value) ? value.toLocaleString() : "—";
+});
+
+const columnCount = computed(() => {
+    const value = Number(profile.value?.columns);
+    return Number.isFinite(value) ? value.toLocaleString() : "—";
+});
+
+const duplicateRows = computed(() => {
+    const value = Number(profile.value?.duplicate_rows);
+    return Number.isFinite(value) ? value.toLocaleString() : "—";
+});
 
 const memoryUsage = computed(() => {
     const bytes = Number(profile.value?.memory_usage_bytes);
@@ -16,185 +62,184 @@ const memoryUsage = computed(() => {
     return (bytes / 1024 / 1024).toFixed(2);
 });
 
-const rowCount = computed(() => {
-    const value = Number(profile.value?.rows);
+const duplicatePercentage = computed(() => {
+    const rows = Number(profile.value?.rows);
+    const duplicates = Number(profile.value?.duplicate_rows);
 
-    return Number.isFinite(value) ? value.toLocaleString() : "—";
-});
-
-const columnCount = computed(() => {
-    const value = Number(profile.value?.columns);
-
-    return Number.isFinite(value) ? value.toLocaleString() : "—";
-});
-
-const duplicateRows = computed(() => {
-    const value = Number(profile.value?.duplicate_rows);
-
-    return Number.isFinite(value) ? value.toLocaleString() : "—";
-});
-
-const hasProfile = computed(() => {
-    return Boolean(profile.value);
-});
-
-async function loadProfile() {
-    loading.value = true;
-    error.value = null;
-
-    try {
-        profile.value = await getDatasetProfile();
-    } catch (err) {
-        console.error("Failed to load dataset profile:", err);
-
-        profile.value = null;
-        error.value =
-            err?.response?.data?.detail ||
-            err?.response?.data?.message ||
-            "Unable to load dataset statistics.";
-    } finally {
-        loading.value = false;
+    if (
+        !Number.isFinite(rows) ||
+        !Number.isFinite(duplicates) ||
+        rows <= 0
+    ) {
+        return null;
     }
+
+    return Math.min(
+        Math.max((duplicates / rows) * 100, 0),
+        100,
+    ).toFixed(1);
+});
+
+const duplicateStatus = computed(() => {
+    const percentage = Number(duplicatePercentage.value);
+
+    if (!Number.isFinite(percentage) || percentage === 0) {
+        return {
+            label: "Clean",
+            classes: "bg-emerald-50 text-emerald-700",
+        };
+    }
+
+    if (percentage <= 5) {
+        return {
+            label: "Low",
+            classes: "bg-amber-50 text-amber-700",
+        };
+    }
+
+    return {
+        label: "Review",
+        classes: "bg-rose-50 text-rose-700",
+    };
+});
+
+function formatNumber(value) {
+    const number = Number(value);
+
+    if (!Number.isFinite(number)) {
+        return value ?? "—";
+    }
+
+    return new Intl.NumberFormat("en-US").format(number);
 }
 
-onMounted(loadProfile);
+onMounted(() => {
+    loadProfile();
+});
 </script>
 
 <template>
-    <section class="w-full">
-        <!-- Section Header -->
-        <div
-            class="mb-5 flex items-end justify-between gap-4 max-[600px]:items-start"
-        >
-            <div class="flex items-center gap-3">
+    <section class="mt-4 w-full">
+        <!-- =========================================================
+             HEADER
+        ========================================================== -->
+
+        <div class="mb-4 flex items-center justify-between gap-4 max-[600px]:items-start">
+            <div class="flex min-w-0 items-center gap-3">
                 <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#ede9fe] to-[#e0e7ff] text-[#6d28d9]"
-                >
-                    <svg
-                        class="h-[21px] w-[21px]"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
-                        <rect
-                            x="3"
-                            y="3"
-                            width="18"
-                            height="18"
-                            rx="3"
-                        />
+                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 via-indigo-500 to-blue-500 text-white shadow-[0_6px_16px_rgba(99,102,241,0.20)]">
+                    <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="1.9">
+                        <rect x="3" y="3" width="18" height="18" rx="3" />
                         <path d="M8 8h8M8 12h8M8 16h5" />
                     </svg>
                 </div>
 
-                <div>
-                    <h2
-                        class="m-0 text-xl font-bold tracking-[-0.3px] text-[#172033]"
-                    >
-                        Dataset Overview
-                    </h2>
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h2 class="text-[17px] font-bold tracking-tight text-slate-900">
+                            Dataset Overview
+                        </h2>
 
-                    <p class="mt-1 text-[13px] text-[#7a8496]">
+                        <span v-if="hasProfile && !loading"
+                            class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
+                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+
+                            Ready
+                        </span>
+                    </div>
+
+                    <p class="mt-0.5 text-[11px] text-slate-400">
                         Summary of your loaded dataset
                     </p>
                 </div>
             </div>
 
-            <div
-                v-if="hasProfile && !loading"
-                class="hidden items-center gap-2 rounded-full bg-[#ecfdf5] px-3 py-2 text-[11px] font-semibold text-[#047857] min-[601px]:flex"
-            >
-                <span
-                    class="h-[7px] w-[7px] rounded-full bg-[#10b981] shadow-[0_0_0_3px_rgba(16,185,129,0.12)]"
-                ></span>
+            <!-- Refresh -->
 
-                Dataset analyzed
-            </div>
+            <button v-if="hasProfile && !loading" type="button" :disabled="refreshing"
+                class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 shadow-sm transition-all duration-200 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-600 hover:shadow disabled:cursor-not-allowed disabled:opacity-60"
+                @click="loadProfile({ refresh: true })">
+                <svg class="h-3 w-3" :class="{
+                    'animate-spin': refreshing,
+                }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M20 11a8.1 8.1 0 0 0-14.9-4" />
+                    <path d="M4 4v5h5" />
+                    <path d="M4 13a8.1 8.1 0 0 0 14.9 4" />
+                    <path d="M20 20v-5h-5" />
+                </svg>
+
+                {{ refreshing ? "Refreshing..." : "Refresh" }}
+            </button>
         </div>
 
-        <!-- Loading State -->
-        <div
-            v-if="loading"
-            class="grid grid-cols-1 gap-4 min-[601px]:grid-cols-2 min-[1101px]:grid-cols-4"
-        >
-            <article
-                v-for="index in 4"
-                :key="index"
-                class="min-h-[138px] rounded-[18px] border border-[#e8eaf1] bg-white p-6"
-            >
-                <div class="flex items-start gap-4">
-                    <div
-                        class="h-[52px] w-[52px] shrink-0 animate-pulse rounded-[15px] bg-[#f2f3f7]"
-                    ></div>
+        <!-- =========================================================
+             LOADING
+        ========================================================== -->
+
+        <div v-if="loading" class="grid grid-cols-2 gap-3 xl:grid-cols-4">
+            <article v-for="index in 4" :key="index"
+                class="rounded-xl border border-slate-100 bg-white p-4 shadow-[0_3px_12px_rgba(15,23,42,0.035)]">
+                <div class="flex items-center gap-3">
+                    <div class="h-10 w-10 animate-pulse rounded-xl bg-slate-100"></div>
 
                     <div class="min-w-0 flex-1">
-                        <div
-                            class="h-4 w-20 animate-pulse rounded bg-[#f2f3f7]"
-                        ></div>
+                        <div class="h-2.5 w-14 animate-pulse rounded bg-slate-100"></div>
 
-                        <div
-                            class="mt-4 h-8 w-24 animate-pulse rounded bg-[#f2f3f7]"
-                        ></div>
-
-                        <div
-                            class="mt-3 h-3 w-28 animate-pulse rounded bg-[#f2f3f7]"
-                        ></div>
+                        <div class="mt-2 h-5 w-20 animate-pulse rounded bg-slate-100"></div>
                     </div>
                 </div>
             </article>
         </div>
 
-        <!-- Error State -->
-        <div
-            v-else-if="error"
-            class="flex items-center gap-4 rounded-[18px] border border-[#fecaca] bg-[#fffafa] px-6 py-5"
-        >
+        <!-- =========================================================
+             ERROR
+        ========================================================== -->
+
+        <div v-else-if="error"
+            class="flex items-center gap-3 rounded-xl border border-rose-100 bg-gradient-to-r from-rose-50 to-white px-4 py-3 max-[600px]:items-start">
             <div
-                class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#fee2e2] text-sm font-bold text-[#dc2626]"
-            >
+                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-rose-100 text-xs font-bold text-rose-600">
                 !
             </div>
 
             <div class="min-w-0 flex-1">
-                <strong class="block text-sm font-semibold text-[#172033]">
+                <strong class="block text-[11px] font-bold text-slate-900">
                     Unable to load dataset overview
                 </strong>
 
-                <p class="mt-1 text-[13px] leading-5 text-[#667085]">
+                <p class="mt-0.5 text-[10px] leading-4 text-slate-500">
                     {{ error }}
                 </p>
             </div>
 
-            <button
-                type="button"
-                class="shrink-0 rounded-lg bg-[#7c3aed] px-3 py-2 text-xs font-semibold text-white transition-all duration-200 hover:bg-[#6d28d9] hover:shadow-[0_5px_14px_rgba(124,58,237,0.22)] focus:outline-none focus:ring-2 focus:ring-[#c4b5fd] focus:ring-offset-2"
-                @click="loadProfile"
-            >
+            <button type="button"
+                class="shrink-0 rounded-lg bg-violet-600 px-2.5 py-1.5 text-[10px] font-semibold text-white shadow-sm transition hover:bg-violet-700"
+                @click="loadProfile()">
                 Retry
             </button>
         </div>
 
-        <!-- Dataset Statistics -->
-        <div
-            v-else-if="profile"
-            class="grid grid-cols-1 gap-5 min-[601px]:grid-cols-2 min-[1101px]:grid-cols-4"
-        >
-            <!-- Rows -->
+        <!-- =========================================================
+             STATISTICS
+        ========================================================== -->
+
+        <div v-else-if="profile" class="grid grid-cols-2 gap-3 xl:grid-cols-4">
+            <!-- =====================================================
+                 ROWS
+            ====================================================== -->
+
             <article
-                class="group rounded-[18px] border border-[#e8eaf1] bg-white p-6 shadow-[0_4px_12px_rgba(15,23,42,0.03),0_12px_28px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-[3px] hover:border-[#ddd6fe] hover:shadow-[0_8px_20px_rgba(15,23,42,0.06),0_18px_35px_rgba(15,23,42,0.07)]"
-            >
-                <div class="flex items-start gap-4">
+                class="group relative overflow-hidden rounded-xl border border-violet-100 bg-gradient-to-br from-violet-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(124,58,237,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(124,58,237,0.10)]">
+                <div
+                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-violet-100/50 blur-xl transition group-hover:bg-violet-200/60">
+                </div>
+
+                <div class="relative flex items-center gap-3">
                     <div
-                        class="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-[15px] bg-[#f1edff] text-[#6d28d9]"
-                    >
-                        <svg
-                            class="h-[25px] w-[25px]"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                        >
+                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
+                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.9">
                             <path d="M7 3h10l4 4v14H7z" />
                             <path d="M7 7h14" />
                             <path d="M11 3v4" />
@@ -203,167 +248,134 @@ onMounted(loadProfile);
                     </div>
 
                     <div class="min-w-0">
-                        <span
-                            class="block text-sm font-semibold text-[#667085]"
-                        >
+                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-violet-400">
                             Rows
                         </span>
 
-                        <strong
-                            class="mt-1 block text-[30px] font-bold leading-tight tracking-[-0.8px] text-[#172033] max-[600px]:text-[27px]"
-                        >
+                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
                             {{ rowCount }}
                         </strong>
 
-                        <span class="mt-2 block text-xs text-[#98a2b3]">
+                        <span class="text-[9px] text-slate-400">
                             Total records
                         </span>
                     </div>
                 </div>
             </article>
 
-            <!-- Columns -->
+            <!-- =====================================================
+                 COLUMNS
+            ====================================================== -->
+
             <article
-                class="group rounded-[18px] border border-[#e8eaf1] bg-white p-6 shadow-[0_4px_12px_rgba(15,23,42,0.03),0_12px_28px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-[3px] hover:border-[#bfdbfe] hover:shadow-[0_8px_20px_rgba(15,23,42,0.06),0_18px_35px_rgba(15,23,42,0.07)]"
-            >
-                <div class="flex items-start gap-4">
+                class="group relative overflow-hidden rounded-xl border border-blue-100 bg-gradient-to-br from-blue-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(59,130,246,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(59,130,246,0.10)]">
+                <div
+                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-blue-100/50 blur-xl transition group-hover:bg-blue-200/60">
+                </div>
+
+                <div class="relative flex items-center gap-3">
                     <div
-                        class="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-[15px] bg-[#eff6ff] text-[#2563eb]"
-                    >
-                        <svg
-                            class="h-[25px] w-[25px]"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                        >
-                            <rect
-                                x="3"
-                                y="4"
-                                width="18"
-                                height="16"
-                                rx="2"
-                            />
+                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.9">
+                            <rect x="3" y="4" width="18" height="16" rx="2" />
                             <path d="M3 10h18" />
                             <path d="M9 10v10" />
                         </svg>
                     </div>
 
                     <div class="min-w-0">
-                        <span
-                            class="block text-sm font-semibold text-[#667085]"
-                        >
+                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-blue-400">
                             Columns
                         </span>
 
-                        <strong
-                            class="mt-1 block text-[30px] font-bold leading-tight tracking-[-0.8px] text-[#172033] max-[600px]:text-[27px]"
-                        >
+                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
                             {{ columnCount }}
                         </strong>
 
-                        <span class="mt-2 block text-xs text-[#98a2b3]">
+                        <span class="text-[9px] text-slate-400">
                             Total features
                         </span>
                     </div>
                 </div>
             </article>
 
-            <!-- Duplicates -->
+            <!-- =====================================================
+                 DUPLICATES
+            ====================================================== -->
+
             <article
-                class="group rounded-[18px] border border-[#e8eaf1] bg-white p-6 shadow-[0_4px_12px_rgba(15,23,42,0.03),0_12px_28px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-[3px] hover:border-[#a7f3d0] hover:shadow-[0_8px_20px_rgba(15,23,42,0.06),0_18px_35px_rgba(15,23,42,0.07)]"
-            >
-                <div class="flex items-start gap-4">
+                class="group relative overflow-hidden rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(16,185,129,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(16,185,129,0.10)]">
+                <div
+                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-emerald-100/50 blur-xl transition group-hover:bg-emerald-200/60">
+                </div>
+
+                <div class="relative flex items-center gap-3">
                     <div
-                        class="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-[15px] bg-[#ecfdf5] text-[#059669]"
-                    >
-                        <svg
-                            class="h-[25px] w-[25px]"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                        >
-                            <path
-                                d="M8 8h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H11a3 3 0 0 1-3-3z"
-                            />
-                            <path
-                                d="M16 8V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3h2"
-                            />
+                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.9">
+                            <path d="M8 8h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H11a3 3 0 0 1-3-3z" />
+                            <path d="M16 8V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3h2" />
                         </svg>
                     </div>
 
                     <div class="min-w-0">
-                        <span
-                            class="block text-sm font-semibold text-[#667085]"
-                        >
+                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-emerald-500">
                             Duplicates
                         </span>
 
-                        <strong
-                            class="mt-1 block text-[30px] font-bold leading-tight tracking-[-0.8px] text-[#172033] max-[600px]:text-[27px]"
-                        >
+                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
                             {{ duplicateRows }}
                         </strong>
 
-                        <span class="mt-2 block text-xs text-[#98a2b3]">
+                        <span v-if="duplicatePercentage !== null" class="text-[9px] text-slate-400">
+                            {{ duplicatePercentage }}% of records
+                        </span>
+
+                        <span v-else class="text-[9px] text-slate-400">
                             Duplicate rows
                         </span>
                     </div>
                 </div>
             </article>
 
-            <!-- Memory -->
+            <!-- =====================================================
+                 MEMORY
+            ====================================================== -->
+
             <article
-                class="group rounded-[18px] border border-[#e8eaf1] bg-white p-6 shadow-[0_4px_12px_rgba(15,23,42,0.03),0_12px_28px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-[3px] hover:border-[#fed7aa] hover:shadow-[0_8px_20px_rgba(15,23,42,0.06),0_18px_35px_rgba(15,23,42,0.07)]"
-            >
-                <div class="flex items-start gap-4">
+                class="group relative overflow-hidden rounded-xl border border-orange-100 bg-gradient-to-br from-orange-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(249,115,22,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(249,115,22,0.10)]">
+                <div
+                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-orange-100/50 blur-xl transition group-hover:bg-orange-200/60">
+                </div>
+
+                <div class="relative flex items-center gap-3">
                     <div
-                        class="flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-[15px] bg-[#fff7ed] text-[#ea580c]"
-                    >
-                        <svg
-                            class="h-[25px] w-[25px]"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                        >
-                            <rect
-                                x="6"
-                                y="6"
-                                width="12"
-                                height="12"
-                                rx="2"
-                            />
-                            <path
-                                d="M9 1v5M15 1v5M9 18v5M15 18v5"
-                            />
-                            <path
-                                d="M1 9h5M1 15h5M18 9h5M18 15h5"
-                            />
+                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
+                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.9">
+                            <rect x="6" y="6" width="12" height="12" rx="2" />
+                            <path d="M9 1v5M15 1v5M9 18v5M15 18v5" />
+                            <path d="M1 9h5M1 15h5M18 9h5M18 15h5" />
                         </svg>
                     </div>
 
                     <div class="min-w-0">
-                        <span
-                            class="block text-sm font-semibold text-[#667085]"
-                        >
+                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-orange-500">
                             Memory
                         </span>
 
                         <strong
-                            class="mt-1 block text-[30px] font-bold leading-tight tracking-[-0.8px] text-[#172033] max-[600px]:text-[27px]"
-                        >
+                            class="mt-0.5 flex items-baseline gap-1 truncate text-[21px] font-bold tracking-tight text-slate-900">
                             {{ memoryUsage }}
 
-                            <small
-                                class="ml-1 text-base font-semibold tracking-normal text-[#667085]"
-                            >
+                            <small class="text-[10px] font-semibold text-slate-500">
                                 MB
                             </small>
                         </strong>
 
-                        <span class="mt-2 block text-xs text-[#98a2b3]">
+                        <span class="text-[9px] text-slate-400">
                             In memory
                         </span>
                     </div>

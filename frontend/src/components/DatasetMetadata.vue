@@ -2,11 +2,14 @@
 import { computed, onMounted, ref } from "vue";
 import { getDatasetMetadata } from "../services/api";
 
+const emit = defineEmits(["question-selected"]);
+
 const metadata = ref(null);
 const loading = ref(true);
 const refreshing = ref(false);
 const error = ref(null);
 const searchQuery = ref("");
+const copiedQuestion = ref(null);
 
 async function loadMetadata(options = {}) {
     const isRefresh = options.refresh === true;
@@ -19,7 +22,6 @@ async function loadMetadata(options = {}) {
         }
 
         error.value = null;
-
         metadata.value = await getDatasetMetadata();
     } catch (err) {
         console.error("Dataset metadata error:", err);
@@ -54,21 +56,16 @@ const filteredColumns = computed(() => {
         return columns.value;
     }
 
-    return columns.value.filter((column) => {
-        return [
-            column.name,
-            column.role,
-            column.data_type,
-        ].some((value) =>
+    return columns.value.filter((column) =>
+        [column.name, column.role, column.data_type].some((value) =>
             String(value ?? "")
                 .toLowerCase()
                 .includes(query),
-        );
-    });
+        ),
+    );
 });
 
 const columnCount = computed(() => columns.value.length);
-
 const visibleColumnCount = computed(() => filteredColumns.value.length);
 
 const roleSummary = computed(() => {
@@ -76,28 +73,226 @@ const roleSummary = computed(() => {
 
     columns.value.forEach((column) => {
         const role = column.role || "unknown";
-
         summary[role] = (summary[role] || 0) + 1;
     });
 
     return summary;
 });
 
-const totalMissingValues = computed(() => {
-    return columns.value.reduce((total, column) => {
+const numericColumns = computed(() =>
+    columns.value.filter((column) => {
+        const role = String(column.role || "").toLowerCase();
+        const type = String(column.data_type || "").toLowerCase();
+
+        return (
+            role.includes("metric") ||
+            role.includes("numeric") ||
+            type.includes("int") ||
+            type.includes("float") ||
+            type.includes("double") ||
+            type.includes("decimal") ||
+            type.includes("number")
+        );
+    }),
+);
+
+const dimensionColumns = computed(() =>
+    columns.value.filter((column) => {
+        const role = String(column.role || "").toLowerCase();
+
+        return (
+            role.includes("dimension") ||
+            role.includes("categor")
+        );
+    }),
+);
+
+const dateColumns = computed(() =>
+    columns.value.filter((column) => {
+        const role = String(column.role || "").toLowerCase();
+        const type = String(column.data_type || "").toLowerCase();
+
+        return (
+            role.includes("date") ||
+            role.includes("time") ||
+            type.includes("date") ||
+            type.includes("time")
+        );
+    }),
+);
+
+const totalMissingValues = computed(() =>
+    columns.value.reduce((total, column) => {
         const value = Number(column.missing_count);
-
         return total + (Number.isFinite(value) ? value : 0);
-    }, 0);
-});
+    }, 0),
+);
 
-const totalUniqueValues = computed(() => {
-    return columns.value.reduce((total, column) => {
+const totalUniqueValues = computed(() =>
+    columns.value.reduce((total, column) => {
         const value = Number(column.unique_values);
-
         return total + (Number.isFinite(value) ? value : 0);
-    }, 0);
+    }, 0),
+);
+
+const backendQuestions = computed(() => {
+    const candidates = [
+        metadata.value?.example_questions,
+        metadata.value?.suggested_questions,
+        metadata.value?.sample_questions,
+    ];
+
+    for (const candidate of candidates) {
+        if (!Array.isArray(candidate)) {
+            continue;
+        }
+
+        const questions = candidate
+            .map((item) => {
+                if (typeof item === "string") {
+                    return item;
+                }
+
+                if (typeof item?.question === "string") {
+                    return item.question;
+                }
+
+                if (typeof item?.text === "string") {
+                    return item.text;
+                }
+
+                return null;
+            })
+            .filter(Boolean)
+            .map((question) => question.trim())
+            .filter(Boolean);
+
+        if (questions.length) {
+            return questions;
+        }
+    }
+
+    return [];
 });
+
+function prettyColumnName(name) {
+    if (!name) {
+        return "this field";
+    }
+
+    return String(name)
+        .replace(/_/g, " ")
+        .replace(/-/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+const generatedQuestions = computed(() => {
+    const questions = [];
+    const metric = numericColumns.value[0]?.name || null;
+    const secondMetric = numericColumns.value[1]?.name || null;
+    const dimension = dimensionColumns.value[0]?.name || null;
+    const secondDimension = dimensionColumns.value[1]?.name || null;
+    const date = dateColumns.value[0]?.name || null;
+
+    if (metric) {
+        questions.push(
+            `What is the total ${prettyColumnName(metric)}?`,
+            `What is the average ${prettyColumnName(metric)}?`,
+            `What are the highest and lowest ${prettyColumnName(metric)} values?`,
+        );
+    }
+
+    if (dimension && metric) {
+        questions.push(
+            `What are the top categories by ${prettyColumnName(metric)}?`,
+            `Which ${prettyColumnName(dimension)} has the highest ${prettyColumnName(metric)}?`,
+            `How does ${prettyColumnName(metric)} vary across ${prettyColumnName(dimension)}?`,
+        );
+    }
+
+    if (date && metric) {
+        questions.push(
+            `How does ${prettyColumnName(metric)} change over time?`,
+            `What is the trend of ${prettyColumnName(metric)} by ${prettyColumnName(date)}?`,
+        );
+    }
+
+    if (
+        secondDimension &&
+        metric &&
+        secondDimension !== dimension
+    ) {
+        questions.push(
+            `Compare ${prettyColumnName(metric)} across ${prettyColumnName(dimension)} and ${prettyColumnName(secondDimension)}.`,
+        );
+    }
+
+    if (
+        metric &&
+        secondMetric &&
+        metric !== secondMetric
+    ) {
+        questions.push(
+            `How are ${prettyColumnName(metric)} and ${prettyColumnName(secondMetric)} related?`,
+        );
+    }
+
+    if (dimension && !metric) {
+        questions.push(
+            `What are the most common ${prettyColumnName(dimension)} values?`,
+            `How many unique ${prettyColumnName(dimension)} values are there?`,
+        );
+    }
+
+    if (date && !metric) {
+        questions.push(
+            "What time period does the dataset cover?",
+            `How many records are available for each ${prettyColumnName(date)} period?`,
+        );
+    }
+
+    if (!questions.length) {
+        questions.push(
+            "What are the main patterns in this dataset?",
+            "What are the most important insights from this data?",
+            "Are there any unusual or unexpected values?",
+            "Can you summarize this dataset?",
+        );
+    }
+
+    return [...new Set(questions)].slice(0, 8);
+});
+
+const exampleQuestions = computed(() =>
+    backendQuestions.value.length
+        ? backendQuestions.value.slice(0, 8)
+        : generatedQuestions.value,
+);
+
+async function selectQuestion(question) {
+    emit("question-selected", question);
+
+    try {
+        if (navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText(question);
+
+            copiedQuestion.value = question;
+
+            window.setTimeout(() => {
+                if (copiedQuestion.value === question) {
+                    copiedQuestion.value = null;
+                }
+            }, 1500);
+        }
+    } catch (err) {
+        console.warn(
+            "Unable to copy example question:",
+            err,
+        );
+    }
+}
 
 function formatNumber(value) {
     const number = Number(value);
@@ -136,25 +331,31 @@ function roleClass(role) {
         normalized.includes("metric") ||
         normalized.includes("numeric")
     ) {
-        return "bg-blue-50 text-blue-700";
+        return "border-blue-200 bg-gradient-to-r from-blue-50 to-cyan-50 text-blue-700";
     }
 
     if (
         normalized.includes("dimension") ||
         normalized.includes("categor")
     ) {
-        return "bg-violet-50 text-violet-700";
+        return "border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 text-violet-700";
     }
 
-    if (normalized.includes("date") || normalized.includes("time")) {
-        return "bg-amber-50 text-amber-700";
+    if (
+        normalized.includes("date") ||
+        normalized.includes("time")
+    ) {
+        return "border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 text-amber-700";
     }
 
-    if (normalized.includes("identifier") || normalized.includes("id")) {
-        return "bg-slate-100 text-slate-700";
+    if (
+        normalized.includes("identifier") ||
+        normalized.includes("id")
+    ) {
+        return "border-slate-200 bg-gradient-to-r from-slate-50 to-gray-50 text-slate-700";
     }
 
-    return "bg-emerald-50 text-emerald-700";
+    return "border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 text-emerald-700";
 }
 
 function clearSearch() {
@@ -168,528 +369,416 @@ onMounted(() => {
 
 <template>
     <section class="mt-10 w-full">
-        <!-- ===================================================== -->
-        <!-- HEADER -->
-        <!-- ===================================================== -->
 
-        <div
-            class="mb-5 flex items-end justify-between gap-6 max-[760px]:items-start max-[760px]:flex-col"
-        >
+        <!-- =====================================================
+             HEADER
+        ====================================================== -->
+
+        <div class="mb-5 flex items-end justify-between gap-6 max-[760px]:flex-col max-[760px]:items-start">
+
             <div class="flex items-start gap-3">
+
+                <!-- Colorful Header Icon -->
                 <div
-                    class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#f5f3ff] to-[#ede9fe] text-[#7c3aed] shadow-[0_5px_15px_rgba(124,58,237,0.08)]"
-                >
-                    <svg
-                        class="h-[21px] w-[21px]"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
+                    class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-200/60">
+
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+
                         <path d="M4 5h16" />
                         <path d="M4 12h16" />
                         <path d="M4 19h16" />
-                        <circle
-                            cx="8"
-                            cy="5"
-                            r="1.5"
-                        />
-                        <circle
-                            cx="16"
-                            cy="12"
-                            r="1.5"
-                        />
-                        <circle
-                            cx="10"
-                            cy="19"
-                            r="1.5"
-                        />
+                        <circle cx="8" cy="5" r="1.5" />
+                        <circle cx="16" cy="12" r="1.5" />
+                        <circle cx="10" cy="19" r="1.5" />
+
                     </svg>
+
                 </div>
 
                 <div>
-                    <div class="flex items-center gap-2">
-                        <h2
-                            class="m-0 text-xl font-bold tracking-[-0.35px] text-[#172033]"
-                        >
+
+                    <div class="flex flex-wrap items-center gap-2">
+
+                        <h2 class="m-0 text-xl font-bold tracking-[-0.35px] text-slate-900">
                             Dataset Schema
                         </h2>
 
-                        <span
-                            v-if="metadata"
-                            class="rounded-full bg-[#ecfdf5] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.3px] text-[#047857]"
-                        >
+                        <span v-if="metadata"
+                            class="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.3px] text-emerald-700 shadow-sm">
+
+                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+
                             Ready
+
                         </span>
+
                     </div>
 
-                    <p
-                        class="mt-1 max-w-[620px] text-[13px] leading-5 text-[#7a8496]"
-                    >
+                    <p class="mt-1 max-w-[620px] text-[13px] leading-5 text-slate-500">
                         Understand the columns, data types, analytical roles,
                         and quality characteristics available to the data
                         engine.
                     </p>
+
                 </div>
+
             </div>
 
+
             <!-- Refresh -->
-            <button
-                v-if="metadata"
-                type="button"
-                :disabled="refreshing"
-                @click="loadMetadata({ refresh: true })"
-                class="inline-flex items-center gap-2 rounded-lg border border-[#e4e7ec] bg-white px-3 py-2 text-xs font-semibold text-[#475467] shadow-[0_2px_6px_rgba(15,23,42,0.03)] transition-all duration-200 hover:border-[#c4b5fd] hover:bg-[#faf9ff] hover:text-[#6d28d9] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-                <svg
-                    class="h-3.5 w-3.5"
-                    :class="{ 'animate-spin': refreshing }"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
+            <button v-if="metadata" type="button" :disabled="refreshing"
+                class="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-gradient-to-r from-white via-violet-50 to-indigo-50 px-4 py-2.5 text-xs font-bold text-violet-700 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:from-violet-50 hover:to-fuchsia-50 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 cursor-pointer"
+                @click="loadMetadata({ refresh: true })">
+
+                <svg class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2">
+
                     <path d="M20 11a8.1 8.1 0 0 0-14.9-4" />
                     <path d="M4 4v5h5" />
                     <path d="M4 13a8.1 8.1 0 0 0 14.9 4" />
                     <path d="M20 20v-5h-5" />
+
                 </svg>
 
                 {{ refreshing ? "Refreshing..." : "Refresh" }}
+
             </button>
+
         </div>
 
-        <!-- ===================================================== -->
-        <!-- LOADING -->
-        <!-- ===================================================== -->
 
-        <div
-            v-if="loading"
-            class="overflow-hidden rounded-[18px] border border-[#e7e9f0] bg-white p-5 shadow-[0_5px_15px_rgba(15,23,42,0.03),0_14px_30px_rgba(15,23,42,0.04)]"
-        >
-            <div class="mb-5 flex items-center justify-between">
-                <div class="space-y-2">
-                    <div
-                        class="h-4 w-36 animate-pulse rounded bg-[#eef0f5]"
-                    ></div>
+        <!-- =====================================================
+             LOADING
+        ====================================================== -->
 
-                    <div
-                        class="h-3 w-56 animate-pulse rounded bg-[#f2f3f7]"
-                    ></div>
+        <div v-if="loading"
+            class="overflow-hidden rounded-[20px] border border-violet-100 bg-white shadow-lg shadow-violet-100/40">
+
+            <div class="border-b border-violet-100 bg-gradient-to-r from-blue-50 via-violet-50 to-fuchsia-50 p-5">
+
+                <div class="mb-5 flex items-center justify-between gap-4">
+
+                    <div class="space-y-2">
+
+                        <div class="h-4 w-36 animate-pulse rounded bg-violet-200"></div>
+
+                        <div class="h-3 w-56 animate-pulse rounded bg-indigo-100"></div>
+
+                    </div>
+
+                    <div class="h-9 w-56 animate-pulse rounded-lg bg-white/80"></div>
+
                 </div>
 
-                <div
-                    class="h-9 w-56 animate-pulse rounded-lg bg-[#f3f4f7]"
-                ></div>
             </div>
 
-            <div
-                class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
-            >
-                <div
-                    v-for="card in 6"
-                    :key="card"
-                    class="rounded-2xl border border-[#edf0f5] p-5"
-                >
-                    <div class="flex items-center justify-between">
-                        <div
-                            class="h-4 w-28 animate-pulse rounded bg-[#eef0f5]"
-                        ></div>
+            <div class="grid grid-cols-1 gap-4 bg-slate-50/60 p-5 sm:grid-cols-2 lg:grid-cols-3">
 
-                        <div
-                            class="h-6 w-16 animate-pulse rounded-full bg-[#f3f1ff]"
-                        ></div>
+                <div v-for="card in 6" :key="card" class="rounded-2xl border border-violet-100 bg-white p-5 shadow-sm">
+
+                    <div class="flex items-center justify-between">
+
+                        <div class="h-4 w-28 animate-pulse rounded bg-violet-100"></div>
+
+                        <div class="h-6 w-16 animate-pulse rounded-full bg-fuchsia-100"></div>
+
                     </div>
 
                     <div class="mt-5 space-y-3">
-                        <div
-                            class="h-3 w-24 animate-pulse rounded bg-[#f1f2f6]"
-                        ></div>
 
-                        <div
-                            class="h-3 w-32 animate-pulse rounded bg-[#f1f2f6]"
-                        ></div>
+                        <div class="h-3 w-24 animate-pulse rounded bg-slate-100"></div>
 
-                        <div
-                            class="h-3 w-28 animate-pulse rounded bg-[#f1f2f6]"
-                        ></div>
+                        <div class="h-3 w-32 animate-pulse rounded bg-indigo-100"></div>
+
+                        <div class="h-3 w-28 animate-pulse rounded bg-violet-100"></div>
+
                     </div>
+
                 </div>
+
             </div>
+
         </div>
 
-        <!-- ===================================================== -->
-        <!-- ERROR -->
-        <!-- ===================================================== -->
 
-        <div
-            v-else-if="error"
-            class="rounded-[18px] border border-[#fecaca] bg-white p-6 shadow-[0_5px_15px_rgba(15,23,42,0.03)]"
-        >
+        <!-- =====================================================
+             ERROR
+        ====================================================== -->
+
+        <div v-else-if="error"
+            class="rounded-[20px] border border-red-200 bg-gradient-to-br from-red-50 via-white to-orange-50 p-6 shadow-lg shadow-red-100/40">
+
             <div class="flex items-start gap-4">
+
                 <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#fee2e2] text-sm font-bold text-[#dc2626]"
-                >
+                    class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-red-100 to-orange-100 text-sm font-bold text-red-600 shadow-sm">
                     !
                 </div>
 
                 <div>
-                    <h3 class="m-0 text-sm font-bold text-[#172033]">
+
+                    <h3 class="m-0 text-sm font-bold text-slate-900">
                         Unable to load dataset schema
                     </h3>
 
-                    <p class="mt-1 text-[13px] leading-5 text-[#667085]">
+                    <p class="mt-1 text-[13px] leading-5 text-slate-500">
                         {{ error }}
                     </p>
 
-                    <button
-                        type="button"
-                        @click="loadMetadata()"
-                        class="mt-4 rounded-lg bg-[#7c3aed] px-3.5 py-2 text-xs font-semibold text-white transition-colors duration-200 hover:bg-[#6d28d9]"
-                    >
+                    <button type="button"
+                        class="mt-4 rounded-xl bg-gradient-to-r from-red-500 to-orange-500 px-4 py-2.5 text-xs font-bold text-white shadow-md transition-all hover:-translate-y-0.5 hover:from-red-600 hover:to-orange-600 hover:shadow-lg"
+                        @click="loadMetadata()">
                         Try Again
                     </button>
+
                 </div>
+
             </div>
+
         </div>
 
-        <!-- ===================================================== -->
-        <!-- METADATA -->
-        <!-- ===================================================== -->
 
-        <div
-            v-else-if="metadata"
-            class="overflow-hidden rounded-[18px] border border-[#e7e9f0] bg-white shadow-[0_5px_15px_rgba(15,23,42,0.03),0_14px_30px_rgba(15,23,42,0.04)]"
-        >
-            <!-- ================================================= -->
-            <!-- SUMMARY -->
-            <!-- ================================================= -->
+        <!-- =====================================================
+             METADATA
+        ====================================================== -->
 
-            <div
-                class="grid grid-cols-1 border-b border-[#edf0f5] sm:grid-cols-3"
-            >
+        <div v-else-if="metadata"
+            class="overflow-hidden rounded-[20px] border border-violet-100 bg-white shadow-lg shadow-violet-100/40">
+
+
+            <!-- =================================================
+                 SUMMARY
+            ================================================== -->
+
+            <div class="grid grid-cols-1 border-b border-violet-100 sm:grid-cols-3">
+
+                <!-- Columns -->
                 <div
-                    class="border-b border-[#edf0f5] px-5 py-4 sm:border-b-0 sm:border-r"
-                >
-                    <p
-                        class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-[#98a2b3]"
-                    >
-                        Columns
-                    </p>
+                    class="border-b border-violet-100 bg-gradient-to-br from-blue-50 to-cyan-50 px-5 py-5 sm:border-b-0 sm:border-r">
 
-                    <p class="mt-1 text-xl font-bold text-[#172033]">
+                    <div class="flex items-center justify-between">
+
+                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-blue-500">
+                            Columns
+                        </p>
+
+                        <span
+                            class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 text-blue-500 shadow-sm">
+                            #
+                        </span>
+
+                    </div>
+
+                    <p class="mt-2 text-2xl font-extrabold text-blue-700">
                         {{ formatNumber(columnCount) }}
                     </p>
-                </div>
 
-                <div
-                    class="border-b border-[#edf0f5] px-5 py-4 sm:border-b-0 sm:border-r"
-                >
-                    <p
-                        class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-[#98a2b3]"
-                    >
-                        Unique Values
+                    <p class="mt-1 text-[10px] font-medium text-blue-500">
+                        Available fields
                     </p>
 
-                    <p class="mt-1 text-xl font-bold text-[#172033]">
+                </div>
+
+
+                <!-- Unique -->
+                <div
+                    class="border-b border-violet-100 bg-gradient-to-br from-violet-50 to-fuchsia-50 px-5 py-5 sm:border-b-0 sm:border-r">
+
+                    <div class="flex items-center justify-between">
+
+                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-violet-500">
+                            Unique Values
+                        </p>
+
+                        <span
+                            class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 text-violet-500 shadow-sm">
+                            ◈
+                        </span>
+
+                    </div>
+
+                    <p class="mt-2 text-2xl font-extrabold text-violet-700">
                         {{ formatNumber(totalUniqueValues) }}
                     </p>
-                </div>
 
-                <div class="px-5 py-4">
-                    <p
-                        class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-[#98a2b3]"
-                    >
-                        Missing Values
+                    <p class="mt-1 text-[10px] font-medium text-violet-500">
+                        Distinct values
                     </p>
 
-                    <p
-                        class="mt-1 text-xl font-bold"
-                        :class="
-                            totalMissingValues > 0
+                </div>
+
+
+                <!-- Missing -->
+                <div class="px-5 py-5 transition-colors duration-200" :class="totalMissingValues > 0
+                        ? 'bg-amber-50'
+                        : 'bg-emerald-50'
+                    ">
+                    <div class="flex items-center justify-between">
+
+                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px]" :class="totalMissingValues > 0
                                 ? 'text-amber-600'
                                 : 'text-emerald-600'
-                        "
-                    >
+                            ">
+                            Missing Values
+                        </p>
+
+                        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 shadow-sm" :class="totalMissingValues > 0
+                                ? 'text-amber-500'
+                                : 'text-emerald-500'
+                            ">
+                            <svg v-if="totalMissingValues > 0" class="h-4 w-4" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2">
+                                <path d="M12 9v4" />
+                                <path d="M12 17h.01" />
+                                <path
+                                    d="M10.3 3.8 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0Z" />
+                            </svg>
+
+                            <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="m5 12 4 4L19 6" />
+                            </svg>
+                        </span>
+
+                    </div>
+
+                    <p class="mt-2 text-2xl font-extrabold" :class="totalMissingValues > 0
+                            ? 'text-amber-700'
+                            : 'text-emerald-700'
+                        ">
                         {{ formatNumber(totalMissingValues) }}
                     </p>
-                </div>
-            </div>
 
-            <!-- ================================================= -->
-            <!-- TOOLBAR -->
-            <!-- ================================================= -->
-
-            <div
-                class="flex items-center justify-between gap-5 border-b border-[#edf0f5] bg-gradient-to-b from-white to-[#fcfcfe] px-5 py-[17px] max-[760px]:flex-col max-[760px]:items-stretch"
-            >
-                <div>
-                    <h3 class="m-0 text-sm font-bold text-[#172033]">
-                        Column Definitions
-                    </h3>
-
-                    <p class="mt-1 text-[11px] text-[#98a2b3]">
-                        Showing
-                        <strong class="font-semibold text-[#667085]">
-                            {{ visibleColumnCount }}
-                        </strong>
-                        of
-                        <strong class="font-semibold text-[#667085]">
-                            {{ columnCount }}
-                        </strong>
-                        columns
+                    <p class="mt-1 text-[10px] font-medium" :class="totalMissingValues > 0
+                            ? 'text-amber-500'
+                            : 'text-emerald-500'
+                        ">
+                        {{
+                            totalMissingValues > 0
+                                ? "Needs attention"
+                                : "No missing values"
+                        }}
                     </p>
-                </div>
 
-                <!-- Search -->
-                <div class="relative w-[260px] max-w-full max-[760px]:w-full">
-                    <svg
-                        class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#98a2b3]"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
-                        <circle
-                            cx="11"
-                            cy="11"
-                            r="7"
-                        />
-                        <path d="m20 20-4-4" />
-                    </svg>
-
-                    <input
-                        v-model="searchQuery"
-                        type="search"
-                        placeholder="Search columns..."
-                        class="h-9 w-full rounded-lg border border-[#e4e7ec] bg-white pl-9 pr-9 text-xs text-[#172033] outline-none transition-all duration-200 placeholder:text-[#98a2b3] focus:border-[#a78bfa] focus:ring-2 focus:ring-[#ede9fe]"
-                    />
-
-                    <button
-                        v-if="searchQuery"
-                        type="button"
-                        @click="clearSearch"
-                        class="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-[#98a2b3] hover:bg-[#f2f4f7] hover:text-[#475467]"
-                        aria-label="Clear search"
-                    >
-                        ×
-                    </button>
                 </div>
             </div>
 
-            <!-- ================================================= -->
-            <!-- ROLE SUMMARY -->
-            <!-- ================================================= -->
 
-            <div
-                v-if="Object.keys(roleSummary).length"
-                class="flex flex-wrap gap-2 border-b border-[#edf0f5] bg-[#fcfcfd] px-5 py-3"
-            >
-                <span
-                    v-for="(count, role) in roleSummary"
-                    :key="role"
-                    class="inline-flex items-center gap-1.5 rounded-full border border-[#e8eaf0] bg-white px-2.5 py-1 text-[10px] font-semibold text-[#667085]"
-                >
+            <!-- =================================================
+                 EXAMPLE QUESTIONS
+            ================================================== -->
+
+            <div v-if="exampleQuestions.length"
+                class="border-b border-violet-100 bg-gradient-to-br from-violet-50/70 via-white to-blue-50/60 px-5 py-5">
+
+                <div class="flex items-start justify-between gap-4 max-[650px]:flex-col">
+
+                    <div class="flex items-start gap-3">
+
+                        <div
+                            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-200">
+
+                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+
+                                <path d="M12 3 14.5 9.5 21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"
+                                    stroke-linejoin="round" />
+
+                            </svg>
+
+                        </div>
+
+                        <div>
+
+                            <h3 class="m-0 text-sm font-bold text-slate-900">
+                                Example Questions
+                            </h3>
+
+                            <p class="mt-1 max-w-[620px] text-[11px] leading-5 text-slate-500">
+                                Try these questions to explore your uploaded
+                                dataset with the analytics engine.
+                            </p>
+
+                        </div>
+
+                    </div>
+
                     <span
-                        class="h-1.5 w-1.5 rounded-full bg-[#7c3aed]"
-                    ></span>
-
-                    {{ normalizeRole(role) }}
-
-                    <span class="text-[#98a2b3]">
-                        {{ count }}
+                        class="shrink-0 rounded-full border border-violet-200 bg-gradient-to-r from-violet-100 to-fuchsia-100 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.4px] text-violet-700">
+                        Dataset-aware
                     </span>
-                </span>
-            </div>
 
-            <!-- ================================================= -->
-            <!-- NO SEARCH RESULTS -->
-            <!-- ================================================= -->
-
-            <div
-                v-if="!filteredColumns.length"
-                class="flex min-h-[220px] items-center justify-center px-6 text-center"
-            >
-                <div>
-                    <div
-                        class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#f8f9fc] text-[#667085]"
-                    >
-                        <svg
-                            class="h-6 w-6"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="1.8"
-                        >
-                            <circle
-                                cx="11"
-                                cy="11"
-                                r="7"
-                            />
-                            <path d="m20 20-4-4" />
-                        </svg>
-                    </div>
-
-                    <h3 class="mt-4 text-sm font-bold text-[#172033]">
-                        No matching columns
-                    </h3>
-
-                    <p class="mt-1 text-xs text-[#98a2b3]">
-                        Nothing matches "{{ searchQuery }}".
-                    </p>
-
-                    <button
-                        type="button"
-                        @click="clearSearch"
-                        class="mt-4 rounded-lg border border-[#e4e7ec] bg-white px-3 py-2 text-xs font-semibold text-[#475467] hover:bg-[#f9fafb]"
-                    >
-                        Clear Search
-                    </button>
                 </div>
+
+
+                <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+
+                    <button v-for="(question, index) in exampleQuestions" :key="`${question}-${index}`" type="button"
+                        class="group flex min-h-[62px] items-center justify-between gap-3 rounded-xl border border-violet-100 bg-white px-4 py-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:bg-gradient-to-r hover:from-violet-50 hover:to-fuchsia-50 hover:shadow-md cursor-pointer"
+                        @click="selectQuestion(question)">
+
+                        <span class="text-[11px] font-medium leading-5 text-slate-600 group-hover:text-violet-700">
+                            {{ question }}
+                        </span>
+
+                        <span
+                            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-50 to-indigo-50 text-violet-500 transition-all group-hover:from-violet-500 group-hover:to-fuchsia-500 group-hover:text-white">
+
+                            <svg v-if="copiedQuestion !== question" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2">
+
+                                <path d="M5 12h13" stroke-linecap="round" />
+                                <path d="m13 6 6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+
+                            </svg>
+
+                            <svg v-else class="h-3.5 w-3.5 text-white" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2">
+
+                                <path d="m5 12 4 4L19 6" stroke-linecap="round" stroke-linejoin="round" />
+
+                            </svg>
+
+                        </span>
+
+                    </button>
+
+                </div>
+
+                <p class="mt-3 text-[9px] text-slate-400">
+                    Click a question to use it in the analytics query.
+                </p>
+
             </div>
 
-            <!-- ================================================= -->
-            <!-- COLUMN CARDS -->
-            <!-- ================================================= -->
+
+            <!-- =================================================
+                 FOOTER
+            ================================================== -->
 
             <div
-                v-else
-                class="grid grid-cols-1 gap-4 bg-[#fafbfc] p-5 sm:grid-cols-2 lg:grid-cols-3"
-            >
-                <article
-                    v-for="column in filteredColumns"
-                    :key="column.name"
-                    class="group rounded-2xl border border-[#e7e9f0] bg-white p-[18px] shadow-[0_3px_10px_rgba(15,23,42,0.025)] transition-all duration-200 hover:-translate-y-[1px] hover:border-[#ddd6fe] hover:shadow-[0_8px_22px_rgba(15,23,42,0.06)]"
-                >
-                    <!-- Card Header -->
-                    <div
-                        class="flex items-start justify-between gap-3"
-                    >
-                        <div class="min-w-0">
-                            <h4
-                                class="truncate text-sm font-bold text-[#172033]"
-                                :title="column.name"
-                            >
-                                {{ column.name }}
-                            </h4>
+                class="flex items-center justify-between gap-4 border-t border-violet-100 bg-gradient-to-r from-slate-50 via-violet-50/50 to-indigo-50/50 px-[18px] py-3 text-[11px] text-slate-400 max-[600px]:flex-col max-[600px]:items-start">
 
-                            <p
-                                class="mt-1 truncate text-[11px] text-[#98a2b3]"
-                                :title="normalizeType(column.data_type)"
-                            >
-                                {{ normalizeType(column.data_type) }}
-                            </p>
-                        </div>
-
-                        <span
-                            class="shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold"
-                            :class="roleClass(column.role)"
-                        >
-                            {{ normalizeRole(column.role) }}
-                        </span>
-                    </div>
-
-                    <!-- Metrics -->
-                    <div
-                        class="mt-5 grid grid-cols-2 gap-2"
-                    >
-                        <div
-                            class="rounded-xl bg-[#f8f9fc] px-3 py-2.5"
-                        >
-                            <p
-                                class="m-0 text-[9px] font-bold uppercase tracking-[0.35px] text-[#98a2b3]"
-                            >
-                                Unique
-                            </p>
-
-                            <p
-                                class="mt-1 text-sm font-bold text-[#344054]"
-                            >
-                                {{
-                                    formatNumber(
-                                        column.unique_values,
-                                    )
-                                }}
-                            </p>
-                        </div>
-
-                        <div
-                            class="rounded-xl px-3 py-2.5"
-                            :class="
-                                Number(column.missing_count) > 0
-                                    ? 'bg-amber-50'
-                                    : 'bg-emerald-50'
-                            "
-                        >
-                            <p
-                                class="m-0 text-[9px] font-bold uppercase tracking-[0.35px]"
-                                :class="
-                                    Number(column.missing_count) > 0
-                                        ? 'text-amber-600'
-                                        : 'text-emerald-600'
-                                "
-                            >
-                                Missing
-                            </p>
-
-                            <p
-                                class="mt-1 text-sm font-bold"
-                                :class="
-                                    Number(column.missing_count) > 0
-                                        ? 'text-amber-700'
-                                        : 'text-emerald-700'
-                                "
-                            >
-                                {{
-                                    formatNumber(
-                                        column.missing_count,
-                                    )
-                                }}
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- Footer -->
-                    <div
-                        class="mt-4 flex items-center justify-between border-t border-[#f0f1f5] pt-3"
-                    >
-                        <span
-                            class="text-[10px] font-medium text-[#98a2b3]"
-                        >
-                            Data type
-                        </span>
-
-                        <span
-                            class="max-w-[150px] truncate text-[10px] font-semibold text-[#667085]"
-                            :title="normalizeType(column.data_type)"
-                        >
-                            {{ normalizeType(column.data_type) }}
-                        </span>
-                    </div>
-                </article>
-            </div>
-
-            <!-- ================================================= -->
-            <!-- FOOTER -->
-            <!-- ================================================= -->
-
-            <div
-                class="flex items-center justify-between gap-4 border-t border-[#edf0f5] bg-[#fcfcfd] px-[18px] py-3 text-[11px] text-[#98a2b3] max-[600px]:items-start max-[600px]:flex-col"
-            >
                 <div class="flex items-center gap-2">
-                    <span
-                        class="h-1.5 w-1.5 rounded-full bg-[#10b981]"
-                    ></span>
 
-                    <span>
+                    <span class="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.10)]">
+                    </span>
+
+                    <span class="font-medium">
                         Schema loaded successfully
                     </span>
+
                 </div>
 
-                <span>
+                <span class="rounded-full bg-white px-3 py-1 font-bold text-violet-600 shadow-sm">
+
                     {{ visibleColumnCount }} visible columns
+
                 </span>
+
             </div>
+
         </div>
+
     </section>
 </template>
