@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch, nextTick } from "vue";
 
 import AnalyticsInsights from "./AnalyticsInsights.vue";
 import AnalyticsChart from "./AnalyticsChart.vue";
@@ -13,6 +13,13 @@ import {
 // =========================================================
 // STATE
 // =========================================================
+
+const props = defineProps({
+    incomingQuestion: {
+        type: String,
+        default: "",
+    },
+});
 
 const question = ref("");
 
@@ -268,6 +275,27 @@ function handleKeydown(event) {
         analyze();
     }
 }
+
+
+watch(
+    () => props.incomingQuestion,
+    async (newQuestion) => {
+        if (!newQuestion) {
+            return;
+        }
+
+        question.value = newQuestion;
+
+        // Clear previous analysis when a new example is selected
+        error.value = null;
+        result.value = null;
+
+        await nextTick();
+    },
+    {
+        immediate: true,
+    },
+);
 
 // =========================================================
 // INITIALIZE
@@ -827,8 +855,8 @@ onMounted(() => {
                                     <td v-for="(column, columnIndex) in result.data?.columns || []" :key="column"
                                         class="whitespace-nowrap border-b border-slate-100 px-4 py-[13px] text-left text-xs last:border-b-0"
                                         :class="columnIndex % 2 === 0
-                                                ? 'text-slate-700'
-                                                : 'text-indigo-700'
+                                            ? 'text-slate-700'
+                                            : 'text-indigo-700'
                                             ">
 
                                         {{ formatCell(row?.[column]) }}
@@ -844,7 +872,7 @@ onMounted(() => {
                                 ">
 
                                     <td :colspan="result.data?.columns
-                                            ?.length || 1
+                                        ?.length || 1
                                         " class="px-4 py-8 text-center text-xs text-slate-400">
 
                                         <div
