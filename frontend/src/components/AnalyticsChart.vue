@@ -261,6 +261,18 @@ function formatCompactNumber(value) {
     }).format(number);
 }
 
+function escapeHtml(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 function formatCategory(value) {
     if (
         value === null ||
@@ -327,9 +339,11 @@ const chartOption = computed(() => {
                 trigger: "item",
 
                 formatter(params) {
+                    const safeName = escapeHtml(params.name);
+                    const safePercent = Number(params.percent) || 0;
                     return `
                         <div style="font-weight:600;margin-bottom:5px;">
-                            ${params.name}
+                            ${safeName}
                         </div>
 
                         <div>
@@ -340,7 +354,7 @@ const chartOption = computed(() => {
                         </div>
 
                         <div style="margin-top:3px;opacity:.75;">
-                            ${params.percent}% of total
+                            ${safePercent}% of total
                         </div>
                     `;
                 },
@@ -480,17 +494,20 @@ const chartOption = computed(() => {
                     item.value
                 )
                     ? item.value[
-                          item.value.length - 1
-                      ]
+                    item.value.length - 1
+                    ]
                     : item.value;
+
+                const safeCategory = escapeHtml(category);
+                const safeYColumn = escapeHtml(yColumn.value);
 
                 return `
                     <div style="font-weight:600;margin-bottom:5px;">
-                        ${category}
+                        ${safeCategory}
                     </div>
 
                     <div>
-                        ${yColumn.value}:
+                        ${safeYColumn}:
                         <strong>
                             ${formatNumber(value)}
                         </strong>
@@ -507,8 +524,8 @@ const chartOption = computed(() => {
             bottom: shouldEnableZoom
                 ? 105
                 : categories.value.length > 8
-                  ? 82
-                  : 62,
+                    ? 82
+                    : 62,
 
             containLabel: true,
         },
@@ -578,40 +595,40 @@ const chartOption = computed(() => {
 
         ...(shouldEnableZoom
             ? {
-                  dataZoom: [
-                      {
-                          type: "inside",
+                dataZoom: [
+                    {
+                        type: "inside",
 
-                          start: 0,
-                          end: 100,
-                      },
+                        start: 0,
+                        end: 100,
+                    },
 
-                      {
-                          type: "slider",
+                    {
+                        type: "slider",
 
-                          bottom: 22,
-                          height: 16,
+                        bottom: 22,
+                        height: 16,
 
-                          borderColor:
-                              "#e4e7ec",
+                        borderColor:
+                            "#e4e7ec",
 
-                          backgroundColor:
-                              "#f8fafc",
+                        backgroundColor:
+                            "#f8fafc",
 
-                          fillerColor:
-                              "rgba(124,58,237,0.12)",
+                        fillerColor:
+                            "rgba(124,58,237,0.12)",
 
-                          handleStyle: {
-                              color: "#7c3aed",
-                          },
+                        handleStyle: {
+                            color: "#7c3aed",
+                        },
 
-                          textStyle: {
-                              color: "#667085",
-                              fontSize: 10,
-                          },
-                      },
-                  ],
-              }
+                        textStyle: {
+                            color: "#667085",
+                            fontSize: 10,
+                        },
+                    },
+                ],
+            }
             : {}),
 
         series: [
@@ -631,8 +648,8 @@ const chartOption = computed(() => {
                 symbolSize: isLine
                     ? 7
                     : isScatter
-                      ? 9
-                      : undefined,
+                        ? 9
+                        : undefined,
 
                 barMaxWidth: isBar
                     ? 42
@@ -646,14 +663,14 @@ const chartOption = computed(() => {
 
                 lineStyle: isLine
                     ? {
-                          width: 3,
-                      }
+                        width: 3,
+                    }
                     : undefined,
 
                 areaStyle: isLine
                     ? {
-                          opacity: 0.08,
-                      }
+                        opacity: 0.08,
+                    }
                     : undefined,
 
                 emphasis: {
@@ -673,51 +690,35 @@ const chartOption = computed(() => {
 
 <template>
     <section
-        class="mt-1 w-full overflow-hidden rounded-2xl border border-[#e9eaf0] bg-white shadow-[0_5px_15px_rgba(15,23,42,0.025),0_12px_28px_rgba(15,23,42,0.035)]"
-    >
+        class="mt-1 w-full overflow-hidden rounded-2xl border border-[#e9eaf0] bg-white shadow-[0_5px_15px_rgba(15,23,42,0.025),0_12px_28px_rgba(15,23,42,0.035)]">
         <!-- =================================================
              HEADER
         ================================================== -->
 
         <div
-            class="flex items-start justify-between gap-4 border-b border-[#edf0f5] bg-gradient-to-b from-white to-[#fcfcfe] px-5 py-4 max-[650px]:flex-col"
-        >
+            class="flex items-start justify-between gap-4 border-b border-[#edf0f5] bg-gradient-to-b from-white to-[#fcfcfe] px-5 py-4 max-[650px]:flex-col">
             <div class="min-w-0">
-                <div
-                    class="mb-1.5 flex items-center gap-2"
-                >
+                <div class="mb-1.5 flex items-center gap-2">
                     <span
-                        class="h-2 w-2 shrink-0 rounded-full bg-[#7c3aed] shadow-[0_0_0_4px_rgba(124,58,237,0.10)]"
-                    ></span>
+                        class="h-2 w-2 shrink-0 rounded-full bg-[#7c3aed] shadow-[0_0_0_4px_rgba(124,58,237,0.10)]"></span>
 
-                    <span
-                        class="text-[10px] font-bold uppercase tracking-[0.8px] text-[#7c3aed]"
-                    >
+                    <span class="text-[10px] font-bold uppercase tracking-[0.8px] text-[#7c3aed]">
                         {{ chartLabel }}
                     </span>
                 </div>
 
-                <h3
-                    class="m-0 text-[17px] font-bold tracking-[-0.2px] text-[#172033]"
-                >
+                <h3 class="m-0 text-[17px] font-bold tracking-[-0.2px] text-[#172033]">
                     {{ visualizationTitle }}
                 </h3>
 
-                <p
-                    v-if="hasChartData"
-                    class="mt-1 text-[11px] text-[#98a2b3]"
-                >
+                <p v-if="hasChartData" class="mt-1 text-[11px] text-[#98a2b3]">
                     {{ yColumn }} measured across
                     {{ xColumn }}
                 </p>
             </div>
 
-            <div
-                class="flex shrink-0 items-center gap-2"
-            >
-                <span
-                    class="rounded-lg bg-[#f5f3ff] px-2.5 py-1.5 text-[10px] font-bold text-[#6d28d9]"
-                >
+            <div class="flex shrink-0 items-center gap-2">
+                <span class="rounded-lg bg-[#f5f3ff] px-2.5 py-1.5 text-[10px] font-bold text-[#6d28d9]">
                     {{ rowCount }} results
                 </span>
             </div>
@@ -727,80 +728,51 @@ const chartOption = computed(() => {
              METRIC SUMMARY
         ================================================== -->
 
-        <div
-            v-if="
-                hasChartData &&
-                visualizationType !== 'pie' &&
-                validNumericValues.length
-            "
-            class="grid grid-cols-4 border-b border-[#edf0f5] max-[700px]:grid-cols-2"
-        >
+        <div v-if="
+            hasChartData &&
+            visualizationType !== 'pie' &&
+            validNumericValues.length
+        " class="grid grid-cols-4 border-b border-[#edf0f5] max-[700px]:grid-cols-2">
             <!-- Total -->
-            <div
-                class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b"
-            >
-                <p
-                    class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]"
-                >
+            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b">
+                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
                     Total
                 </p>
 
-                <p
-                    class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="formatNumber(totalValue)"
-                >
+                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(totalValue)">
                     {{ formatCompactNumber(totalValue) }}
                 </p>
             </div>
 
             <!-- Average -->
-            <div
-                class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b max-[700px]:border-r-0"
-            >
-                <p
-                    class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]"
-                >
+            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b max-[700px]:border-r-0">
+                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
                     Average
                 </p>
 
-                <p
-                    class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="formatNumber(averageValue)"
-                >
+                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(averageValue)">
                     {{ formatCompactNumber(averageValue) }}
                 </p>
             </div>
 
             <!-- Minimum -->
-            <div
-                class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-r"
-            >
-                <p
-                    class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]"
-                >
+            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-r">
+                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
                     Minimum
                 </p>
 
-                <p
-                    class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="formatNumber(minimumValue)"
-                >
+                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(minimumValue)">
                     {{ formatCompactNumber(minimumValue) }}
                 </p>
             </div>
 
             <!-- Maximum -->
             <div class="px-4 py-3">
-                <p
-                    class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]"
-                >
+                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
                     Maximum
                 </p>
 
-                <p
-                    class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="formatNumber(maximumValue)"
-                >
+                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(maximumValue)">
                     {{ formatCompactNumber(maximumValue) }}
                 </p>
             </div>
@@ -810,63 +782,32 @@ const chartOption = computed(() => {
              CHART
         ================================================== -->
 
-        <div
-            v-if="hasChartData"
-            class="h-[440px] w-full px-2 pb-2 pt-1 max-[700px]:h-[390px] max-[450px]:h-[330px]"
-        >
-            <VChart
-                :option="chartOption"
-                autoresize
-                class="h-full w-full"
-            />
+        <div v-if="hasChartData" class="h-[440px] w-full px-2 pb-2 pt-1 max-[700px]:h-[390px] max-[450px]:h-[330px]">
+            <VChart :option="chartOption" autoresize class="h-full w-full" />
         </div>
 
         <!-- =================================================
              EMPTY / INVALID STATE
         ================================================== -->
 
-        <div
-            v-else
-            class="flex min-h-[300px] items-center justify-center px-6 py-12"
-        >
+        <div v-else class="flex min-h-[300px] items-center justify-center px-6 py-12">
             <div class="max-w-sm text-center">
                 <div
-                    class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#f5f3ff] text-[#7c3aed]"
-                >
-                    <svg
-                        class="h-6 w-6"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="1.8"
-                    >
-                        <path
-                            d="M4 19V5"
-                            stroke-linecap="round"
-                        />
+                    class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#f5f3ff] text-[#7c3aed]">
+                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                        <path d="M4 19V5" stroke-linecap="round" />
 
-                        <path
-                            d="M4 19h16"
-                            stroke-linecap="round"
-                        />
+                        <path d="M4 19h16" stroke-linecap="round" />
 
-                        <path
-                            d="m7 15 3-4 3 2 4-6"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        />
+                        <path d="m7 15 3-4 3 2 4-6" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                 </div>
 
-                <h3
-                    class="m-0 text-sm font-bold text-[#172033]"
-                >
+                <h3 class="m-0 text-sm font-bold text-[#172033]">
                     No chart available
                 </h3>
 
-                <p
-                    class="mt-2 text-xs leading-5 text-[#98a2b3]"
-                >
+                <p class="mt-2 text-xs leading-5 text-[#98a2b3]">
                     The analysis did not return enough
                     visualization data to render a useful
                     chart.
@@ -878,37 +819,27 @@ const chartOption = computed(() => {
              FOOTER
         ================================================== -->
 
-        <div
-            v-if="hasChartData"
-            class="flex items-center justify-between gap-4 border-t border-[#edf0f5] bg-[#fcfcfd] px-5 py-2.5 text-[10px] text-[#98a2b3] max-[500px]:items-start max-[500px]:flex-col"
-        >
+        <div v-if="hasChartData"
+            class="flex items-center justify-between gap-4 border-t border-[#edf0f5] bg-[#fcfcfd] px-5 py-2.5 text-[10px] text-[#98a2b3] max-[500px]:items-start max-[500px]:flex-col">
             <span>
                 Showing
-                <strong
-                    class="font-semibold text-[#667085]"
-                >
+                <strong class="font-semibold text-[#667085]">
                     {{ validNumericValues.length }}
                 </strong>
                 numeric values
             </span>
 
-            <div
-                class="flex items-center gap-4 max-[500px]:flex-col max-[500px]:items-start max-[500px]:gap-1"
-            >
+            <div class="flex items-center gap-4 max-[500px]:flex-col max-[500px]:items-start max-[500px]:gap-1">
                 <span>
                     X:
-                    <strong
-                        class="font-semibold text-[#667085]"
-                    >
+                    <strong class="font-semibold text-[#667085]">
                         {{ xColumn }}
                     </strong>
                 </span>
 
                 <span>
                     Y:
-                    <strong
-                        class="font-semibold text-[#667085]"
-                    >
+                    <strong class="font-semibold text-[#667085]">
                         {{ yColumn }}
                     </strong>
                 </span>
