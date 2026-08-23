@@ -1,17 +1,25 @@
-from pathlib import Path
-
-from data_engine.loader import load_csv
-from data_engine.cleaner import clean_walmart_data
+from data_engine.dataset_manager import dataset_manager
 
 
-DATASET_PATH = Path(
-    "data/raw/Walmart_Sales.csv"
-)
+def get_current_dataset():
+    """
+    Return the dataset currently loaded by the application.
+    """
+
+    return dataset_manager.get_dataframe()
 
 
-def get_walmart_data():
-    df = load_csv(DATASET_PATH)
+def get_current_dataset_name():
+    """
+    Return the filename of the currently loaded dataset.
+    """
 
-    df = clean_walmart_data(df)
+    return dataset_manager.get_filename()
 
-    return df
+
+def has_dataset_loaded():
+    """
+    Check whether a dataset is currently available.
+    """
+
+    return dataset_manager.is_loaded()
