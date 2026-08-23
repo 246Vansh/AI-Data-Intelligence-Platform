@@ -5,69 +5,50 @@ from dotenv import load_dotenv
 from ai.adapter import convert_to_analysis_plan
 from data_engine.analysis_plan import AnalysisPlan
 
-
-from ai.fast_planner import FastPlanner
-
-from ai.providers.openai_provider import (
-    OpenAIProvider,
-)
-
-from ai.providers.claude_provider import (
-    ClaudeProvider,
-)
-
-
 load_dotenv()
 
 
-PROVIDERS = {
-    "openai": OpenAIProvider,
-    "claude": ClaudeProvider,
-}
-
-
 def get_provider():
-
     provider_name = os.getenv(
         "AI_PROVIDER",
         "openai",
     ).lower()
 
-    provider_class = PROVIDERS.get(provider_name)
+    if provider_name == "openai":
+        try:
+            from ai.providers.openai_provider import OpenAIProvider
 
-    if provider_class is None:
-        supported = ", ".join(PROVIDERS.keys())
+            return OpenAIProvider()
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenAI provider requires the 'openai' package. "
+                "Install it with 'pip install openai'."
+            ) from exc
 
+    elif provider_name == "claude":
+        try:
+            from ai.providers.claude_provider import ClaudeProvider
+
+            return ClaudeProvider()
+        except ImportError as exc:
+            raise RuntimeError(
+                "Claude provider requires the 'anthropic' package. "
+                "Install it with 'pip install anthropic'."
+            ) from exc
+
+    else:
         raise ValueError(
-            f"Unsupported AI provider: "
-            f"{provider_name}. "
-            f"Supported providers: {supported}"
+            f"Unsupported AI provider: {provider_name}. "
+            f"Supported providers: openai, claude"
         )
-
-    return provider_class()
 
 
 def create_analysis_plan(
     user_question: str,
     metadata: dict,
 ) -> AnalysisPlan:
-
     # =====================================================
-    # 1. FAST DETERMINISTIC PLANNER
-    # =====================================================
-
-    fast_planner = FastPlanner()
-
-    fast_plan = fast_planner.create_plan(
-        question=user_question,
-        metadata=metadata,
-    )
-
-    if fast_plan is not None:
-        return fast_plan
-
-    # =====================================================
-    # 2. AI FALLBACK
+    # 1. AI PLAN GENERATION
     # =====================================================
 
     provider = get_provider()
@@ -78,16 +59,15 @@ def create_analysis_plan(
     )
 
     # =====================================================
-    # 3. INVALID AI PLAN
+    # 2. INVALID AI PLAN
     # =====================================================
 
     if ai_plan.status == "invalid":
         reason = ai_plan.reason or "The AI could not create a valid analysis plan."
-
         raise ValueError(f"Invalid analysis request: {reason}")
 
     # =====================================================
-    # 4. AI PLAN → COMMON DATA ENGINE PLAN
+    # 3. AI PLAN → COMMON DATA ENGINE PLAN
     # =====================================================
 
     return convert_to_analysis_plan(ai_plan)
