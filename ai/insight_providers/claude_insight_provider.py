@@ -26,6 +26,8 @@ class ClaudeInsightProvider:
             "claude-sonnet-5",
         )
 
+        self.profile_enabled = os.getenv("INSIGHT_PROFILE", "false").lower() == "true"
+
         self.client = Anthropic(api_key=api_key)
 
     def generate_insights(
@@ -49,74 +51,79 @@ class ClaudeInsightProvider:
 
         # -----------------------------------------
         # JSON response example
+        #
+        # Column and value names below are generic
+        # placeholders — the model must always use
+        # the ACTUAL columns from the supplied
+        # result, never these names.
         # -----------------------------------------
         example_json = """
 {
   "insights": [
     {
       "type": "highest",
-      "title": "December 2010 records peak sales",
-      "description": "December 2010 had the highest monthly sales.",
+      "title": "Group A records the peak value",
+      "description": "Group A had the highest total, reaching 288,760,532.72.",
       "evidence": {
-        "column": "sum_Weekly_Sales",
+        "column": "sum_metric_column",
         "value": 288760532.72,
         "row": {
-          "Date": "2010-12-01",
-          "sum_Weekly_Sales": 288760532.72
+          "group_column": "A",
+          "sum_metric_column": 288760532.72
         }
       }
     },
     {
       "type": "trend",
-      "title": "Sales increased from March to December",
-      "description": "Sales increased between the selected months.",
+      "title": "Values increased across the observed periods",
+      "description": "The metric increased between the earliest and latest periods.",
       "evidence": {
         "rows": [
           {
-            "Date": "2010-03-01",
-            "sum_Weekly_Sales": 181919802.5
+            "time_column": "2024-03-01",
+            "sum_metric_column": 181919802.5
           },
           {
-            "Date": "2010-04-01",
-            "sum_Weekly_Sales": 231412368.05
+            "time_column": "2024-04-01",
+            "sum_metric_column": 231412368.05
           },
           {
-            "Date": "2010-12-01",
-            "sum_Weekly_Sales": 288760532.72
+            "time_column": "2024-12-01",
+            "sum_metric_column": 288760532.72
           }
         ]
       }
     },
     {
       "type": "difference",
-      "title": "Large gap between peak and lowest months",
-      "description": "There is a large difference between the highest and lowest months.",
+      "title": "Large gap between the highest and lowest groups",
+      "description": "There is a large difference between the highest and lowest groups.",
       "evidence": null
+    },
+    {
+      "type": "coverage",
+      "title": "Data coverage is incomplete",
+      "description": "Only 4 of the 11 expected monthly periods are present.",
+      "evidence": {
+        "date_column": "time_column",
+        "frequency": "month",
+        "min_date": "2024-02-01T00:00:00",
+        "max_date": "2024-12-01T00:00:00",
+        "observed_periods": 4,
+        "expected_periods": 11,
+        "missing_periods": [
+          "2024-05",
+          "2024-06",
+          "2024-07",
+          "2024-08",
+          "2024-09",
+          "2024-10",
+          "2024-11"
+        ],
+        "is_continuous": false
+      }
     }
   ]
-},
-{
-  "type": "coverage",
-  "title": "Data coverage is incomplete",
-  "description": "Only 4 of the 11 expected monthly periods are present.",
-  "evidence": {
-    "date_column": "Date",
-    "frequency": "month",
-    "min_date": "2010-02-01T00:00:00",
-    "max_date": "2010-12-01T00:00:00",
-    "observed_periods": 4,
-    "expected_periods": 11,
-    "missing_periods": [
-      "2010-05",
-      "2010-06",
-      "2010-07",
-      "2010-08",
-      "2010-09",
-      "2010-10",
-      "2010-11"
-    ],
-    "is_continuous": false
-  }
 }
 """
 
@@ -141,7 +148,9 @@ class ClaudeInsightProvider:
             + "- explanations outside the JSON\n"
             + "- comments\n"
             + "- introductory text\n\n"
-            + "The JSON must match this structure:\n\n"
+            + "The JSON must match this structure. The column "
+            "names in this example are placeholders — always use "
+            "the actual column names from the supplied result:\n\n"
             + example_json
             + "\n\n"
             + "EVIDENCE RULES:\n\n"
@@ -196,14 +205,14 @@ class ClaudeInsightProvider:
             "evidence: null unless the claim is directly "
             "supported by supplied verified context.\n\n"
             + "22. Do not invent dates, periods, or coverage statistics.\n\n"
-            + "24. For a coverage insight, evidence MUST be a "
+            + "23. For a coverage insight, evidence MUST be a "
             "CoverageEvidence object.\n\n"
-            + "25. Coverage evidence MUST exactly match the "
+            + "24. Coverage evidence MUST exactly match the "
             "verified date_coverage context.\n\n"
-            + "26. Never invent missing periods.\n\n"
-            + "27. Never modify observed_periods or expected_periods.\n\n"
-            + "28. Never claim continuous data when is_continuous is false.\n\n"
-            + "29. Return ONLY valid JSON."
+            + "25. Never invent missing periods.\n\n"
+            + "26. Never modify observed_periods or expected_periods.\n\n"
+            + "27. Never claim continuous data when is_continuous is false.\n\n"
+            + "28. Return ONLY valid JSON."
         )
 
         # -----------------------------------------
@@ -224,12 +233,13 @@ class ClaudeInsightProvider:
             ],
         )
 
-        api_time = (perf_counter() - api_start) * 1000
-        print("\nAI INSIGHT PERFORMANCE")
-        print("----------------------")
-        print(f"model: {self.model}")
-        print(f"prompt_chars: {len(user_prompt)}")
-        print(f"api_request: {api_time:.2f} ms")
+        if self.profile_enabled:
+            api_time = (perf_counter() - api_start) * 1000
+            print("\nAI INSIGHT PERFORMANCE")
+            print("----------------------")
+            print(f"model: {self.model}")
+            print(f"prompt_chars: {len(user_prompt)}")
+            print(f"api_request: {api_time:.2f} ms")
 
         # -----------------------------------------
         # Extract text blocks
