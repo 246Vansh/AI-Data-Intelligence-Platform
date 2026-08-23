@@ -14,7 +14,6 @@ import pandas as pd
 # It does NOT:
 #   - modify the DataFrame
 #   - assume business-specific columns
-#   - assume Walmart fields
 #   - execute analysis plans
 #
 # It only detects potential quality issues.

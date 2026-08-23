@@ -213,19 +213,16 @@ class InsightEngine:
             parsed = pd.to_datetime(
                 self.result[column],
                 errors="coerce",
+                format="mixed",
             )
 
             if parsed.notna().all():
                 date_column = column
+                dates = parsed
                 break
 
         if date_column is None:
             return
-
-        dates = pd.to_datetime(
-            self.result[date_column],
-            errors="coerce",
-        )
 
         if dates.isna().any():
             return

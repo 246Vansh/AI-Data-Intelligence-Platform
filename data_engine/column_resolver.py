@@ -16,13 +16,13 @@ def normalize_column_name(
 
     Examples:
 
-        Weekly_Sales
-        weekly sales
-        WEEKLY-SALES
+        Total_Amount
+        total amount
+        TOTAL-AMOUNT
 
     all become:
 
-        weekly sales
+        total amount
     """
 
     value = str(value).strip().lower()
@@ -113,7 +113,7 @@ def resolve_column(
 
     It NEVER invents a column.
     It NEVER maps business concepts such as
-    'revenue' -> 'Weekly_Sales'.
+    'revenue' -> some differently named sales column.
     """
 
     if not question or not columns:
@@ -139,14 +139,14 @@ def resolve_column(
 
         normalized_column = normalize_column_name(column_name)
 
+        if not normalized_column:
+            continue
+
         if normalized_column == normalized_question:
             candidates.append(column_name)
 
     if len(candidates) == 1:
         return candidates[0]
-
-    if len(candidates) > 1:
-        return None
 
     # -----------------------------------------------------
     # Second pass:
