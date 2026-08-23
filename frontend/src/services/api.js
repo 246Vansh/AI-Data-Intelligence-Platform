@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const api = axios.create({
-    baseURL: "http://127.0.0.1:8000/api",
+    baseURL: import.meta.env?.VITE_API_BASE_URL || "/api",
     headers: {
         "Content-Type": "application/json",
     },
@@ -9,12 +9,50 @@ const api = axios.create({
 
 
 // =========================================================
+// IN-MEMORY CLIENT CACHE & REQUEST DEDUPLICATION
+// =========================================================
+
+const cache = new Map();
+const inFlight = new Map();
+
+export function clearDatasetCache() {
+    cache.clear();
+    inFlight.clear();
+}
+
+async function cachedGet(url) {
+    if (cache.has(url)) {
+        return cache.get(url);
+    }
+
+    if (inFlight.has(url)) {
+        return inFlight.get(url);
+    }
+
+    const promise = api
+        .get(url)
+        .then((response) => {
+            cache.set(url, response.data);
+            inFlight.delete(url);
+            return response.data;
+        })
+        .catch((error) => {
+            inFlight.delete(url);
+            throw error;
+        });
+
+    inFlight.set(url, promise);
+    return promise;
+}
+
+// =========================================================
 // DATASET
 // =========================================================
 
 export async function uploadDataset(file) {
-    const formData = new FormData();
+    clearDatasetCache();
 
+    const formData = new FormData();
     formData.append("file", file);
 
     const response = await api.post(
@@ -30,33 +68,22 @@ export async function uploadDataset(file) {
     return response.data;
 }
 
-
 export async function getDatasetProfile() {
-    const response = await api.get("/dataset/profile");
-
-    return response.data;
+    return cachedGet("/dataset/profile");
 }
-
 
 export async function getDatasetPreview() {
-    const response = await api.get("/dataset/preview");
-
-    return response.data;
+    return cachedGet("/dataset/preview");
 }
-
 
 export async function getDatasetMetadata() {
-    const response = await api.get("/dataset/metadata");
-
-    return response.data;
+    return cachedGet("/dataset/metadata");
 }
-
 
 export async function getDatasetQuality() {
-    const response = await api.get("/dataset/quality");
-
-    return response.data;
+    return cachedGet("/dataset/quality");
 }
+
 
 
 // =========================================================
