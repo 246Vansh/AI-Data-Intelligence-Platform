@@ -21,9 +21,14 @@ INSIGHT_PROVIDERS = {
 
 def get_insight_provider():
 
+    # INSIGHT_PROVIDER is intentionally separate from
+    # AI_PROVIDER (which selects the planner). The default
+    # must be a key that actually exists in
+    # INSIGHT_PROVIDERS, otherwise this function can never
+    # succeed without an env override.
     provider_name = os.getenv(
-        "AI_PROVIDER",
-        "openai",
+        "INSIGHT_PROVIDER",
+        "claude",
     ).lower()
 
     provider_class = INSIGHT_PROVIDERS.get(provider_name)
