@@ -1,43 +1,34 @@
+import math
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from data_engine.performance import measure
 
-from backend.dependencies import get_walmart_data
+from backend.dependencies import (
+    get_current_dataset,
+    has_dataset_loaded,
+)
 
+from data_engine.dataset_manager import dataset_manager
 from data_engine.metadata import get_metadata
 
-from data_engine.plan_validator import (
-    validate_plan,
-)
+from data_engine.plan_validator import validate_plan
 
-from data_engine.plan_executor import (
-    execute_plan,
-)
+from data_engine.plan_executor import execute_plan
 
-from data_engine.visualization import (
-    create_visualization_spec,
-)
+from data_engine.visualization import create_visualization_spec
 
-from ai.planner import (
-    create_analysis_plan,
-)
+from ai.planner import create_analysis_plan
+from ai.adapter import AnalysisClarificationError
 
-from ai.fast_planner import (
-    FastPlanner,
-)
+from ai.fast_planner import FastPlanner
 
-from data_engine.insight_engine import (
-    build_deterministic_insights,
-)
+from data_engine.insight_engine import build_deterministic_insights
 
-from data_engine.insight_generator import (
-    build_insight_response,
-)
+from data_engine.insight_generator import build_insight_response
 
-from ai.insight_validator import (
-    validate_insights,
-)
+from ai.insight_validator import validate_insights
 
 
 router = APIRouter(
@@ -46,20 +37,50 @@ router = APIRouter(
 )
 
 
+# =========================================================
+# REQUEST MODEL
+# =========================================================
+
+
 class AnalysisRequest(BaseModel):
     question: str
+
+
+# =========================================================
+# JSON SAFETY
+# =========================================================
+
+
+def make_json_safe(value):
+    """
+    Convert non-JSON-safe floating-point values into None.
+
+    Protects API responses from:
+        NaN
+        +Infinity
+        -Infinity
+    """
+
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+
+    return value
+
+
+# =========================================================
+# ANALYSIS ENDPOINT
+# =========================================================
 
 
 @router.post("")
 def analyze_dataset(
     request: AnalysisRequest,
 ):
-
     timings = {}
 
-    # =========================================
-    # 1. Validate question
-    # =========================================
+    # =====================================================
+    # 1. VALIDATE QUESTION
+    # =====================================================
 
     with measure(
         "question_validation",
@@ -73,29 +94,55 @@ def analyze_dataset(
                 detail="Question cannot be empty.",
             )
 
-    # =========================================
-    # 2. Load dataset
-    # =========================================
+    # =====================================================
+    # 2. LOAD ACTIVE DATASET
+    # =====================================================
 
-    with measure(
-        "dataset_loading",
-        timings,
-    ):
-        df = get_walmart_data()
+    try:
+        with measure(
+            "dataset_loading",
+            timings,
+        ):
+            if not has_dataset_loaded():
+                raise HTTPException(
+                    status_code=404,
+                    detail="No dataset has been uploaded.",
+                )
 
-    # =========================================
-    # 3. Generate metadata
-    # =========================================
+            df = get_current_dataset()
 
-    with measure(
-        "metadata_generation",
-        timings,
-    ):
-        metadata = get_metadata(df)
+    except HTTPException:
+        raise
 
-    # =========================================
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Dataset loading failed: {exc}",
+        ) from exc
+
+    # =====================================================
+    # 3. GENERATE / LOAD METADATA
+    # =====================================================
+
+    try:
+        with measure(
+            "metadata_generation",
+            timings,
+        ):
+            metadata = dataset_manager.get_cached(
+                "metadata",
+                get_metadata,
+            )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Metadata generation failed: {exc}",
+        ) from exc
+
+    # =====================================================
     # 4. FAST PLANNER
-    # =========================================
+    # =====================================================
 
     plan = None
 
@@ -115,34 +162,21 @@ def analyze_dataset(
             )
 
     except Exception:
-        # Fast Planner failure should never
-        # break the complete request.
-
+        # Fast planner is intentionally conservative.
+        #
+        # If anything goes wrong, fall back to the AI planner.
         plan = None
 
-    # =========================================
-    # 5. CLAUDE FALLBACK
-    # =========================================
+    # =====================================================
+    # 5. AI PLANNER FALLBACK
+    # =====================================================
 
     if plan is not None:
-        # -------------------------------------
-        # Fast Planner succeeded
-        # -------------------------------------
-
         planner_type = "fast"
-
         planner_fallback = False
 
     else:
-        # -------------------------------------
-        # Fast Planner could not safely
-        # understand the question.
-        #
-        # Fall back to Claude.
-        # -------------------------------------
-
-        planner_type = "claude"
-
+        planner_type = "ai"
         planner_fallback = True
 
         try:
@@ -150,60 +184,57 @@ def analyze_dataset(
                 "ai_planning",
                 timings,
             ):
-                # IMPORTANT:
-                #
-                # create_analysis_plan()
-                # already returns AnalysisPlan.
-                #
-                # It does NOT return
-                # AnalysisPlanResponse anymore.
-
                 plan = create_analysis_plan(
                     user_question=question,
                     metadata=metadata,
                 )
 
+        except AnalysisClarificationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+
         except Exception as exc:
+            message = str(exc)
+
+            if "API_KEY" in message.upper():
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "This question requires the AI planner, "
+                        "but no AI API key is configured on the "
+                        "server. Configure the required AI API key "
+                        "in the backend environment."
+                    ),
+                ) from exc
+
             raise HTTPException(
                 status_code=500,
                 detail=f"AI planning failed: {exc}",
             ) from exc
 
-    # =========================================
-    # 6. SAFETY CHECK
-    # =========================================
+    # =====================================================
+    # 6. ENSURE A PLAN EXISTS
+    # =====================================================
 
     if plan is None:
         raise HTTPException(
-            status_code=500,
-            detail=("Planner could not create an analysis plan."),
+            status_code=422,
+            detail=(
+                "The system could not create a valid analysis plan for this question."
+            ),
         )
 
-    # =========================================
+    # =====================================================
     # 7. VALIDATE FINAL PLAN
-    # =========================================
-    #
-    # BOTH planners reach this point.
-    #
-    # Fast:
-    #
-    # FastPlanner
-    #     ↓
-    # AnalysisPlan
-    #     ↓
-    # Validator
-    #
-    # Claude:
-    #
-    # Claude
-    #     ↓
-    # Adapter
-    #     ↓
-    # AnalysisPlan
-    #     ↓
-    # Validator
-    #
-    # =========================================
+    # =====================================================
 
     try:
         with measure(
@@ -213,17 +244,24 @@ def analyze_dataset(
             validate_plan(
                 df,
                 plan,
+                metadata,
             )
 
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=(f"Invalid analysis plan: {exc}"),
+            detail=f"Invalid analysis plan: {exc}",
         ) from exc
 
-    # =========================================
-    # 8. Execute analysis
-    # =========================================
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Plan validation failed: {exc}",
+        ) from exc
+
+    # =====================================================
+    # 8. EXECUTE ANALYSIS PLAN
+    # =====================================================
 
     try:
         with measure(
@@ -235,40 +273,66 @@ def analyze_dataset(
                 plan,
             )
 
+            safe_rows = [
+                {key: make_json_safe(value) for key, value in row.items()}
+                for row in result.to_dict(orient="records")
+            ]
+
             analysis_result = {
                 "columns": result.columns.tolist(),
-                "rows": result.to_dict(orient="records"),
+                "rows": safe_rows,
                 "row_count": len(result),
             }
 
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=(f"Analysis execution failed: {exc}"),
+            detail=f"Analysis execution failed: {exc}",
         ) from exc
 
-    # =========================================
-    # 9. Deterministic insight context
-    # =========================================
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected analysis execution error: {exc}",
+        ) from exc
 
-    metric_column = f"{plan.aggregation}_{plan.metric}"
+    # =====================================================
+    # 9. BUILD DETERMINISTIC INSIGHT CONTEXT
+    # =====================================================
 
-    with measure(
-        "deterministic_insight_context",
-        timings,
-    ):
-        insight_context = build_deterministic_insights(
-            result=result,
-            metric_column=metric_column,
-            group_by=plan.group_by,
-        )
+    metric_column = None
 
-    # =========================================
-    # 10. Deterministic insights
-    # =========================================
+    if plan.metric is not None and plan.aggregation is not None:
+        metric_column = f"{plan.aggregation}_{plan.metric}"
+
+    try:
+        with measure(
+            "deterministic_insight_context",
+            timings,
+        ):
+            insight_context = build_deterministic_insights(
+                result=result,
+                metric_column=metric_column,
+                group_by=plan.group_by,
+            )
+
+    except Exception as exc:
+        # Insight context is supplementary.
+        #
+        # Do not fail the actual analysis if it cannot
+        # be generated.
+
+        insight_context = {}
+        insight_error = f"Insight context generation failed: {exc}"
+
+    else:
+        insight_error = None
+
+    # =====================================================
+    # 10. GENERATE DETERMINISTIC INSIGHTS
+    # =====================================================
 
     insight_response = None
-    insight_error = None
 
     try:
         with measure(
@@ -285,14 +349,18 @@ def analyze_dataset(
             )
 
     except Exception as exc:
-        # Insight failure must not break
-        # the actual analysis.
+        if insight_error is None:
+            insight_error = str(exc)
 
-        insight_error = str(exc)
+    # =====================================================
+    # 11. VISUALIZATION
+    # =====================================================
 
-    # =========================================
-    # 11. Visualization
-    # =========================================
+    # Always initialize the title.
+    visualization_title = None
+
+    # Global aggregation does not have a grouping
+    # dimension, therefore a table is safest.
 
     if not plan.group_by:
         visualization_type = "table"
@@ -300,28 +368,37 @@ def analyze_dataset(
     else:
         visualization_type = plan.visualization or "table"
 
-    visualization_title = None
-
     try:
         with measure(
             "visualization",
             timings,
         ):
-            visualization_spec = create_visualization_spec(
-                result=result,
-                visualization_type=(visualization_type),
-                title=visualization_title,
-            )
+            try:
+                visualization_spec = create_visualization_spec(
+                    result=result,
+                    visualization_type=visualization_type,
+                    title=visualization_title,
+                )
 
-    except ValueError as exc:
+            except ValueError:
+                # Chart generation failed.
+                # Return a table instead.
+
+                visualization_spec = create_visualization_spec(
+                    result=result,
+                    visualization_type="table",
+                    title=visualization_title,
+                )
+
+    except Exception as exc:
         raise HTTPException(
-            status_code=400,
-            detail=(f"Visualization creation failed: {exc}"),
+            status_code=500,
+            detail=f"Visualization generation failed: {exc}",
         ) from exc
 
-    # =========================================
-    # 12. Total performance
-    # =========================================
+    # =====================================================
+    # 12. TOTAL PERFORMANCE
+    # =====================================================
 
     timings["total"] = round(
         sum(
@@ -335,27 +412,27 @@ def analyze_dataset(
         2,
     )
 
-    # =========================================
-    # 13. Return response
-    # =========================================
+    # =====================================================
+    # 13. FINAL RESPONSE
+    # =====================================================
 
     return {
         "success": True,
         "question": question,
-        # -------------------------------------
+        # -------------------------------------------------
         # Planner
-        # -------------------------------------
+        # -------------------------------------------------
         "planner": {
             "type": planner_type,
             "fallback": planner_fallback,
         },
-        # -------------------------------------
+        # -------------------------------------------------
         # Analysis result
-        # -------------------------------------
+        # -------------------------------------------------
         "data": analysis_result,
-        # -------------------------------------
+        # -------------------------------------------------
         # Insights
-        # -------------------------------------
+        # -------------------------------------------------
         "insights": (
             insight_response.model_dump()
             if insight_response is not None
@@ -366,13 +443,13 @@ def analyze_dataset(
         ),
         "insight_source": "deterministic",
         "insight_error": insight_error,
-        # -------------------------------------
+        # -------------------------------------------------
         # Visualization
-        # -------------------------------------
+        # -------------------------------------------------
         "visualization": visualization_spec,
-        # -------------------------------------
-        # Final AnalysisPlan
-        # -------------------------------------
+        # -------------------------------------------------
+        # Final canonical AnalysisPlan
+        # -------------------------------------------------
         "plan": {
             "filters": [
                 {
@@ -389,10 +466,11 @@ def analyze_dataset(
             "sort_by": plan.sort_by,
             "limit": plan.limit,
             "visualization": plan.visualization,
+            "time_column": plan.time_column,
             "time_granularity": (plan.time_granularity),
         },
-        # -------------------------------------
+        # -------------------------------------------------
         # Performance
-        # -------------------------------------
+        # -------------------------------------------------
         "performance": timings,
     }
