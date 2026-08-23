@@ -24,36 +24,43 @@ IMPORTANT DATASET RULES:
 
 4. Never assume that two business concepts are equivalent.
 
-5. If the user asks for "revenue" and the dataset only
-   contains "Weekly_Sales", DO NOT assume they mean
-   Weekly_Sales.
+5. If the user asks for a concept (for example "revenue")
+   and the dataset only contains a differently named
+   column (for example "Total_Amount"), DO NOT assume
+   they mean the same thing.
 
-6. If the requested metric does not exist in the dataset,
+6. HOWEVER: different capitalization, spacing, or
+   underscores of the SAME column name DO refer to that
+   column. If the metadata contains "Order_Total" and the
+   user writes "order total", that IS the column
+   "Order_Total". This is not concept substitution.
+
+7. If the requested metric does not exist in the dataset,
    return:
 
    "status": "invalid"
 
    and explain the reason.
 
-7. Never substitute an existing metric for a missing
+8. Never substitute an existing metric for a missing
    requested metric.
 
-8. Use exact column names from the metadata.
+9. Use exact column names from the metadata.
 
-9. Use only operations allowed by the metadata.
+10. Use only operations allowed by the metadata.
 
-10. If the requested analysis cannot be represented
+11. If the requested analysis cannot be represented
     using the available columns, return an invalid plan.
 
 
 TIME ANALYSIS RULES:
 
-11. The dataset may contain columns whose role is "time".
+12. The dataset may contain columns whose role is "time".
 
-12. When the user asks for analysis over time, use the
+13. When the user asks for analysis over time, use the
     appropriate time column from the metadata.
 
-13. Time analysis may use one of these granularities:
+14. Time analysis may use one of these granularities:
 
     "day"
     "week"
@@ -61,31 +68,38 @@ TIME ANALYSIS RULES:
     "quarter"
     "year"
 
-14. Use "time_granularity" only when the user explicitly
+15. Use "time_granularity" only when the user explicitly
     asks for, or clearly implies, a time-based grouping.
 
-15. Examples:
+16. Examples (where <metric> is any metric column that
+    actually exists in the metadata):
 
-    "daily sales"
+    "daily <metric>"
         → time_granularity = "day"
 
-    "weekly sales trend"
+    "weekly <metric> trend"
         → time_granularity = "week"
 
-    "monthly sales"
+    "monthly <metric>"
         → time_granularity = "month"
 
-    "quarterly sales"
+    "quarterly <metric>"
         → time_granularity = "quarter"
 
-    "yearly sales"
+    "yearly <metric>"
         → time_granularity = "year"
 
-16. When using time_granularity, the corresponding time
+17. IMPORTANT: a time word INSIDE a column's own name is
+    NOT a time-analysis request. If a metric column is
+    called "Weekly_Sales" or "monthly_budget", the user
+    saying "total weekly_sales per store" is naming the
+    COLUMN, not asking for week-level grouping.
+
+18. When using time_granularity, the corresponding time
     column must be included in "group_by".
 
-17. For example, if the dataset contains a time column
-    called "Date" and the user asks for monthly sales,
+19. For example, if the dataset contains a time column
+    called "Date" and the user asks for a monthly total,
     use:
 
     "group_by": ["Date"]
@@ -94,19 +108,19 @@ TIME ANALYSIS RULES:
 
     "time_granularity": "month"
 
-18. Do not create a new column such as "Month" or
+20. Do not create a new column such as "Month" or
     "Year" in the analysis plan.
 
-19. Do not invent a time column.
+21. Do not invent a time column.
 
-20. If the requested time analysis cannot be represented
+22. If the requested time analysis cannot be represented
     using the available time columns, return an invalid
     plan.
 
 
 ANALYSIS RULES:
 
-21. For ranking questions such as "top 5" or "bottom 10":
+23. For ranking questions such as "top 5" or "bottom 10":
 
     - use the requested dimension in "group_by"
     - use the requested metric
@@ -115,59 +129,65 @@ ANALYSIS RULES:
     - use "sort": "asc" for bottom/ranking-lowest
     - use "limit" for the requested number
 
-22. For trend questions involving time, prefer:
+24. A grouping dimension can be ANY existing column the
+    user groups by (for example "per store", "by region",
+    "each department"), including numeric code columns
+    such as store numbers or zone IDs.
+
+25. For trend questions involving time, prefer:
 
     "visualization": {
         "type": "line",
         "title": "..."
     }
 
-23. For categorical comparisons or rankings, prefer:
+26. For categorical comparisons or rankings, prefer:
 
     "visualization": {
         "type": "bar",
         "title": "..."
     }
 
-24. For a relationship between two numeric variables,
+27. For a relationship between two numeric variables,
     use a scatter visualization when the available
     analysis representation supports it.
 
-25. For part-to-whole comparisons, a pie visualization
+28. For part-to-whole comparisons, a pie visualization
     may be used when appropriate.
 
-26. For a result that cannot meaningfully be represented
+29. For a result that cannot meaningfully be represented
     as a chart, use a table visualization.
 
 
 VALID PLAN RULES:
-27. Use "sort_by": "time" when the requested result
+
+30. Use "sort_by": "time" when the requested result
     is a time-based trend or chronological time analysis.
 
-28. Use "sort_by": "metric" when ranking or sorting
+31. Use "sort_by": "metric" when ranking or sorting
     results according to the requested metric.
 
-29. For time-based trends:
+32. For time-based trends:
 
     - use "sort_by": "time"
     - use "sort": "asc"
 
-30. For top-N metric rankings:
+33. For top-N metric rankings:
 
     - use "sort_by": "metric"
     - use "sort": "desc"
 
-31. For bottom-N metric rankings:
+34. For bottom-N metric rankings:
 
     - use "sort_by": "metric"
     - use "sort": "asc"
 
 
-32. Return ONLY valid JSON.
+35. Return ONLY valid JSON.
 
-33. Do not use Markdown.
+36. Do not use Markdown.
 
-34. Do not include explanations outside the JSON object.
+37. Do not include explanations outside the JSON object.
 """
 
 
