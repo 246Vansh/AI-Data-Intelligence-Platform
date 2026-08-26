@@ -4,6 +4,13 @@ import { getDatasetMetadata } from "../services/api";
 
 const emit = defineEmits(["question-selected"]);
 
+const props = defineProps({
+    datasetId: {
+        type: String,
+        default: "",
+    },
+});
+
 const metadata = ref(null);
 const loading = ref(true);
 const refreshing = ref(false);
@@ -14,6 +21,20 @@ const copiedQuestion = ref(null);
 async function loadMetadata(options = {}) {
     const isRefresh = options.refresh === true;
 
+    // Captured so a response that resolves after the user has
+    // already switched datasets can be detected and ignored below.
+    const requestedDatasetId = props.datasetId;
+
+    // No dataset selected - see DatasetOverview.vue's loadProfile()
+    // for why this must not fall back to the legacy no-id endpoint.
+    if (!requestedDatasetId) {
+        metadata.value = null;
+        error.value = null;
+        loading.value = false;
+        refreshing.value = false;
+        return;
+    }
+
     try {
         if (isRefresh) {
             refreshing.value = true;
@@ -22,8 +43,19 @@ async function loadMetadata(options = {}) {
         }
 
         error.value = null;
-        metadata.value = await getDatasetMetadata();
+
+        const response = await getDatasetMetadata(requestedDatasetId);
+
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
+        metadata.value = response;
     } catch (err) {
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
         console.error("Dataset metadata error:", err);
 
         error.value =
@@ -31,8 +63,10 @@ async function loadMetadata(options = {}) {
             err?.response?.data?.message ||
             "Unable to load dataset metadata.";
     } finally {
-        loading.value = false;
-        refreshing.value = false;
+        if (requestedDatasetId === props.datasetId) {
+            loading.value = false;
+            refreshing.value = false;
+        }
     }
 }
 
@@ -778,6 +812,33 @@ onMounted(() => {
 
             </div>
 
+        </div>
+
+        <!-- =====================================================
+             NO DATASET SELECTED
+        ====================================================== -->
+
+        <div v-else
+            class="flex min-h-[200px] flex-col items-center justify-center rounded-[20px] border border-dashed border-violet-100 bg-white px-5 text-center">
+            <div
+                class="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-50 text-violet-400">
+                <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 5h16" />
+                    <path d="M4 12h16" />
+                    <path d="M4 19h16" />
+                    <circle cx="8" cy="5" r="1.5" />
+                    <circle cx="16" cy="12" r="1.5" />
+                    <circle cx="10" cy="19" r="1.5" />
+                </svg>
+            </div>
+
+            <h3 class="mt-3 text-sm font-bold text-slate-700">
+                No dataset selected
+            </h3>
+
+            <p class="mt-1.5 max-w-xs text-[11px] leading-5 text-slate-400">
+                Upload or select a dataset to view its schema.
+            </p>
         </div>
 
     </section>
