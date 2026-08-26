@@ -129,46 +129,19 @@ def apply_time_granularity(
     # We use the column selected by the planner.
     # There is NO hardcoded date column name.
     #
-    # The parsed column is cached per dataset so
-    # repeated time questions do not re-parse the
-    # same strings on every request.
+    # Parsed directly from the `df` this function was given -
+    # not via dataset_manager's global "active dataset" cache,
+    # which could silently resolve to a DIFFERENT dataset than
+    # the one actually being analyzed once multiple datasets
+    # can be active in the registry at once.
     # -----------------------------------------
 
     if not pd.api.types.is_datetime64_any_dtype(result[time_column]):
-        from data_engine.dataset_manager import dataset_manager
-
-        def _parse_time(source_df):
-            return pd.to_datetime(
-                source_df[time_column],
-                errors="coerce",
-                format="mixed",
-            )
-
-        try:
-            parsed = dataset_manager.get_cached(
-                f"time_parsed:{time_column}",
-                _parse_time,
-            )
-
-            # Only reuse the cache when it aligns with the
-            # frame being processed (filters may have
-            # reduced it).
-            if len(parsed) == len(result) and parsed.index.equals(result.index):
-                result[time_column] = parsed
-            else:
-                result[time_column] = pd.to_datetime(
-                    result[time_column],
-                    errors="coerce",
-                    format="mixed",
-                )
-        except RuntimeError:
-            # No managed dataset (e.g. direct engine use in
-            # tests): parse without caching.
-            result[time_column] = pd.to_datetime(
-                result[time_column],
-                errors="coerce",
-                format="mixed",
-            )
+        result[time_column] = pd.to_datetime(
+            result[time_column],
+            errors="coerce",
+            format="mixed",
+        )
 
     # -----------------------------------------
     # Remove rows where the selected time value
