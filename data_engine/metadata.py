@@ -4,6 +4,8 @@ import re
 
 import pandas as pd
 
+from data_engine.json_safety import make_json_safe
+
 
 # =========================================================
 # CONSTANTS
@@ -348,26 +350,6 @@ def get_allowed_operations(
         ]
 
     return []
-
-
-# =========================================================
-# SAFE SAMPLE VALUES
-# =========================================================
-
-
-def make_json_safe(value):
-    """
-    Convert values that are problematic for JSON serialization
-    into safe representations.
-    """
-
-    if pd.isna(value):
-        return None
-
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-
-    return value
 
 
 # =========================================================
