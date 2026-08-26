@@ -68,16 +68,22 @@ export async function uploadDataset(file) {
     return response.data;
 }
 
-export async function getDatasetProfile() {
-    return cachedGet("/dataset/profile");
+export async function getDatasetProfile(datasetId) {
+    return cachedGet(
+        datasetId ? `/dataset/${datasetId}/profile` : "/dataset/profile",
+    );
 }
 
-export async function getDatasetPreview() {
-    return cachedGet("/dataset/preview");
+export async function getDatasetPreview(datasetId) {
+    return cachedGet(
+        datasetId ? `/dataset/${datasetId}/preview` : "/dataset/preview",
+    );
 }
 
-export async function getDatasetMetadata() {
-    return cachedGet("/dataset/metadata");
+export async function getDatasetMetadata(datasetId) {
+    return cachedGet(
+        datasetId ? `/dataset/${datasetId}/metadata` : "/dataset/metadata",
+    );
 }
 
 export async function getDatasetQuality() {
@@ -90,14 +96,28 @@ export async function getDatasetQuality() {
 // ANALYSIS
 // =========================================================
 
-export async function analyzeDataset(question) {
+export async function analyzeDataset(question, datasetId, analysisContext) {
     if (!question || !question.trim()) {
         throw new Error("Analysis question cannot be empty.");
     }
 
-    const response = await api.post("/analyze", {
+    if (!datasetId) {
+        throw new Error("No dataset selected. Please upload a dataset first.");
+    }
+
+    const payload = {
         question: question.trim(),
-    });
+        dataset_id: datasetId,
+    };
+
+    // `analysis_context` (mode + full dataset_ids[] + primary_dataset_id)
+    // is additive - existing SINGLE-mode callers that omit it keep
+    // working against the current dataset_id-only contract untouched.
+    if (analysisContext) {
+        payload.analysis_context = analysisContext;
+    }
+
+    const response = await api.post("/analyze", payload);
 
     return response.data;
 }
