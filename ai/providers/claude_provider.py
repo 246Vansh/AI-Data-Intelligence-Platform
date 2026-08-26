@@ -78,7 +78,23 @@ class ClaudeProvider:
         # CLIENT
         # =================================================
 
-        self.client = Anthropic(api_key=api_key)
+        # Every route in this app is a sync `def`, so they all run
+        # on a shared, size-limited thread pool. The SDK's default
+        # timeout (read=600s, x up to 3 attempts with retries) can
+        # hold a thread hostage long enough that the pool fills up
+        # and even unrelated requests (e.g. GET /) stop getting
+        # served at all. Bound it to something sane instead.
+        request_timeout = float(
+            os.getenv(
+                "AI_REQUEST_TIMEOUT_SECONDS",
+                "60",
+            )
+        )
+
+        self.client = Anthropic(
+            api_key=api_key,
+            timeout=request_timeout,
+        )
 
     # =====================================================
     # CREATE ANALYSIS PLAN
@@ -128,545 +144,31 @@ class ClaudeProvider:
         # =================================================
         # 3. BUILD PLANNING PROMPT
         # =================================================
+        #
+        # All stable reasoning rules live only in SYSTEM_PROMPT
+        # (ai/prompts.py). This block is just the per-request
+        # data: dataset metadata (static per uploaded dataset,
+        # its own cache breakpoint below) + the user's question
+        # (changes every call).
+        # =================================================
 
-        user_prompt = textwrap.dedent(
+        metadata_block = textwrap.dedent(
             f"""
-            You are the planning layer of a dataset-agnostic
-            AI data analysis system.
-
-            Your job is NOT to answer the user's question.
-
-            Your job is to understand the user's analytical
-            intent and convert it into a structured analysis
-            plan that the Data Engine can execute.
-
             =================================================
             DATASET METADATA
             =================================================
 
             {metadata_text}
+            """
+        )
 
+        question_block = textwrap.dedent(
+            f"""
             =================================================
             USER QUESTION
             =================================================
 
             {user_question}
-
-            =================================================
-            PRIMARY OBJECTIVE
-            =================================================
-
-            Users are not required to know how to write
-            database queries, pandas operations, aggregation
-            names, column names, or formal analytical language.
-
-            The user may ask a question casually, indirectly,
-            incompletely, or using natural business language.
-
-            You must interpret the user's intended analysis
-            when that intent can be safely derived from the
-            dataset metadata.
-
-            Examples of acceptable natural-language requests:
-
-                "show sales by region"
-
-                "which region sold the most"
-
-                "what is the average for each category"
-
-                "give me the highest revenue products"
-
-                "how did sales change over time"
-
-                "I want to see monthly revenue"
-
-                "tell me the typical price"
-
-                "which store performed better"
-
-            Do NOT require the user to use exact technical
-            terminology.
-
-            =================================================
-            DATASET IS THE SOURCE OF TRUTH
-            =================================================
-
-            The dataset metadata is the ONLY source of truth
-            for available data.
-
-            You MUST:
-
-                - use only real dataset columns
-                - use the exact dataset column names
-                - respect column roles
-                - respect available data types
-                - respect time-column metadata
-                - use only operations supported by the
-                  analysis plan
-
-            NEVER invent a column.
-
-            NEVER invent a metric.
-
-            NEVER assume a conventional column exists.
-
-            NEVER create a column merely because it would be
-            common in a particular type of dataset.
-
-            =================================================
-            NATURAL LANGUAGE INTERPRETATION
-            =================================================
-
-            The user does not need to explicitly mention the
-            exact column name.
-
-            You may interpret common analytical language when
-            the mapping is supported by the metadata.
-
-            For example:
-
-                "average"
-                    -> mean
-
-                "avg"
-                    -> mean
-
-                "total"
-                    -> sum
-
-                "highest"
-                    -> max
-
-                "lowest"
-                    -> min
-
-                "number of"
-                    -> count
-
-            The adapter will normalize aggregation aliases,
-            so you may use the natural analytical term when
-            appropriate.
-
-            However, the metric and dimensions themselves MUST
-            ultimately resolve to real dataset columns.
-
-            =================================================
-            INTENT INTERPRETATION
-            =================================================
-
-            Determine what the user is actually trying to
-            analyze.
-
-            Consider:
-
-                - requested metric
-                - requested aggregation
-                - grouping dimension
-                - filters
-                - ranking
-                - limit
-                - time analysis
-                - sorting
-                - comparison
-                - visualization
-
-            Do not require the user to explicitly state all
-            of these.
-
-            Infer them when the intended meaning is clear and
-            supported by the dataset.
-
-            =================================================
-            GROUPING INTERPRETATION
-            =================================================
-
-            Natural phrases may indicate grouping.
-
-            Examples:
-
-                "sales by region"
-                "sales per store"
-                "revenue for every category"
-                "average price across products"
-                "region wise sales"
-                "for each department"
-
-            Map the grouping concept to the appropriate
-            REAL dataset column.
-
-            Do not invent a grouping column.
-
-            If multiple possible grouping columns exist and
-            the question does not provide enough information
-            to safely choose one, return "invalid".
-
-            =================================================
-            METRIC INTERPRETATION
-            =================================================
-
-            Identify the metric from the available metadata.
-
-            The metric MUST correspond to a real dataset
-            column.
-
-            Prefer columns whose metadata role is "metric"
-            when such metadata is available.
-
-            Do not invent semantic relationships such as:
-
-                revenue -> sales
-
-            unless the actual dataset column is explicitly
-            represented by the metadata and can safely support
-            that interpretation.
-
-            =================================================
-            AGGREGATION
-            =================================================
-
-            Supported analytical aggregations are:
-
-                sum
-                mean
-                median
-                min
-                max
-                count
-
-            Natural-language equivalents may be interpreted:
-
-                total
-                average
-                avg
-                typical
-                median
-                highest
-                maximum
-                lowest
-                minimum
-                number of
-                count
-
-            Choose the aggregation that best represents the
-            user's intended request.
-
-            =================================================
-            RANKING
-            =================================================
-
-            Understand natural ranking requests.
-
-            Examples:
-
-                "top products"
-
-                "best 5 stores"
-
-                "highest revenue categories"
-
-                "bottom 10 regions"
-
-            Interpret:
-
-                top -> descending
-
-                bottom -> ascending
-
-            If a number is explicitly provided, use it as
-            "limit".
-
-            If the user asks for a ranking without a number,
-            do not invent an arbitrary limit unless the
-            surrounding plan requirements clearly require one.
-
-            =================================================
-            FILTERS
-            =================================================
-
-            Understand natural filtering language.
-
-            Examples:
-
-                "sales for India"
-
-                "products above 100"
-
-                "orders greater than 500"
-
-                "customers from Delhi"
-
-            If the required filter column exists, create the
-            appropriate structured filter.
-
-            Use only supported operators:
-
-                =
-                !=
-                >
-                >=
-                <
-                <=
-
-            =================================================
-            TIME ANALYSIS
-            =================================================
-
-            Time analysis must be based on the dataset
-            metadata.
-
-            First identify columns whose metadata role is
-            "time".
-
-            If exactly one time column exists, it may be used
-            when the user clearly requests time analysis.
-
-            If multiple time columns exist and the question
-            does not identify which one is intended, return
-            "invalid".
-
-            NEVER assume a column is a time column merely
-            because its name looks like:
-
-                date
-                timestamp
-                order_date
-                created_at
-
-            The metadata is authoritative.
-
-            Supported time granularities:
-
-                day
-                week
-                month
-                quarter
-                year
-
-            Natural language examples:
-
-                "daily sales"
-                    -> day
-
-                "weekly revenue"
-                    -> week
-
-                "monthly sales"
-                    -> month
-
-                "quarterly performance"
-                    -> quarter
-
-                "annual revenue"
-                    -> year
-
-            A time word appearing inside a column name does
-            NOT automatically mean time grouping.
-
-            Example:
-
-                Weekly_Sales
-
-            does NOT by itself mean:
-
-                time_granularity = "week"
-
-            Time grouping should only be created when the
-            user's intent actually requests temporal grouping.
-
-            For chronological analysis use:
-
-                sort_by = "time"
-                sort = "asc"
-                visualization.type = "line"
-
-            When time grouping is requested:
-
-                time_column MUST contain the exact dataset
-                time column name.
-
-                time_granularity MUST be populated.
-
-                group_by should include the time column when
-                required by the downstream representation.
-
-            =================================================
-            COMPARISON QUESTIONS
-            =================================================
-
-            Users may ask comparison questions naturally.
-
-            Examples:
-
-                "which region performed better"
-
-                "compare sales across stores"
-
-                "which category has the highest average"
-
-            If the comparison can be represented as a grouped
-            aggregation using available columns, create that
-            plan.
-
-            Do not return a natural-language answer.
-
-            =================================================
-            AMBIGUITY
-            =================================================
-
-            Do NOT reject a question merely because it is
-            casually written.
-
-            First try to understand the intended analytical
-            operation.
-
-            Return "invalid" ONLY when the request genuinely
-            cannot be converted into a reliable analysis plan.
-
-            Examples of genuine invalid cases:
-
-                - required data does not exist
-                - required column does not exist
-                - multiple columns are equally plausible and
-                  the question provides no way to choose
-                - question asks for external information
-                - question asks for unsupported computation
-                - question is unrelated to the dataset
-
-            Do NOT return invalid merely because:
-
-                - grammar is imperfect
-                - the user uses informal language
-                - the user does not know the aggregation name
-                - the user does not use exact column syntax
-                - the user asks conversationally
-
-            =================================================
-            UNSUPPORTED / EXTERNAL QUESTIONS
-            =================================================
-
-            Return:
-
-                status = "invalid"
-
-            when the user asks for information that cannot be
-            derived from this dataset.
-
-            Examples:
-
-                "what is the weather today"
-
-                "who is the president"
-
-                "what will sales be next year"
-
-                "tell me a joke"
-
-                "what is the best laptop"
-
-            Unless the required information is actually
-            represented in the dataset, do not answer these
-            questions.
-
-            =================================================
-            NO HALLUCINATION
-            =================================================
-
-            NEVER invent:
-
-                columns
-                metrics
-                dimensions
-                filters
-                time columns
-                calculated values
-
-            If the required information is unavailable,
-            return "invalid".
-
-            =================================================
-            DO NOT EXECUTE
-            =================================================
-
-            You are ONLY a planning layer.
-
-            Do NOT:
-
-                - calculate values
-                - inspect individual dataframe rows
-                - execute pandas operations
-                - answer the question
-                - produce numerical results
-
-            Return only the structured plan.
-
-            =================================================
-            SUCCESS RESPONSE
-            =================================================
-
-            Return a JSON object with:
-
-                {{
-                    "status": "success",
-                    "reason": null,
-                    "filters": [],
-                    "group_by": [],
-                    "metric": "exact_dataset_column",
-                    "aggregation": "sum",
-                    "sort": "desc",
-                    "sort_by": "metric",
-                    "limit": null,
-                    "time_column": null,
-                    "time_granularity": null,
-                    "visualization": {{
-                        "type": "table",
-                        "title": null
-                    }}
-                }}
-
-            IMPORTANT:
-
-            "metric", "group_by", "filters[].column", and
-            "time_column" must contain exact dataset column
-            names from the supplied metadata.
-
-            =================================================
-            INVALID RESPONSE
-            =================================================
-
-            When the question genuinely cannot be answered
-            from the dataset, return:
-
-                {{
-                    "status": "invalid",
-                    "reason": "This question cannot be answered using the available dataset.",
-                    "filters": [],
-                    "group_by": [],
-                    "metric": null,
-                    "aggregation": null,
-                    "sort": "desc",
-                    "sort_by": "metric",
-                    "limit": null,
-                    "time_column": null,
-                    "time_granularity": null,
-                    "visualization": null
-                }}
-
-            =================================================
-            OUTPUT REQUIREMENTS
-            =================================================
-
-            Return ONLY the JSON object.
-
-            Do NOT return:
-
-                - Markdown
-                - ```json
-                - explanations
-                - comments
-                - introductory text
-                - natural-language answers
-                - analysis outside the JSON object
             """
         )
 
@@ -675,15 +177,38 @@ class ClaudeProvider:
         # =================================================
         # 4. CLAUDE API CALL
         # =================================================
+        #
+        # Two ephemeral cache breakpoints:
+        #   1. The system prompt - 100% static across all requests.
+        #   2. The metadata block - static per uploaded dataset,
+        #      changes only on a new upload.
+        # The question block is never cached; it changes per call.
+        # =================================================
 
         response = self.client.messages.create(
             model=self.model,
             max_tokens=2000,
-            system=SYSTEM_PROMPT,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[
                 {
                     "role": "user",
-                    "content": user_prompt,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": metadata_block,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {
+                            "type": "text",
+                            "text": question_block,
+                        },
+                    ],
                 }
             ],
         )
