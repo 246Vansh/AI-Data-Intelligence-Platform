@@ -1,16 +1,13 @@
-import math
+import re
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from data_engine.performance import measure
+from data_engine.json_safety import sanitize_json, sanitize_records
 
-from backend.dependencies import (
-    get_current_dataset,
-    has_dataset_loaded,
-)
-
-from data_engine.dataset_manager import dataset_manager
+from data_engine.dataset_manager import get_cached_on
+from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
 from data_engine.metadata import get_metadata
 
 from data_engine.plan_validator import validate_plan
@@ -42,29 +39,30 @@ router = APIRouter(
 # =========================================================
 
 
+QUESTION_MAX_LENGTH = 500
+
+# Control characters (other than the whitespace pandas/AI prompts
+# already tolerate) are stripped so a question can't smuggle null
+# bytes or terminal/ANSI escapes into logs or the AI provider prompt.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 class AnalysisRequest(BaseModel):
-    question: str
+    dataset_id: str = Field(
+        ...,
+        description="ID of the dataset to analyze, as returned by /api/dataset/upload.",
+    )
 
+    question: str = Field(
+        ...,
+        max_length=QUESTION_MAX_LENGTH,
+        description="Natural-language question about the specified dataset.",
+    )
 
-# =========================================================
-# JSON SAFETY
-# =========================================================
-
-
-def make_json_safe(value):
-    """
-    Convert non-JSON-safe floating-point values into None.
-
-    Protects API responses from:
-        NaN
-        +Infinity
-        -Infinity
-    """
-
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-
-    return value
+    @field_validator("question")
+    @classmethod
+    def strip_control_characters(cls, value: str) -> str:
+        return _CONTROL_CHARS_RE.sub("", value)
 
 
 # =========================================================
@@ -95,7 +93,7 @@ def analyze_dataset(
             )
 
     # =====================================================
-    # 2. LOAD ACTIVE DATASET
+    # 2. LOAD DATASET BY ID
     # =====================================================
 
     try:
@@ -103,13 +101,16 @@ def analyze_dataset(
             "dataset_loading",
             timings,
         ):
-            if not has_dataset_loaded():
+            try:
+                dataset = dataset_registry.get(request.dataset_id)
+
+            except DatasetNotFoundError as exc:
                 raise HTTPException(
                     status_code=404,
-                    detail="No dataset has been uploaded.",
-                )
+                    detail=f"No dataset found for dataset_id: {request.dataset_id!r}",
+                ) from exc
 
-            df = get_current_dataset()
+            df = dataset.dataframe
 
     except HTTPException:
         raise
@@ -129,7 +130,8 @@ def analyze_dataset(
             "metadata_generation",
             timings,
         ):
-            metadata = dataset_manager.get_cached(
+            metadata = get_cached_on(
+                dataset,
                 "metadata",
                 get_metadata,
             )
@@ -273,10 +275,7 @@ def analyze_dataset(
                 plan,
             )
 
-            safe_rows = [
-                {key: make_json_safe(value) for key, value in row.items()}
-                for row in result.to_dict(orient="records")
-            ]
+            safe_rows = sanitize_records(result.to_dict(orient="records"))
 
             analysis_result = {
                 "columns": result.columns.tolist(),
@@ -351,6 +350,12 @@ def analyze_dataset(
     except Exception as exc:
         if insight_error is None:
             insight_error = str(exc)
+
+        # build_insight_response() may have already succeeded before
+        # validate_insights() rejected the result. Discard it so a
+        # failed-validation insight is never reported as
+        # insight_status: "success".
+        insight_response = None
 
     # =====================================================
     # 11. VISUALIZATION
@@ -434,7 +439,7 @@ def analyze_dataset(
         # Insights
         # -------------------------------------------------
         "insights": (
-            insight_response.model_dump()
+            sanitize_json(insight_response.model_dump())
             if insight_response is not None
             else {"insights": []}
         ),
