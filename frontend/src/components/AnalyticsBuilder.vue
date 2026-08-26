@@ -19,6 +19,25 @@ const props = defineProps({
         type: String,
         default: "",
     },
+    datasetId: {
+        type: String,
+        default: "",
+    },
+    // Analysis Context (see composables/useAnalysisContext.js) - the
+    // dataset store itself still lives in Dashboard.vue, these three
+    // props are just its current selection resolved for this panel.
+    analysisMode: {
+        type: String,
+        default: "single",
+    },
+    selectedDatasetIds: {
+        type: Array,
+        default: () => [],
+    },
+    selectedDatasetNames: {
+        type: Array,
+        default: () => [],
+    },
 });
 
 const question = ref("");
@@ -73,8 +92,36 @@ const timeColumns = computed(() => {
 // =========================================================
 // EXAMPLE QUESTION GENERATION
 // =========================================================
+//
+// SINGLE mode keeps the existing dataset-driven example generation
+// below. COMPARISON / CROSS_DATASET use static suggestion templates
+// instead - there's no per-dataset column context to build them
+// from yet, and no cross-dataset reasoning implemented at this
+// stage (see plan_executor.py / ai/planner.py - unchanged).
+
+const COMPARISON_SUGGESTIONS = [
+    "Compare the selected datasets.",
+    "What changed between these datasets?",
+    "Which dataset performed better?",
+    "Compare trends.",
+    "Which categories increased or decreased?",
+];
+
+const CROSS_DATASET_SUGGESTIONS = [
+    "What relationships exist between these datasets?",
+    "Which entities appear across the selected datasets?",
+    "What combined insights can be found?",
+];
 
 const exampleQuestions = computed(() => {
+    if (props.analysisMode === "comparison") {
+        return COMPARISON_SUGGESTIONS;
+    }
+
+    if (props.analysisMode === "cross_dataset") {
+        return CROSS_DATASET_SUGGESTIONS;
+    }
+
     const examples = [];
 
     const metric = metricColumns.value[0];
@@ -182,14 +229,36 @@ function formatCell(value) {
 // =========================================================
 
 async function loadMetadata() {
+    // Captured so a response that resolves after the user has
+    // already switched datasets can be detected and ignored below,
+    // instead of overwriting state for the newly selected dataset.
+    const requestedDatasetId = props.datasetId;
+
+    // No dataset selected - see DatasetOverview.vue's loadProfile()
+    // for why this must not fall back to the legacy no-id endpoint.
+    if (!requestedDatasetId) {
+        metadata.value = null;
+        metadataError.value = null;
+        metadataLoading.value = false;
+        return;
+    }
+
     try {
         metadataLoading.value = true;
         metadataError.value = null;
 
-        const response = await getDatasetMetadata();
+        const response = await getDatasetMetadata(requestedDatasetId);
+
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
 
         metadata.value = response;
     } catch (err) {
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
         console.error(
             "Failed to load dataset metadata:",
             err,
@@ -199,7 +268,9 @@ async function loadMetadata() {
             getApiErrorMessage(err) ||
             "Unable to load dataset metadata.";
     } finally {
-        metadataLoading.value = false;
+        if (requestedDatasetId === props.datasetId) {
+            metadataLoading.value = false;
+        }
     }
 }
 
@@ -214,13 +285,33 @@ async function analyze() {
         return;
     }
 
+    // Captured so a response that resolves after the user has
+    // already switched datasets can be detected and ignored below,
+    // instead of overwriting the result for the newly selected
+    // dataset with an answer computed against the old one.
+    const requestedDatasetId = props.datasetId;
+
     try {
         loading.value = true;
         error.value = null;
         result.value = null;
 
+        // Execution still runs against a single dataset (the primary/
+        // anchor one) - actual multi-dataset joins/query execution
+        // are a future step. analysis_context is carried along so
+        // the backend can start branching on it once that lands.
+        const analysisContext = {
+            mode: props.analysisMode,
+            dataset_ids: props.selectedDatasetIds,
+            primary_dataset_id: requestedDatasetId || null,
+        };
+
         const response =
-            await analyzeDataset(trimmedQuestion);
+            await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext);
+
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
 
         if (!response?.success) {
             error.value =
@@ -233,6 +324,10 @@ async function analyze() {
 
         result.value = response;
     } catch (err) {
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
         console.error(
             "Analysis request failed:",
             err,
@@ -242,7 +337,9 @@ async function analyze() {
             getApiErrorMessage(err) ||
             "Unable to analyze dataset.";
     } finally {
-        loading.value = false;
+        if (requestedDatasetId === props.datasetId) {
+            loading.value = false;
+        }
     }
 }
 
@@ -400,6 +497,40 @@ onMounted(() => {
 
                 </div>
 
+                <!-- No dataset selected -->
+
+                <div v-if="!datasetId"
+                    class="mb-4 flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium text-slate-600 shadow-sm">
+
+                    <span
+                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-200 font-bold text-slate-500">
+                        !
+                    </span>
+
+                    Upload or select a dataset before asking a question.
+
+                </div>
+
+                <!-- Analysis Context banner (Comparison / Cross-Dataset) -->
+
+                <div v-else-if="analysisMode !== 'single'"
+                    class="mb-4 flex items-center gap-2.5 rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-indigo-50 px-4 py-3 text-xs font-medium text-violet-700 shadow-sm">
+
+                    <span
+                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-100 font-bold text-violet-600">
+                        ⇄
+                    </span>
+
+                    <span>
+                        <strong class="font-bold">
+                            {{ analysisMode === 'comparison' ? 'Comparison' : 'Cross-Dataset' }} mode
+                        </strong>
+                        active · {{ selectedDatasetNames.length }} datasets:
+                        {{ selectedDatasetNames.join(', ') || 'none selected' }}
+                    </span>
+
+                </div>
+
                 <!-- Metadata loading -->
 
                 <div v-if="metadataLoading"
@@ -441,7 +572,7 @@ onMounted(() => {
 
                     <div class="relative">
 
-                        <textarea id="question" v-model="question" rows="4" :disabled="loading"
+                        <textarea id="question" v-model="question" rows="4" :disabled="loading || !datasetId"
                             placeholder="Ask a question about your uploaded dataset..." @keydown="handleKeydown"
                             class="box-border min-h-[130px] w-full resize-y rounded-[16px] border border-violet-200 bg-white/90 px-[17px] py-[17px] pr-12 text-sm leading-[1.6] text-slate-900 shadow-[0_4px_15px_rgba(79,70,229,0.04)] backdrop-blur-sm transition duration-200 placeholder:text-slate-400 hover:border-violet-300 focus:border-violet-500 focus:outline-none focus:ring-4 focus:ring-violet-500/10 disabled:cursor-wait disabled:bg-slate-50">
                         </textarea>
@@ -540,7 +671,7 @@ onMounted(() => {
 
                             <!-- Analyze -->
 
-                            <button type="button" :disabled="loading || !question.trim()" @click="analyze"
+                            <button type="button" :disabled="loading || !question.trim() || !datasetId" @click="analyze"
                                 class="group flex min-w-[155px] items-center gap-[9px] rounded-[11px] border-0 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 px-[17px] py-3 text-[13px] font-bold text-white shadow-[0_8px_20px_rgba(109,40,217,0.28)] transition-all duration-200 hover:-translate-y-0.5 hover:from-violet-700 hover:via-purple-700 hover:to-indigo-700 hover:shadow-[0_14px_28px_rgba(99,102,241,0.35)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none max-[700px]:flex-1 max-[700px]:justify-center">
 
                                 <span v-if="loading"
