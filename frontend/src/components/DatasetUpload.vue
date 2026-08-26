@@ -1,22 +1,31 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
-import { uploadDataset, getDatasetProfile, getApiErrorMessage } from "../services/api";
+import { computed, ref } from "vue";
+import { uploadDataset, getApiErrorMessage } from "../services/api";
 
 const emit = defineEmits(["dataset-uploaded"]);
 
+const props = defineProps({
+    // The dataset store's currently selected/primary dataset (see
+    // Dashboard.vue's `selectedDataset`) - reused here instead of an
+    // independent fetch so this card never disagrees with the
+    // sidebar/header about what's actually active.
+    activeDataset: {
+        type: Object,
+        default: null,
+    },
+});
+
 const fileInput = ref(null);
 const selectedFile = ref(null);
-const currentDataset = ref(null);
 
 const loading = ref(false);
-const loadingCurrent = ref(true);
 const isDragging = ref(false);
 const error = ref(null);
 const success = ref(null);
 
 const allowedExtensions = [".csv"];
 
-const hasDataset = computed(() => Boolean(currentDataset.value));
+const hasDataset = computed(() => Boolean(props.activeDataset));
 
 const fileSize = computed(() => {
     if (!selectedFile.value) {
@@ -106,23 +115,6 @@ function removeSelectedFile() {
     success.value = null;
 }
 
-async function loadCurrentDataset() {
-    loadingCurrent.value = true;
-
-    try {
-        currentDataset.value = await getDatasetProfile();
-    } catch (err) {
-        console.error(
-            "Failed to load current dataset:",
-            err,
-        );
-
-        currentDataset.value = null;
-    } finally {
-        loadingCurrent.value = false;
-    }
-}
-
 async function handleUpload() {
     if (!selectedFile.value || loading.value) {
         return;
@@ -137,7 +129,10 @@ async function handleUpload() {
             selectedFile.value,
         );
 
-        currentDataset.value = response;
+        // The "Active Dataset" card below reads from `activeDataset`
+        // (the dataset store's selection, via Dashboard.vue) instead
+        // of local state - it updates once the parent selects this
+        // upload's dataset_id in response to the emit below.
 
         success.value =
             "Dataset uploaded successfully and is now active.";
@@ -165,10 +160,6 @@ function formatNumber(value) {
 
     return number.toLocaleString();
 }
-
-onMounted(() => {
-    loadCurrentDataset();
-});
 </script>
 
 <template>
@@ -197,7 +188,7 @@ onMounted(() => {
                             Upload Dataset
                         </h2>
 
-                        <span v-if="hasDataset && !loadingCurrent"
+                        <span v-if="hasDataset"
                             class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold text-emerald-700">
                             <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
                             Active
@@ -417,7 +408,7 @@ onMounted(() => {
                  CURRENT DATASET
             ====================================================== -->
 
-            <div v-if="hasDataset && !loadingCurrent"
+            <div v-if="hasDataset"
                 class="border-t border-slate-100 bg-gradient-to-r from-slate-50 via-white to-emerald-50/40 px-3.5 py-3 sm:px-4">
 
                 <div class="flex items-center justify-between gap-4 max-[600px]:flex-col max-[600px]:items-start">
@@ -440,13 +431,13 @@ onMounted(() => {
                                 Active Dataset
                             </p>
 
-                            <p class="mt-0.5 truncate text-[11px] font-bold text-slate-900" :title="currentDataset.filename ||
-                                currentDataset.file_name ||
+                            <p class="mt-0.5 truncate text-[11px] font-bold text-slate-900" :title="activeDataset.filename ||
+                                activeDataset.file_name ||
                                 'Uploaded dataset'
                                 ">
                                 {{
-                                    currentDataset.filename ||
-                                    currentDataset.file_name ||
+                                    activeDataset.filename ||
+                                    activeDataset.file_name ||
                                     "Uploaded dataset"
                                 }}
                             </p>
@@ -462,7 +453,7 @@ onMounted(() => {
                         <!-- Rows -->
                         <div class="rounded-lg border border-indigo-100 bg-indigo-50 px-2.5 py-1.5 text-center">
                             <div class="text-[11px] font-bold text-indigo-700">
-                                {{ formatNumber(currentDataset.rows) }}
+                                {{ formatNumber(activeDataset.rows) }}
                             </div>
 
                             <div class="text-[8px] font-medium uppercase tracking-wide text-indigo-400">
@@ -474,7 +465,7 @@ onMounted(() => {
                         <!-- Columns -->
                         <div class="rounded-lg border border-cyan-100 bg-cyan-50 px-2.5 py-1.5 text-center">
                             <div class="text-[11px] font-bold text-cyan-700">
-                                {{ formatNumber(currentDataset.columns) }}
+                                {{ formatNumber(activeDataset.columns) }}
                             </div>
 
                             <div class="text-[8px] font-medium uppercase tracking-wide text-cyan-500">
