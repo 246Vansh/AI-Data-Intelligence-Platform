@@ -24,8 +24,22 @@ class OpenAIProvider:
                 "OPENAI_API_KEY is not configured."
             )
 
+        # Every route in this app is a sync `def`, so they all run
+        # on a shared, size-limited thread pool. The SDK's default
+        # timeout (600s, x up to 3 attempts with retries) can hold a
+        # thread hostage long enough that the pool fills up and even
+        # unrelated requests (e.g. GET /) stop getting served at
+        # all. Bound it to something sane instead.
+        request_timeout = float(
+            os.getenv(
+                "AI_REQUEST_TIMEOUT_SECONDS",
+                "60",
+            )
+        )
+
         self.client = OpenAI(
-            api_key=api_key
+            api_key=api_key,
+            timeout=request_timeout,
         )
 
     def create_analysis_plan(
