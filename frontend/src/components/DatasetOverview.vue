@@ -2,6 +2,13 @@
 import { computed, onMounted, ref } from "vue";
 import { getDatasetProfile } from "../services/api";
 
+const props = defineProps({
+    datasetId: {
+        type: String,
+        default: "",
+    },
+});
+
 const profile = ref(null);
 const loading = ref(true);
 const refreshing = ref(false);
@@ -9,6 +16,24 @@ const error = ref(null);
 
 async function loadProfile(options = {}) {
     const isRefresh = options.refresh === true;
+
+    // Captured so a response that resolves after the user has
+    // already switched datasets can be detected and ignored below.
+    const requestedDatasetId = props.datasetId;
+
+    // No dataset selected (e.g. right after a page refresh, before
+    // any dataset is re-selected) - show the empty state instead of
+    // falling back to the legacy no-id endpoint, which would return
+    // whatever dataset the backend still has active in memory and
+    // disagree with the sidebar/header, which already show "no
+    // dataset loaded" in that case.
+    if (!requestedDatasetId) {
+        profile.value = null;
+        error.value = null;
+        loading.value = false;
+        refreshing.value = false;
+        return;
+    }
 
     try {
         if (isRefresh) {
@@ -19,8 +44,18 @@ async function loadProfile(options = {}) {
 
         error.value = null;
 
-        profile.value = await getDatasetProfile();
+        const response = await getDatasetProfile(requestedDatasetId);
+
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
+        profile.value = response;
     } catch (err) {
+        if (requestedDatasetId !== props.datasetId) {
+            return;
+        }
+
         console.error("Dataset profile error:", err);
 
         profile.value = null;
@@ -30,8 +65,10 @@ async function loadProfile(options = {}) {
             err?.response?.data?.message ||
             "Unable to load dataset statistics.";
     } finally {
-        loading.value = false;
-        refreshing.value = false;
+        if (requestedDatasetId === props.datasetId) {
+            loading.value = false;
+            refreshing.value = false;
+        }
     }
 }
 
@@ -381,6 +418,28 @@ onMounted(() => {
                     </div>
                 </div>
             </article>
+        </div>
+
+        <!-- =========================================================
+             NO DATASET SELECTED
+        ========================================================== -->
+
+        <div v-else
+            class="flex min-h-[160px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white px-5 text-center">
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
+                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+                    <rect x="3" y="3" width="18" height="18" rx="3" />
+                    <path d="M8 8h8M8 12h8M8 16h5" />
+                </svg>
+            </div>
+
+            <h3 class="mt-3 text-[13px] font-bold text-slate-700">
+                No dataset selected
+            </h3>
+
+            <p class="mt-1 max-w-xs text-[10px] leading-5 text-slate-400">
+                Upload or select a dataset to see its overview.
+            </p>
         </div>
     </section>
 </template>
