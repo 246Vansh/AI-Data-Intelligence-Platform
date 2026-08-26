@@ -10,6 +10,7 @@ from ai.insight_models import (
     InsightResponse,
     MultiRowEvidence,
 )
+from data_engine.metadata import STRONG_TIME_TOKENS, tokenize_column_name
 
 
 def build_insight_response(
@@ -463,11 +464,14 @@ def _get_display_dimension(
 
     value = None
 
-    if "Date" in row:
-        value = row["Date"]
-
-    elif "date" in row:
-        value = row["date"]
+    # Dataset-agnostic time-column lookup: reuse the same
+    # STRONG_TIME_TOKENS check data_engine/metadata.py already uses
+    # to identify time columns, instead of hardcoding "Date"/"date".
+    # Catches "OrderDate", "Timestamp", "Purchase_Date", etc. too.
+    for key in row:
+        if STRONG_TIME_TOKENS & tokenize_column_name(key):
+            value = row[key]
+            break
 
     if value is None:
         for key, item in row.items():
