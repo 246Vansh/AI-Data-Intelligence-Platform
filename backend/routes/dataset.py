@@ -320,3 +320,79 @@ def get_dataset_metadata_by_id(dataset_id: str):
         "metadata",
         get_metadata,
     )
+
+
+# =========================================================
+# REGISTRY: LIST / GET / DELETE
+#
+# Registry-level views over every uploaded dataset, independent of
+# which one (if any) is currently active. These never materialize a
+# dataset's DataFrame - they only read the identity/lifecycle fields
+# Dataset and DatasetStorage already expose (dataset_id, filename,
+# row_count, column_count, created_at).
+# =========================================================
+
+
+def _dataset_summary(dataset: Dataset) -> dict:
+    """
+    Build the summary shape shared by GET /api/dataset and
+    GET /api/dataset/{dataset_id}.
+    """
+
+    return {
+        "dataset_id": dataset.dataset_id,
+        "filename": dataset.name,
+        "rows": dataset.row_count,
+        "columns": dataset.column_count,
+        "created_at": dataset.created_at.isoformat(),
+    }
+
+
+@router.get("")
+def list_datasets():
+    """
+    List every dataset currently registered, independent of the
+    active dataset.
+    """
+
+    return {
+        "datasets": [
+            _dataset_summary(dataset)
+            for dataset in dataset_registry.list()
+        ]
+    }
+
+
+@router.get("/{dataset_id}")
+def get_dataset_by_id(dataset_id: str):
+    """
+    Return registry-level metadata for a single dataset without
+    materializing its DataFrame.
+    """
+
+    dataset = resolve_dataset(dataset_id)
+
+    return _dataset_summary(dataset)
+
+
+@router.delete("/{dataset_id}")
+def delete_dataset(dataset_id: str):
+    """
+    Remove a dataset from the registry.
+
+    Only the in-memory registry entry is removed - no on-disk source
+    files (e.g. under data/raw) are touched. If dataset_id is the
+    currently active dataset, the active pointer is cleared too, so
+    DatasetManager never keeps resolving to a dataset that no longer
+    exists in the registry.
+    """
+
+    resolve_dataset(dataset_id)
+
+    dataset_registry.delete(dataset_id)
+    dataset_manager.clear_dataset(dataset_id)
+
+    return {
+        "message": "Dataset deleted successfully.",
+        "dataset_id": dataset_id,
+    }

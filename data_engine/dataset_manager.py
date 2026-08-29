@@ -225,6 +225,21 @@ class DatasetManager:
         if active_id is not None and self._registry.exists(active_id):
             self._registry.delete(active_id)
 
+    def clear_dataset(self, dataset_id: str) -> None:
+        """
+        Clear the active-dataset pointer if it currently points at
+        dataset_id; otherwise do nothing.
+
+        Unlike clear(), this never touches the registry itself - it
+        only exists to keep DatasetManager from pointing at a dataset
+        that a caller (e.g. the delete endpoint) is removing from the
+        registry through some other path.
+        """
+
+        with self._lock:
+            if self._active_id == dataset_id:
+                self._active_id = None
+
     def get_cached(
         self,
         key: str,
