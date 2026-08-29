@@ -12,29 +12,22 @@ from data_engine.dataset_registry import (
     DatasetRegistry,
     dataset_registry,
 )
+from data_engine.storage import PandasStorage
 
 
 def _parse_csv_bytes(contents: bytes) -> pd.DataFrame:
     """
     Parse CSV bytes into a DataFrame.
 
-    Tries the pyarrow engine first: it parses multi-threaded in
-    native code and measured ~7x faster than pandas' default C
-    engine on a 500k-row / 22MB file (1.75s -> ~0.2s), and it also
-    auto-detects date-like columns as real datetime64 values during
-    parsing rather than leaving them as strings - which is what
-    metadata.is_time_column() checks for first, so this is a
-    reliability improvement for time-column detection too, not just
-    a speed one.
-
-    pyarrow's parser is stricter than the C engine (e.g. it won't
-    silently recover from some malformed rows), so a parse failure
-    falls back to the default engine rather than rejecting a file
-    the C engine would have loaded fine.
+    Tries the pyarrow engine first. If parsing fails, falls back to
+    pandas' default CSV engine.
     """
 
     try:
-        return pd.read_csv(io.BytesIO(contents), engine="pyarrow")
+        return pd.read_csv(
+            io.BytesIO(contents),
+            engine="pyarrow",
+        )
 
     except Exception:
         return pd.read_csv(io.BytesIO(contents))
@@ -42,28 +35,21 @@ def _parse_csv_bytes(contents: bytes) -> pd.DataFrame:
 
 class DatasetManager:
     """
-    Backward-compatible "single active dataset" view over a
-    DatasetRegistry.
+    Backward-compatible single-active-dataset view over DatasetRegistry.
 
-    This is a compatibility layer, not the source of truth anymore:
-    dataset identity/lifecycle is now owned by DatasetRegistry (every
-    dataset this manager makes active is registered there under its
-    own dataset_id). DatasetManager itself only remembers *which* id
-    is currently "the active one" and resolves it through the
-    registry on every access, so all of its existing callers
-    (backend/dependencies.py, backend/routes/*.py,
-    data_engine/plan_executor.py) keep working unchanged while
-    dataset storage itself has already moved to the registry.
+    Dataset identity and lifecycle are owned by DatasetRegistry.
 
-    The manager is still dataset-agnostic. It does not know whether
-    the dataset is retail, finance, healthcare, marketing, etc.
+    DatasetManager only tracks which dataset is currently active and
+    resolves that dataset through the registry.
+
+    Physical dataset storage is hidden behind DatasetStorage.
+    The initial implementation uses PandasStorage.
     """
 
-    def __init__(self, registry: DatasetRegistry | None = None):
-        # Defaults to the shared, process-wide registry so the
-        # module-level `dataset_manager` singleton below transparently
-        # participates in it. Overridable for tests that want an
-        # isolated registry instead of the shared one.
+    def __init__(
+        self,
+        registry: DatasetRegistry | None = None,
+    ):
         self._registry = registry if registry is not None else dataset_registry
 
         self._active_id: str | None = None
@@ -72,12 +58,6 @@ class DatasetManager:
     def _get_active_dataset(self) -> Dataset:
         """
         Resolve the currently active dataset through the registry.
-
-        Raises the same RuntimeError("No dataset has been loaded.")
-        every existing caller already handles - both when nothing has
-        ever been loaded, and in the (only possible via direct
-        registry access, not through this manager) case where the
-        active id was deleted out from under the manager.
         """
 
         with self._lock:
@@ -98,20 +78,11 @@ class DatasetManager:
         filename: str | None = None,
     ) -> Dataset:
         """
-        Parse CSV bytes, create a Dataset, register it in the
-        DatasetRegistry, and make it the active dataset - returning
-        the full Dataset (not just its DataFrame).
+        Parse CSV bytes, create a Dataset backed by PandasStorage,
+        register it, and make it the active dataset.
 
-        This is the atomic building block a caller needs to expose
-        dataset_id (e.g. an upload endpoint's response): the id comes
-        back from the same call that created and registered the
-        dataset, with no separate follow-up lookup. That matters
-        under concurrency - every route here is a sync `def`, so
-        FastAPI runs concurrent requests on different threads, and a
-        second upload could run between two calls if the id were
-        fetched via a follow-up call to something like
-        get_filename()/is_loaded() instead. Doing it in one call
-        makes that race impossible rather than merely unlikely.
+        Returns the complete Dataset so callers can access its
+        dataset_id and storage abstraction.
         """
 
         df = _parse_csv_bytes(contents)
@@ -119,7 +90,11 @@ class DatasetManager:
         if df.empty:
             raise ValueError("The uploaded CSV dataset is empty.")
 
-        dataset = Dataset(dataframe=df, name=filename)
+        dataset = Dataset(
+            storage=PandasStorage(df),
+            name=filename,
+        )
+
         self._registry.register(dataset)
 
         with self._lock:
@@ -133,20 +108,19 @@ class DatasetManager:
         filename: str | None = None,
     ) -> pd.DataFrame:
         """
-        Parse CSV bytes directly, register the result in the
-        DatasetRegistry, and make it the active dataset.
+        Parse CSV bytes, register the dataset, make it active,
+        and return its DataFrame.
 
-        Takes bytes already in memory (e.g. straight from an
-        upload) rather than a file path, so callers don't need to
-        round-trip the upload through a temp file just to have
-        pandas read it back off disk.
-
-        Kept for existing callers that only want the DataFrame back
-        (unchanged return type/behavior). See register_csv_bytes()
-        for callers that also need the assigned dataset_id.
+        This method remains for backward compatibility with existing
+        DataFrame-based callers.
         """
 
-        return self.register_csv_bytes(contents, filename=filename).dataframe
+        dataset = self.register_csv_bytes(
+            contents,
+            filename=filename,
+        )
+
+        return dataset.storage.to_dataframe()
 
     def load_csv(
         self,
@@ -177,6 +151,9 @@ class DatasetManager:
     ) -> pd.DataFrame:
         """
         Set an already-loaded DataFrame as the active dataset.
+
+        The DataFrame is wrapped in PandasStorage before being placed
+        inside the Dataset domain object.
         """
 
         if not isinstance(df, pd.DataFrame):
@@ -185,20 +162,27 @@ class DatasetManager:
         if df.empty:
             raise ValueError("The dataset is empty.")
 
-        dataset = Dataset(dataframe=df.copy(), name=filename)
+        dataset = Dataset(
+            storage=PandasStorage(df.copy()),
+            name=filename,
+        )
+
         self._registry.register(dataset)
 
         with self._lock:
             self._active_id = dataset.dataset_id
 
-        return dataset.dataframe
+        return dataset.storage.to_dataframe()
 
     def get_dataframe(self) -> pd.DataFrame:
         """
-        Return the currently loaded dataset.
+        Return the currently loaded dataset as a DataFrame.
+
+        This is the compatibility boundary for existing DataFrame-based
+        application components.
         """
 
-        return self._get_active_dataset().dataframe
+        return self._get_active_dataset().storage.to_dataframe()
 
     def get_filename(self) -> str | None:
         """
@@ -219,7 +203,7 @@ class DatasetManager:
 
     def is_loaded(self) -> bool:
         """
-        Check whether a dataset is currently loaded.
+        Check whether a dataset is currently available.
         """
 
         with self._lock:
@@ -229,10 +213,9 @@ class DatasetManager:
 
     def clear(self) -> None:
         """
-        Remove the currently loaded dataset.
+        Remove the currently active dataset.
 
-        Also removes it from the registry - clear() has always meant
-        "this dataset is gone", not just "stop pointing at it".
+        The dataset is removed from the registry as well.
         """
 
         with self._lock:
@@ -242,42 +225,39 @@ class DatasetManager:
         if active_id is not None and self._registry.exists(active_id):
             self._registry.delete(active_id)
 
-    def get_cached(self, key: str, builder):
+    def get_cached(
+        self,
+        key: str,
+        builder,
+    ):
         """
-        Return a cached per-dataset computation for the active
-        dataset, building it on first access. See get_cached_on()
-        for the same thing against an explicitly-resolved Dataset
-        (e.g. one looked up by dataset_id) rather than "the active
-        one".
+        Return a cached computation for the active dataset.
         """
 
-        return get_cached_on(self._get_active_dataset(), key, builder)
+        return get_cached_on(
+            self._get_active_dataset(),
+            key,
+            builder,
+        )
 
 
-def get_cached_on(dataset: Dataset, key: str, builder):
+def get_cached_on(
+    dataset: Dataset,
+    key: str,
+    builder,
+):
     """
-    Return a cached per-dataset computation on a specific Dataset,
-    building it on first access. The builder receives that dataset's
-    DataFrame. The cache lives on the Dataset object itself (see
-    Dataset.cache), so this works identically whether `dataset` came
-    from DatasetManager's "active dataset" pointer or was resolved
-    directly from the registry by dataset_id - a free function
-    (rather than a Dataset method) so Dataset stays a plain data
-    holder per its design, and a DatasetManager method so existing
-    callers of get_cached() don't need to change.
+    Return a cached computation for a specific Dataset.
+
+    The builder receives the DataFrame materialized through the
+    DatasetStorage abstraction.
     """
 
     if key in dataset.cache:
         return dataset.cache[key]
 
-    value = builder(dataset.dataframe)
+    value = builder(dataset.storage.to_dataframe())
 
-    # No "was it swapped while we were computing" race to guard
-    # against: the cache lives on the Dataset object itself (one
-    # dict per dataset, via the registry), not on whatever resolved
-    # it. Writing here can only ever affect this specific dataset's
-    # own cache - it has no way to bleed into a different dataset,
-    # active or not, by the time builder() returns.
     dataset.cache[key] = value
 
     return value

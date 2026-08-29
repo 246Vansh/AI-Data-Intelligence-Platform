@@ -110,7 +110,7 @@ def analyze_dataset(
                     detail=f"No dataset found for dataset_id: {request.dataset_id!r}",
                 ) from exc
 
-            df = dataset.dataframe
+            df = dataset.storage.to_dataframe()
 
     except HTTPException:
         raise

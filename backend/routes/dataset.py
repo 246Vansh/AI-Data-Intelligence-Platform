@@ -155,7 +155,7 @@ def upload_dataset(file: UploadFile = File(...)):
             contents,
             filename=file.filename,
         )
-        df = dataset.dataframe
+        df = dataset.storage.to_dataframe()
 
         return {
             "message": "Dataset uploaded successfully.",
@@ -247,7 +247,7 @@ def get_dataset_preview_by_id(dataset_id: str):
 
     dataset = resolve_dataset(dataset_id)
 
-    preview = dataset.dataframe.head(10)
+    preview = dataset.storage.to_dataframe().head(10)
 
     rows = sanitize_records(preview.to_dict(orient="records"))
 

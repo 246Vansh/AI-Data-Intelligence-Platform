@@ -1,7 +1,8 @@
-import time
 import statistics
+import time
 
-from backend.dependencies import get_walmart_data
+import pandas as pd
+
 from data_engine.metadata import get_metadata
 
 from ai.fast_planner import FastPlanner
@@ -15,13 +16,82 @@ from ai.planner import create_analysis_plan, get_provider
 RUNS = 2
 
 QUESTIONS = [
-    "Show total weekly sales",
-    "Show average weekly sales",
-    "Show maximum weekly sales",
-    "Show minimum weekly sales",
-    "Show the top 5 stores by total weekly sales",
-    "Show the bottom 3 stores by average weekly sales",
+    "Show total revenue",
+    "Show average revenue",
+    "Show maximum revenue",
+    "Show minimum revenue",
+    "Show the top 5 categories by total revenue",
+    "Show the bottom 3 categories by average revenue",
 ]
+
+
+# =========================================================
+# BENCHMARK DATASET
+# =========================================================
+#
+# Deliberately generic and created entirely in memory.
+#
+# This benchmark must not depend on:
+#   - Walmart
+#   - a specific business domain
+#   - data/raw/
+#   - an external CSV file
+#   - a user-uploaded dataset
+#
+# The dataset only exists to provide realistic metadata to
+# the planners being benchmarked.
+# =========================================================
+
+
+def create_benchmark_dataset() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "category": [
+                "A",
+                "A",
+                "A",
+                "B",
+                "B",
+                "B",
+                "C",
+                "C",
+                "C",
+                "D",
+                "D",
+                "D",
+            ],
+            "date": pd.to_datetime(
+                [
+                    "2026-01-01",
+                    "2026-01-08",
+                    "2026-01-15",
+                    "2026-01-01",
+                    "2026-01-08",
+                    "2026-01-15",
+                    "2026-01-01",
+                    "2026-01-08",
+                    "2026-01-15",
+                    "2026-01-01",
+                    "2026-01-08",
+                    "2026-01-15",
+                ]
+            ),
+            "revenue": [
+                1000,
+                1200,
+                1100,
+                1500,
+                1700,
+                1600,
+                800,
+                900,
+                850,
+                2000,
+                2200,
+                2100,
+            ],
+        }
+    )
 
 
 # =========================================================
@@ -140,12 +210,12 @@ def main():
     print("=" * 60)
 
     # -----------------------------------------------------
-    # Load dataset
+    # Create generic benchmark dataset
     # -----------------------------------------------------
 
-    print("\nLoading dataset...")
+    print("\nCreating generic benchmark dataset...")
 
-    df = get_walmart_data()
+    df = create_benchmark_dataset()
 
     print(f"Dataset rows    : {len(df)}")
     print(f"Dataset columns : {len(df.columns)}")
