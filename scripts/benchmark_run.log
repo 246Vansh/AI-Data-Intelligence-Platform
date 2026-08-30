@@ -1,0 +1,585 @@
+{
+  "sizes_requested": [
+    10000,
+    100000,
+    1000000,
+    5000000,
+    10000000
+  ],
+  "pandas_max_rows": 100000,
+  "time_budget_s": 2400.0,
+  "results": [
+    {
+      "size": 10000,
+      "operation": "generate_synthetic_csv",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 1.0269740000076126,
+      "peak_rss_bytes": 82591744,
+      "result_rows": 10000,
+      "extra": {
+        "output_bytes": 615595
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "ingest_to_parquet",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 0.03372260002652183,
+      "peak_rss_bytes": 49278976,
+      "result_rows": 10000,
+      "extra": {
+        "input_bytes": 615595,
+        "output_bytes": 251419
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "duckdb_global_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.01293880000594072,
+      "peak_rss_bytes": 102768640,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "duckdb_grouped_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.012208700005430728,
+      "peak_rss_bytes": 102645760,
+      "result_rows": 20,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "duckdb_filter",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.015173500025412068,
+      "peak_rss_bytes": 101584896,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "duckdb_sort_limit",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.01661020002211444,
+      "peak_rss_bytes": 102850560,
+      "result_rows": 10,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "basic_statistics",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.022372499981429428,
+      "peak_rss_bytes": 104648704,
+      "result_rows": 10000,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "pandas_global_agg",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.016972399986116216,
+      "peak_rss_bytes": 98623488,
+      "result_rows": 1,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "pandas_grouped_agg",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.0646407000022009,
+      "peak_rss_bytes": 99143680,
+      "result_rows": 20,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "pandas_filter",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.06368260001181625,
+      "peak_rss_bytes": 99024896,
+      "result_rows": 1,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "pandas_sort_limit",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.021453099994687364,
+      "peak_rss_bytes": 99323904,
+      "result_rows": 10,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 10000,
+      "operation": "pandas_basic_statistics",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.04081550001865253,
+      "peak_rss_bytes": 100511744,
+      "result_rows": 10000,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "generate_synthetic_csv",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 0.9985836000123527,
+      "peak_rss_bytes": 90861568,
+      "result_rows": 100000,
+      "extra": {
+        "output_bytes": 6254345
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "ingest_to_parquet",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 0.12627300000167452,
+      "peak_rss_bytes": 80007168,
+      "result_rows": 100000,
+      "extra": {
+        "input_bytes": 6254345,
+        "output_bytes": 2582319
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "duckdb_global_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.032001799991121516,
+      "peak_rss_bytes": 110878720,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "duckdb_grouped_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.019196699984604493,
+      "peak_rss_bytes": 110706688,
+      "result_rows": 20,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "duckdb_filter",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.01640569997834973,
+      "peak_rss_bytes": 110551040,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "duckdb_sort_limit",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.027703799976734444,
+      "peak_rss_bytes": 110931968,
+      "result_rows": 10,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "basic_statistics",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.1000488999998197,
+      "peak_rss_bytes": 115531776,
+      "result_rows": 100000,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "pandas_global_agg",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.047837399994023144,
+      "peak_rss_bytes": 115355648,
+      "result_rows": 1,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "pandas_grouped_agg",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.08836100000189617,
+      "peak_rss_bytes": 118513664,
+      "result_rows": 20,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "pandas_filter",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.05460570001741871,
+      "peak_rss_bytes": 121364480,
+      "result_rows": 1,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "pandas_sort_limit",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.0635898000036832,
+      "peak_rss_bytes": 117678080,
+      "result_rows": 10,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 100000,
+      "operation": "pandas_basic_statistics",
+      "engine": "pandas",
+      "ok": true,
+      "elapsed_s": 0.12619559999438934,
+      "peak_rss_bytes": 123170816,
+      "result_rows": 100000,
+      "extra": {},
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "generate_synthetic_csv",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 1.5024847000022419,
+      "peak_rss_bytes": 129998848,
+      "result_rows": 1000000,
+      "extra": {
+        "output_bytes": 63544274
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "ingest_to_parquet",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 1.4329200999927707,
+      "peak_rss_bytes": 157761536,
+      "result_rows": 1000000,
+      "extra": {
+        "input_bytes": 63544274,
+        "output_bytes": 25872664
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "duckdb_global_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.012357200001133606,
+      "peak_rss_bytes": 172011520,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "duckdb_grouped_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.048323399998480454,
+      "peak_rss_bytes": 173510656,
+      "result_rows": 20,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "duckdb_filter",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.018365299998549744,
+      "peak_rss_bytes": 171765760,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "duckdb_sort_limit",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.048927800002275035,
+      "peak_rss_bytes": 171626496,
+      "result_rows": 10,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 1000000,
+      "operation": "basic_statistics",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.46506200000294484,
+      "peak_rss_bytes": 249257984,
+      "result_rows": 1000000,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "generate_synthetic_csv",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 6.462387500010664,
+      "peak_rss_bytes": 136830976,
+      "result_rows": 5000000,
+      "extra": {
+        "output_bytes": 322165533
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "ingest_to_parquet",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 8.593762400007108,
+      "peak_rss_bytes": 381349888,
+      "result_rows": 5000000,
+      "extra": {
+        "input_bytes": 322165533,
+        "output_bytes": 129405136
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "duckdb_global_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.018536599993240088,
+      "peak_rss_bytes": 431407104,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "duckdb_grouped_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.11223319999407977,
+      "peak_rss_bytes": 432812032,
+      "result_rows": 20,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "duckdb_filter",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.037468899972736835,
+      "peak_rss_bytes": 432009216,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "duckdb_sort_limit",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.17100999999092892,
+      "peak_rss_bytes": 434716672,
+      "result_rows": 10,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 5000000,
+      "operation": "basic_statistics",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 2.9045390999817755,
+      "peak_rss_bytes": 690122752,
+      "result_rows": 5000000,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "generate_synthetic_csv",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 16.632914800022263,
+      "peak_rss_bytes": 129863680,
+      "result_rows": 10000000,
+      "extra": {
+        "output_bytes": 645442705
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "ingest_to_parquet",
+      "engine": "pyarrow",
+      "ok": true,
+      "elapsed_s": 16.07343370001763,
+      "peak_rss_bytes": 401391616,
+      "result_rows": 10000000,
+      "extra": {
+        "input_bytes": 645442705,
+        "output_bytes": 258835221
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "duckdb_global_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.05226480000419542,
+      "peak_rss_bytes": 742514688,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "duckdb_grouped_agg",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.48021979999612086,
+      "peak_rss_bytes": 742252544,
+      "result_rows": 20,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "duckdb_filter",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.048347200005082414,
+      "peak_rss_bytes": 741642240,
+      "result_rows": 1,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "duckdb_sort_limit",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 0.2550671999924816,
+      "peak_rss_bytes": 743145472,
+      "result_rows": 10,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    },
+    {
+      "size": 10000000,
+      "operation": "basic_statistics",
+      "engine": "duckdb",
+      "ok": true,
+      "elapsed_s": 6.351667599985376,
+      "peak_rss_bytes": 1240272896,
+      "result_rows": 10000000,
+      "extra": {
+        "to_dataframe_calls": 0
+      },
+      "error": null
+    }
+  ],
+  "cap_reached": null,
+  "total_elapsed_s": 145.59000945091248
+}
