@@ -1,0 +1,345 @@
+{
+  "spec_version": "1.0",
+  "project": "AI Data Intelligence Platform",
+  "purpose": "Lock the exact architecture boundary, inputs, outputs, and functions for the scalable data-engine migration.",
+  "current_state": {
+    "status": "built_and_baseline_available",
+    "raw_data_execution": "Pandas/in-memory",
+    "target_first_backend": "DuckDB",
+    "target_storage_format": "Parquet",
+    "distributed_backend": "not part of the immediate implementation"
+  },
+  "pipeline_contract": {
+    "current": [
+      "dataset upload",
+      "dataset registration",
+      "metadata/profile/quality",
+      "natural-language question",
+      "AI planner",
+      "AnalysisPlanResponse",
+      "adapter",
+      "AnalysisPlan",
+      "plan validation",
+      "plan execution",
+      "query engine",
+      "analysis result",
+      "insights",
+      "visualization/API response"
+    ],
+    "target": [
+      "dataset upload",
+      "bounded-memory ingestion",
+      "Parquet storage",
+      "dataset descriptor/registry",
+      "AnalysisPlan",
+      "plan validation",
+      "execution engine",
+      "DuckDB",
+      "small analytical result",
+      "existing insights",
+      "existing visualization/API response"
+    ]
+  },
+  "interfaces": {
+    "ingestion": {
+      "input": {
+        "source": "uploaded file stream or temporary file",
+        "format_initial": [
+          "CSV"
+        ],
+        "constraints": [
+          "must not require the complete source dataset in Python RAM"
+        ]
+      },
+      "output": {
+        "storage": "Parquet",
+        "dataset_reference": "stable reference/descriptor for the stored dataset",
+        "schema": "dataset schema/metadata required by existing application"
+      }
+    },
+    "dataset_descriptor": {
+      "input": [
+        "dataset identifier",
+        "persistent storage reference",
+        "schema/metadata"
+      ],
+      "output": [
+        "dataset identity",
+        "storage location/reference",
+        "schema/metadata"
+      ],
+      "must_not": [
+        "own the complete raw dataset as its primary in-memory representation"
+      ]
+    },
+    "execution_engine": {
+      "input": {
+        "dataset_reference": "persistent dataset reference",
+        "analysis_plan": "validated canonical AnalysisPlan"
+      },
+      "output": {
+        "type": "small analytical result",
+        "compatibility": "must remain consumable by existing downstream insight/visualization code"
+      }
+    }
+  },
+  "analysis_plan": {
+    "type": "data_engine.analysis_plan.AnalysisPlan",
+    "fields": {
+      "filters": "list[FilterCondition]",
+      "group_by": "list[str]",
+      "metric": "str | None",
+      "aggregation": "str",
+      "sort": "str",
+      "sort_by": "str",
+      "limit": "int | None",
+      "visualization": "str | None",
+      "time_granularity": "str | None",
+      "time_column": "str | None"
+    },
+    "canonical_aggregations": [
+      "sum",
+      "mean",
+      "median",
+      "min",
+      "max",
+      "count"
+    ],
+    "operators": [
+      "=",
+      "!=",
+      ">",
+      ">=",
+      "<",
+      "<="
+    ],
+    "sort_by": [
+      "metric",
+      "time"
+    ],
+    "time_granularity": [
+      "day",
+      "week",
+      "month",
+      "quarter",
+      "year"
+    ]
+  },
+  "functions": {
+    "current_functions_to_preserve_semantics": {
+      "convert_to_analysis_plan": {
+        "module": "ai.adapter",
+        "input": "AnalysisPlanResponse",
+        "output": "AnalysisPlan",
+        "responsibility": "Normalize AI vocabulary into canonical Data Engine vocabulary."
+      },
+      "validate_plan": {
+        "module": "data_engine.plan_validator",
+        "input": [
+          "DataFrame/schema-compatible dataset context",
+          "AnalysisPlan",
+          "metadata"
+        ],
+        "output": "None on success; raises ValueError on invalid plan",
+        "responsibility": "Validate columns, aggregations, filters, limits, visualization, time metadata, and sorting constraints."
+      },
+      "execute_plan": {
+        "module": "data_engine.plan_executor",
+        "input": [
+          "dataset",
+          "validated AnalysisPlan"
+        ],
+        "output": "analysis result",
+        "responsibility": "Apply filters/time handling and execute the plan through the analytical execution layer."
+      },
+      "apply_filter": {
+        "module": "data_engine.plan_executor",
+        "input": [
+          "dataset/result context",
+          "FilterCondition"
+        ],
+        "output": "filtered dataset/result context",
+        "responsibility": "Apply a supported filter operation without mutating the source dataset."
+      },
+      "apply_time_granularity": {
+        "module": "data_engine.plan_executor",
+        "input": [
+          "dataset/result context",
+          "AnalysisPlan"
+        ],
+        "output": "time-normalized execution context",
+        "responsibility": "Apply the selected metadata-authorized time granularity."
+      },
+      "analyze": {
+        "module": "data_engine.query_engine",
+        "input": {
+          "df": "current execution dataset",
+          "group_by": "list[str]",
+          "metric": "str",
+          "aggregation": "canonical aggregation",
+          "sort": "asc|desc",
+          "sort_by": "metric|time",
+          "limit": "int | None"
+        },
+        "output": "analytical result",
+        "responsibility": "Grouped/global aggregation, sorting, and limiting."
+      }
+    },
+    "new_functions_to_introduce_in_migration": {
+      "ingest_to_parquet": {
+        "input": [
+          "uploaded file stream or temporary source path",
+          "dataset identifier",
+          "ingestion options/config"
+        ],
+        "output": [
+          "Parquet storage reference",
+          "schema/metadata descriptor"
+        ],
+        "constraints": [
+          "bounded-memory",
+          "deterministic failure handling",
+          "no full-source Pandas materialization"
+        ]
+      },
+      "register_dataset_reference": {
+        "input": [
+          "dataset identifier",
+          "Parquet reference",
+          "schema/metadata"
+        ],
+        "output": "registered dataset descriptor"
+      },
+      "execute_analysis": {
+        "input": [
+          "dataset reference",
+          "validated AnalysisPlan"
+        ],
+        "output": "small analytical result"
+      },
+      "build_query_from_plan": {
+        "input": [
+          "validated AnalysisPlan",
+          "dataset schema/reference"
+        ],
+        "output": "engine-native analytical execution representation",
+        "constraints": [
+          "only validated columns and operations",
+          "no invented schema"
+        ]
+      },
+      "read_result": {
+        "input": "engine query result",
+        "output": "small result representation compatible with existing downstream code"
+      }
+    }
+  },
+  "migration_layers": [
+    {
+      "step": 0,
+      "name": "baseline",
+      "status": "next",
+      "scope": "Measure and lock current behavior before implementation."
+    },
+    {
+      "step": 1,
+      "name": "storage_abstraction",
+      "status": "not_started",
+      "scope": "Introduce storage reference/descriptor boundaries."
+    },
+    {
+      "step": 2,
+      "name": "bounded_memory_ingestion",
+      "status": "not_started",
+      "scope": "CSV to Parquet without full in-memory buffering."
+    },
+    {
+      "step": 3,
+      "name": "dataset_representation",
+      "status": "not_started",
+      "scope": "Remove full DataFrame ownership from the registered dataset."
+    },
+    {
+      "step": 4,
+      "name": "registry_migration",
+      "status": "not_started",
+      "scope": "Registry stores descriptors/references rather than raw datasets."
+    },
+    {
+      "step": 5,
+      "name": "execution_abstraction",
+      "status": "not_started",
+      "scope": "Define execution-engine interface."
+    },
+    {
+      "step": 6,
+      "name": "duckdb_backend",
+      "status": "not_started",
+      "scope": "Execute validated plans against Parquet through DuckDB."
+    },
+    {
+      "step": 7,
+      "name": "plan_execution_migration",
+      "status": "not_started",
+      "scope": "Move raw-data filters/time operations to the scalable engine."
+    },
+    {
+      "step": 8,
+      "name": "query_engine_migration",
+      "status": "not_started",
+      "scope": "Replace raw-data Pandas groupby execution."
+    },
+    {
+      "step": 9,
+      "name": "metadata_profile_quality_migration",
+      "status": "not_started",
+      "scope": "Prevent full-data Pandas scans where required."
+    },
+    {
+      "step": 10,
+      "name": "route_integration",
+      "status": "not_started",
+      "scope": "Connect existing upload flow to new ingestion/storage path."
+    },
+    {
+      "step": 11,
+      "name": "compatibility_testing",
+      "status": "not_started",
+      "scope": "Verify existing API and downstream behavior."
+    },
+    {
+      "step": 12,
+      "name": "scale_benchmarking",
+      "status": "not_started",
+      "scope": "Benchmark progressively larger workloads before any distributed-engine decision."
+    }
+  ],
+  "hard_boundaries": {
+    "must_not_change_now": [
+      "frontend",
+      "AI planner semantics",
+      "Claude/OpenAI provider behavior",
+      "insight semantics",
+      "visualization behavior",
+      "unrelated product features"
+    ],
+    "must_preserve": [
+      "AnalysisPlan semantic contract",
+      "metadata as schema source of truth",
+      "validation before execution",
+      "canonical aggregation vocabulary",
+      "supported filter operators",
+      "time-analysis rules",
+      "existing downstream result compatibility where practical"
+    ]
+  },
+  "definition_of_done_for_initial_upgrade": [
+    "Raw uploaded datasets are not retained as the primary full Pandas DataFrame representation.",
+    "CSV ingestion is bounded-memory and produces Parquet.",
+    "DuckDB executes validated analytical plans against persistent data.",
+    "Normal analytical operations do not require loading the complete source dataset into Pandas.",
+    "Existing planner-to-validator semantics remain intact.",
+    "Existing API/downstream behavior is regression-tested.",
+    "Performance is benchmarked before making claims about very large datasets."
+  ]
+}
