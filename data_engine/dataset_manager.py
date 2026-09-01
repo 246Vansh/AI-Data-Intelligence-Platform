@@ -316,6 +316,21 @@ class DatasetManager:
             if self._active_id == dataset_id:
                 self._active_id = None
 
+    def get_active_dataset(self) -> Dataset:
+        """
+        Return the currently active Dataset object itself - not its
+        materialized DataFrame (see get_dataframe()), and not a cached
+        computation over it (see get_cached()/get_cached_dataset_aware()).
+
+        For callers (e.g. GET /api/dataset/preview) that need to reach
+        a storage-aware builder directly - without materializing a
+        full DataFrame themselves first - and whose result must not be
+        memoized on Dataset.cache (unlike get_cached_dataset_aware(),
+        every call here re-resolves the active dataset fresh).
+        """
+
+        return self._get_active_dataset()
+
     def get_cached(
         self,
         key: str,

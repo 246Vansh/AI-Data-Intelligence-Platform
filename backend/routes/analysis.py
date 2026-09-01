@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field, field_validator
 from data_engine.performance import measure
 from data_engine.json_safety import sanitize_json, sanitize_records
 
-from data_engine.dataset_manager import get_cached_on
+from data_engine.dataset_manager import get_cached_on_dataset
 from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
-from data_engine.metadata import get_metadata
+from data_engine.metadata_engine import metadata_for_dataset
 
 from data_engine.plan_validator import validate_plan
 
@@ -149,10 +149,10 @@ def analyze_dataset(
             "metadata_generation",
             timings,
         ):
-            metadata = get_cached_on(
+            metadata = get_cached_on_dataset(
                 dataset,
                 "metadata",
-                get_metadata,
+                metadata_for_dataset,
             )
 
     except Exception as exc:

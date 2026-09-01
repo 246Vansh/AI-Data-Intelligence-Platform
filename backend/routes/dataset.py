@@ -13,15 +13,14 @@ from backend.dependencies import (
 from data_engine.dataset import Dataset
 from data_engine.dataset_manager import (
     dataset_manager,
-    get_cached_on,
     get_cached_on_dataset,
 )
 from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
 from data_engine.ingestion import ingest_to_parquet
 from data_engine.profiling import basic_statistics_for_dataset
-from data_engine.metadata import get_metadata
-from data_engine.data_quality import check_data_quality
-from data_engine.json_safety import sanitize_records
+from data_engine.metadata_engine import metadata_for_dataset
+from data_engine.quality import check_quality_for_dataset
+from data_engine.preview import preview_dataset
 
 
 router = APIRouter(
@@ -305,16 +304,22 @@ def get_dataset_profile_by_id(dataset_id: str):
 @router.get("/preview")
 def get_dataset_preview():
 
-    df = require_dataset()
+    # Not require_dataset(): that helper's return value
+    # (get_current_dataset()) unconditionally materializes the active
+    # dataset's full DataFrame via dataset_manager.get_dataframe() -
+    # exactly the raw-record pull this route no longer needs. Only the
+    # cheap "is anything loaded" gate check is wanted here.
+    if not has_dataset_loaded():
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset has been uploaded yet.",
+        )
 
-    preview = df.head(10)
-
-    rows = sanitize_records(preview.to_dict(orient="records"))
+    dataset = dataset_manager.get_active_dataset()
 
     return {
         "filename": get_current_dataset_name(),
-        "columns": preview.columns.tolist(),
-        "rows": rows,
+        **preview_dataset(dataset),
     }
 
 
@@ -327,14 +332,9 @@ def get_dataset_preview_by_id(dataset_id: str):
 
     dataset = resolve_dataset(dataset_id)
 
-    preview = dataset.storage.to_dataframe().head(10)
-
-    rows = sanitize_records(preview.to_dict(orient="records"))
-
     return {
         "filename": dataset.name,
-        "columns": preview.columns.tolist(),
-        "rows": rows,
+        **preview_dataset(dataset),
     }
 
 
@@ -346,11 +346,17 @@ def get_dataset_preview_by_id(dataset_id: str):
 @router.get("/quality")
 def get_dataset_quality():
 
-    require_dataset()
+    # Not require_dataset(): see get_dataset_preview() above - only
+    # the cheap "is anything loaded" gate check is wanted here.
+    if not has_dataset_loaded():
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset has been uploaded yet.",
+        )
 
-    return dataset_manager.get_cached(
+    return dataset_manager.get_cached_dataset_aware(
         "quality",
-        check_data_quality,
+        check_quality_for_dataset,
     )
 
 
@@ -363,10 +369,10 @@ def get_dataset_quality_by_id(dataset_id: str):
 
     dataset = resolve_dataset(dataset_id)
 
-    return get_cached_on(
+    return get_cached_on_dataset(
         dataset,
         "quality",
-        check_data_quality,
+        check_quality_for_dataset,
     )
 
 
@@ -378,11 +384,17 @@ def get_dataset_quality_by_id(dataset_id: str):
 @router.get("/metadata")
 def get_dataset_metadata():
 
-    require_dataset()
+    # Not require_dataset(): see get_dataset_preview() above - only
+    # the cheap "is anything loaded" gate check is wanted here.
+    if not has_dataset_loaded():
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset has been uploaded yet.",
+        )
 
-    return dataset_manager.get_cached(
+    return dataset_manager.get_cached_dataset_aware(
         "metadata",
-        get_metadata,
+        metadata_for_dataset,
     )
 
 
@@ -395,10 +407,10 @@ def get_dataset_metadata_by_id(dataset_id: str):
 
     dataset = resolve_dataset(dataset_id)
 
-    return get_cached_on(
+    return get_cached_on_dataset(
         dataset,
         "metadata",
-        get_metadata,
+        metadata_for_dataset,
     )
 
 
