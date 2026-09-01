@@ -41,3 +41,37 @@ class DatasetStorage(ABC):
     def column_names(self) -> list[str]:
         """Return the dataset's column names."""
         raise NotImplementedError
+
+    @abstractmethod
+    def close(self) -> None:
+        """
+        Release any resources held by this storage instance (e.g. an
+        open database connection, file handles).
+
+        Called once, when this storage is no longer needed - e.g.
+        when its owning Dataset is removed from the registry. After
+        close() returns, this instance should no longer be used.
+
+        Implementations that hold no closeable resources (e.g. a
+        pure in-memory DataFrame) provide a safe no-op.
+        """
+        raise NotImplementedError
+
+    @property
+    def artifact_path(self) -> str | None:
+        """
+        Filesystem path of this storage's persistent on-disk artifact
+        (e.g. a Parquet file backing it), if it has one.
+
+        A minimal, storage-agnostic primitive: callers that need to
+        clean up a dataset's on-disk footprint (e.g. dataset deletion)
+        can go through this instead of knowing which concrete storage
+        backend - or whether it is backed by a file at all - they are
+        talking to.
+
+        Defaults to None (no on-disk artifact). Concrete
+        implementations override it where relevant; not abstract
+        because "no artifact" is a perfectly valid answer, not a
+        missing implementation.
+        """
+        return None

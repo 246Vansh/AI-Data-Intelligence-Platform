@@ -12,7 +12,7 @@ from data_engine.metadata import get_metadata
 
 from data_engine.plan_validator import validate_plan
 
-from data_engine.plan_executor import execute_plan
+from data_engine.plan_executor import execute_plan_for_dataset
 
 from data_engine.visualization import create_visualization_spec
 
@@ -32,6 +32,27 @@ router = APIRouter(
     prefix="/api/analyze",
     tags=["Analysis"],
 )
+
+
+class _ColumnsView:
+    """
+    Minimal stand-in for the `df` parameter `plan_validator.validate_plan()`
+    expects.
+
+    validate_plan() only ever checks `column in df.columns` / `not in`
+    - it never reads row data, dtypes, or anything else DataFrame-
+    specific. Handing it this instead of a materialized DataFrame lets
+    plan validation run off `Dataset.column_names` (a cheap schema
+    lookup on every storage backend) rather than requiring a full raw
+    dataset buffer just to check column membership - keeping this
+    route storage/engine agnostic without touching plan_validator.py
+    itself.
+    """
+
+    __slots__ = ("columns",)
+
+    def __init__(self, columns):
+        self.columns = columns
 
 
 # =========================================================
@@ -109,8 +130,6 @@ def analyze_dataset(
                     status_code=404,
                     detail=f"No dataset found for dataset_id: {request.dataset_id!r}",
                 ) from exc
-
-            df = dataset.storage.to_dataframe()
 
     except HTTPException:
         raise
@@ -244,7 +263,7 @@ def analyze_dataset(
             timings,
         ):
             validate_plan(
-                df,
+                _ColumnsView(dataset.column_names),
                 plan,
                 metadata,
             )
@@ -270,8 +289,8 @@ def analyze_dataset(
             "data_execution",
             timings,
         ):
-            result = execute_plan(
-                df,
+            result = execute_plan_for_dataset(
+                dataset,
                 plan,
             )
 

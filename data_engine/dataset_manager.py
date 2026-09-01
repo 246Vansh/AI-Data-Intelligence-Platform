@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from threading import Lock
 
 import pandas as pd
 
 from data_engine.dataset import Dataset
+from data_engine.dataset_manifest import write_manifest
 from data_engine.dataset_registry import (
     DatasetNotFoundError,
     DatasetRegistry,
     dataset_registry,
 )
-from data_engine.storage import PandasStorage
+from data_engine.ingestion import IngestionResult
+from data_engine.storage import PandasStorage, select_storage_for_ingestion
+
+
+def _cleanup_parquet(parquet_path: str) -> None:
+    if os.path.exists(parquet_path):
+        try:
+            os.remove(parquet_path)
+        except OSError:
+            pass
 
 
 def _parse_csv_bytes(contents: bytes) -> pd.DataFrame:
@@ -94,6 +105,71 @@ class DatasetManager:
             storage=PandasStorage(df),
             name=filename,
         )
+
+        self._registry.register(dataset)
+
+        with self._lock:
+            self._active_id = dataset.dataset_id
+
+        return dataset
+
+    def register_ingested_dataset(
+        self,
+        result: IngestionResult,
+        filename: str | None = None,
+    ) -> Dataset:
+        """
+        Register a dataset already produced by bounded-memory ingestion
+        (``data_engine.ingestion.ingest_to_parquet``), make it the
+        active dataset, and return it.
+
+        Unlike ``register_csv_bytes``, this never parses CSV or builds
+        a full-source Pandas DataFrame - the dataset's storage is built
+        straight from the persistent Parquet reference in `result` via
+        ``select_storage_for_ingestion`` (the storage/selector tier
+        owns which concrete backend that is; this method never checks
+        engine/storage type itself).
+
+        `result.dataset_id` becomes the Dataset's id, matching the
+        `{dataset_id}.parquet` filename ingestion already wrote - the
+        registry entry and the on-disk Parquet file stay addressed by
+        the same id.
+
+        If building storage for the already-ingested Parquet file
+        fails, or writing its manifest sidecar (Step 4 - restart
+        durability) fails, the partially-registered state is never
+        left behind: nothing is added to the registry, the active
+        pointer is left untouched, and the orphaned Parquet file
+        itself is removed before the exception is re-raised - the
+        same deterministic cleanup ``ingest_to_parquet`` applies to
+        its own failures.
+        """
+
+        try:
+            storage = select_storage_for_ingestion(result)
+
+        except Exception:
+            _cleanup_parquet(result.parquet_path)
+            raise
+
+        dataset = Dataset(
+            storage=storage,
+            name=filename,
+            dataset_id=result.dataset_id,
+        )
+
+        try:
+            write_manifest(
+                dataset_id=dataset.dataset_id,
+                name=dataset.name,
+                created_at=dataset.created_at,
+                parquet_path=result.parquet_path,
+                storage_root=os.path.dirname(result.parquet_path),
+            )
+
+        except Exception:
+            _cleanup_parquet(result.parquet_path)
+            raise
 
         self._registry.register(dataset)
 
@@ -255,6 +331,22 @@ class DatasetManager:
             builder,
         )
 
+    def get_cached_dataset_aware(
+        self,
+        key: str,
+        builder,
+    ):
+        """
+        Return a cached computation for the active dataset, built by a
+        storage-aware builder (see get_cached_on_dataset()).
+        """
+
+        return get_cached_on_dataset(
+            self._get_active_dataset(),
+            key,
+            builder,
+        )
+
 
 def get_cached_on(
     dataset: Dataset,
@@ -272,6 +364,33 @@ def get_cached_on(
         return dataset.cache[key]
 
     value = builder(dataset.storage.to_dataframe())
+
+    dataset.cache[key] = value
+
+    return value
+
+
+def get_cached_on_dataset(
+    dataset: Dataset,
+    key: str,
+    builder,
+):
+    """
+    Like get_cached_on(), but the builder receives the Dataset itself,
+    never a DataFrame materialized through
+    dataset.storage.to_dataframe().
+
+    For storage-aware builders (e.g.
+    data_engine.profiling.basic_statistics_for_dataset) that must stay
+    free to skip a full-dataset materialization themselves for
+    backends that don't need one - handing them an already-
+    materialized DataFrame here would defeat that entirely.
+    """
+
+    if key in dataset.cache:
+        return dataset.cache[key]
+
+    value = builder(dataset)
 
     dataset.cache[key] = value
 

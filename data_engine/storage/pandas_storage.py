@@ -44,3 +44,15 @@ class PandasStorage(DatasetStorage):
 
     def column_names(self) -> list[str]:
         return self._dataframe.columns.tolist()
+
+    def close(self) -> None:
+        """
+        Safe no-op.
+
+        PandasStorage holds no closeable resource - no open
+        connection, no file handle - just a DataFrame reference, which
+        Python's own garbage collector reclaims once nothing
+        references this instance anymore. Present only to satisfy the
+        DatasetStorage lifecycle contract.
+        """
+        pass

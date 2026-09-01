@@ -60,6 +60,9 @@ class _RecordingStorage(DatasetStorage):
         self.calls.append("column_names")
         return self._dataframe.columns.tolist()
 
+    def close(self) -> None:
+        self.calls.append("close")
+
 
 # =========================================================
 # CONTRACT / ABSTRACTNESS

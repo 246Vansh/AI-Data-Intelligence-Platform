@@ -1,3 +1,7 @@
+import io
+import os
+import uuid
+
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pathlib import Path
 
@@ -7,9 +11,14 @@ from backend.dependencies import (
     has_dataset_loaded,
 )
 from data_engine.dataset import Dataset
-from data_engine.dataset_manager import dataset_manager, get_cached_on
+from data_engine.dataset_manager import (
+    dataset_manager,
+    get_cached_on,
+    get_cached_on_dataset,
+)
 from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
-from data_engine.profiler import profile_dataset
+from data_engine.ingestion import ingest_to_parquet
+from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata import get_metadata
 from data_engine.data_quality import check_data_quality
 from data_engine.json_safety import sanitize_records
@@ -76,6 +85,12 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB limit
 UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MB
 
 
+# Where ingest_to_parquet persists each uploaded dataset's Parquet
+# file, named "{dataset_id}.parquet". Module-level so tests can point
+# it at a scratch directory instead of the real one.
+PARQUET_STORAGE_ROOT = os.path.join("data", "uploads")
+
+
 @router.post("/upload")
 def upload_dataset(file: UploadFile = File(...)):
     """
@@ -139,29 +154,41 @@ def upload_dataset(file: UploadFile = File(...)):
                 detail="The uploaded file does not look like a text CSV file.",
             )
 
-        # Parse directly from the bytes already in memory - no
-        # temp-file round-trip. Measured ~7x faster on a 22MB file
-        # by itself (pyarrow engine inside register_csv_bytes), plus
-        # this removes a disk write + read + unlink on top of that.
+        # Stream straight to Parquet through the bounded-memory
+        # ingestion pipeline (data_engine.ingestion.ingest_to_parquet)
+        # instead of parsing the bytes into a full Pandas DataFrame
+        # here. The dataset_id is minted up front because
+        # ingest_to_parquet names its output "{dataset_id}.parquet" -
+        # DatasetManager then registers the Dataset under that same
+        # id, so the registry entry and the on-disk Parquet file always
+        # agree.
         #
-        # register_csv_bytes() (rather than load_csv_bytes()) because
-        # this route needs the assigned dataset_id back - each upload
-        # creates an independent Dataset in the registry, it never
-        # overwrites a previously uploaded one. It also still becomes
-        # "the active dataset" for every existing endpoint below and
-        # in analysis.py, which don't take a dataset_id yet - that's
-        # unchanged in this step.
-        dataset = dataset_manager.register_csv_bytes(
-            contents,
+        # Storage-backend choice for the ingested Parquet file is not
+        # decided here: register_ingested_dataset delegates that to
+        # select_storage_for_ingestion in the storage/selector tier, so
+        # this route never branches on storage/engine type itself.
+        #
+        # It also still becomes "the active dataset" for every existing
+        # endpoint below and in analysis.py, which don't take a
+        # dataset_id yet - that's unchanged in this step.
+        dataset_id = str(uuid.uuid4())
+
+        ingestion_result = ingest_to_parquet(
+            source_stream=io.BytesIO(contents),
+            dataset_id=dataset_id,
+            storage_root=PARQUET_STORAGE_ROOT,
+        )
+
+        dataset = dataset_manager.register_ingested_dataset(
+            ingestion_result,
             filename=file.filename,
         )
-        df = dataset.storage.to_dataframe()
 
         return {
             "message": "Dataset uploaded successfully.",
             "filename": file.filename,
-            "rows": len(df),
-            "columns": len(df.columns),
+            "rows": dataset.row_count,
+            "columns": dataset.column_count,
             "dataset_id": dataset.dataset_id,
         }
 
@@ -180,18 +207,71 @@ def upload_dataset(file: UploadFile = File(...)):
 # =========================================================
 
 
+def _legacy_profile_from_stats(stats: dict) -> dict:
+    """
+    Reshape basic_statistics_for_dataset()'s Step 9 contract output
+    into the historical data_engine.profiler.profile_dataset()
+    response shape, so existing /profile API consumers see no schema
+    change from this route now funneling through the storage-aware
+    profiling boundary instead of always materializing a DataFrame.
+
+    duplicate_rows and memory_usage_bytes are not part of the Step 9
+    "basic statistics" contract itself - they are bridged in as a
+    legacy fallback because basic_statistics_for_dataset() carries them
+    anyway precisely so callers like this one never have to trigger a
+    second, separate materialization to get them. memory_usage_bytes
+    is None for a DuckDB-backed dataset (no faithful native equivalent
+    to pandas' memory_usage(deep=True) - see
+    data_engine/profiling/duckdb_profiling.py).
+    """
+
+    columns = stats["columns"]
+
+    return {
+        "rows": stats["row_count"],
+        "columns": stats["column_count"],
+        "column_names": list(columns.keys()),
+        "data_types": {
+            name: info["data_type"] for name, info in columns.items()
+        },
+        "missing_values": {
+            name: info["missing_count"] for name, info in columns.items()
+        },
+        "duplicate_rows": stats["duplicate_rows"],
+        "memory_usage_bytes": stats["memory_usage_bytes"],
+        "column_details": {
+            name: {
+                "data_type": info["data_type"],
+                "missing_count": info["missing_count"],
+                "missing_percentage": info["missing_percentage"],
+                "unique_values": info["distinct_count"],
+            }
+            for name, info in columns.items()
+        },
+    }
+
+
 @router.get("/profile")
 def get_dataset_profile():
 
-    require_dataset()
+    # Not require_dataset(): that helper's return value
+    # (get_current_dataset()) unconditionally materializes the active
+    # dataset's full DataFrame via dataset_manager.get_dataframe() -
+    # exactly the raw-record pull this route no longer needs. Only the
+    # cheap "is anything loaded" gate check is wanted here.
+    if not has_dataset_loaded():
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset has been uploaded yet.",
+        )
 
-    profile = dataset_manager.get_cached(
-        "profile",
-        profile_dataset,
+    stats = dataset_manager.get_cached_dataset_aware(
+        "basic_statistics",
+        basic_statistics_for_dataset,
     )
 
     return {
-        **profile,
+        **_legacy_profile_from_stats(stats),
         "filename": get_current_dataset_name(),
     }
 
@@ -205,14 +285,14 @@ def get_dataset_profile_by_id(dataset_id: str):
 
     dataset = resolve_dataset(dataset_id)
 
-    profile = get_cached_on(
+    stats = get_cached_on_dataset(
         dataset,
-        "profile",
-        profile_dataset,
+        "basic_statistics",
+        basic_statistics_for_dataset,
     )
 
     return {
-        **profile,
+        **_legacy_profile_from_stats(stats),
         "filename": dataset.name,
     }
 
@@ -378,13 +458,26 @@ def get_dataset_by_id(dataset_id: str):
 @router.delete("/{dataset_id}")
 def delete_dataset(dataset_id: str):
     """
-    Remove a dataset from the registry.
+    Remove a dataset from the registry and release everything it
+    holds: the registry entry, its storage's resources (e.g. a
+    DuckDB connection), and its on-disk artifact (e.g. a Parquet
+    file), if it has one.
 
-    Only the in-memory registry entry is removed - no on-disk source
-    files (e.g. under data/raw) are touched. If dataset_id is the
-    currently active dataset, the active pointer is cleared too, so
-    DatasetManager never keeps resolving to a dataset that no longer
-    exists in the registry.
+    This route stays storage-agnostic on purpose: it never imports a
+    concrete storage/execution engine and never touches the
+    filesystem itself. It only calls dataset_registry.delete(), which
+    triggers storage.close() and artifact cleanup through the
+    DatasetStorage contract (DatasetStorage.close() /
+    DatasetStorage.artifact_path) - the same abstraction every other
+    route in this module already depends on, never a concrete
+    backend. A storage-close or filesystem-cleanup failure there is
+    logged and does not surface as an error response here; the
+    registry entry itself is still gone either way.
+
+    If dataset_id is the currently active dataset, the active pointer
+    is cleared too, so DatasetManager never keeps resolving to a
+    dataset that no longer exists in the registry. Deleting a dataset
+    that isn't the active one leaves the active pointer untouched.
     """
 
     resolve_dataset(dataset_id)

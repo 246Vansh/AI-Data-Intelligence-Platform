@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import logging
+import os
 from threading import Lock
 
 from data_engine.dataset import Dataset
+from data_engine.dataset_manifest import delete_manifest, manifest_path_for_parquet
+
+logger = logging.getLogger(__name__)
 
 
 class DatasetNotFoundError(LookupError):
@@ -83,20 +88,79 @@ class DatasetRegistry:
 
     def delete(self, dataset_id: str) -> None:
         """
-        Remove dataset_id from the registry.
+        Remove dataset_id from the registry and release the resources
+        its storage holds.
 
-        Raises DatasetNotFoundError if it isn't registered, for the
-        same "clear, controlled error" reason as get(): deleting
-        something that was never there is surfaced, not silently
-        ignored. A caller that wants idempotent-delete semantics can
-        guard with exists() first.
+        Deliberately sequenced:
+          1. Acquire the registry lock just long enough to locate and
+             pop the Dataset entry.
+          2. Release the registry lock.
+          3. Close the dataset's storage (e.g. a DuckDB connection).
+          4. Delete the storage's on-disk artifact (e.g. its Parquet
+             file), if it has one.
+          5. Delete that artifact's manifest sidecar (Step 4 - restart
+             durability), if one exists.
+
+        The registry lock is never held across storage.close() or
+        filesystem I/O - both can take a while (an in-flight query
+        finishing, an unlink on a large file), and holding a
+        process-wide lock across either would stall every other
+        registry operation for as long as they take.
+
+        Raises DatasetNotFoundError if dataset_id isn't registered,
+        for the same "clear, controlled error" reason as get():
+        deleting something that was never there is surfaced, not
+        silently ignored. A caller that wants idempotent-delete
+        semantics can guard with exists() first.
+
+        Storage-close and filesystem-cleanup failures are handled
+        differently from that: they're logged, not raised. The
+        dataset is already gone from the registry by that point and
+        stays gone - there's nothing to roll back to - and one
+        cleanup step failing must not stop the other from being
+        attempted. Callers of this method therefore only ever see it
+        raise over dataset_id not being registered, never over
+        storage/filesystem cleanup.
         """
 
         with self._lock:
-            if dataset_id not in self._datasets:
-                raise DatasetNotFoundError(dataset_id)
+            dataset = self._datasets.pop(dataset_id, None)
 
-            del self._datasets[dataset_id]
+        if dataset is None:
+            raise DatasetNotFoundError(dataset_id)
+
+        try:
+            dataset.storage.close()
+        except Exception:
+            logger.warning(
+                "Failed to close storage for dataset_id=%r during deletion.",
+                dataset_id,
+                exc_info=True,
+            )
+
+        artifact_path = dataset.storage.artifact_path
+
+        if artifact_path is not None:
+            try:
+                if os.path.exists(artifact_path):
+                    os.remove(artifact_path)
+            except OSError:
+                logger.warning(
+                    "Failed to delete on-disk artifact %r for dataset_id=%r "
+                    "during deletion.",
+                    artifact_path,
+                    dataset_id,
+                    exc_info=True,
+                )
+
+            try:
+                delete_manifest(manifest_path_for_parquet(artifact_path))
+            except OSError:
+                logger.warning(
+                    "Failed to delete manifest for dataset_id=%r during deletion.",
+                    dataset_id,
+                    exc_info=True,
+                )
 
     def list(self) -> list[Dataset]:
         """

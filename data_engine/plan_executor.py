@@ -1,6 +1,7 @@
 import pandas as pd
 
 from data_engine.analysis_plan import AnalysisPlan
+from data_engine.dataset import Dataset
 from data_engine.query_engine import analyze
 
 
@@ -204,3 +205,46 @@ def apply_time_granularity(
         raise ValueError(f"Unsupported time granularity: {granularity}")
 
     return result
+
+
+def execute_plan_for_dataset(
+    dataset: Dataset,
+    plan: AnalysisPlan,
+) -> pd.DataFrame:
+    """
+    Execute an already-validated AnalysisPlan against a specific
+    Dataset, using whichever ExecutionEngine matches that Dataset's
+    own storage backend.
+
+    This is the storage-aware entry point: a DuckDB-backed dataset no
+    longer needs a full storage.to_dataframe() materialization just to
+    apply raw filters (=, !=, >, >=, <, <=) or time-bucketing (day,
+    week, month, quarter, year) - those operations are pushed down
+    natively via DuckDBExecutionEngine -> execute_plan_duckdb(), with
+    only the final, already filtered/aggregated result ever becoming a
+    DataFrame.
+
+    apply_filter() / apply_time_granularity() / execute_plan() above
+    are untouched and keep serving as the fallback pipeline for
+    Pandas-backed datasets (via PandasExecutionEngine) exactly as
+    before - no filtering, grouping, or aggregation logic is
+    duplicated here.
+
+    `dataset` must always be the specific Dataset instance to execute
+    against - this function never resolves a "current" dataset through
+    a global dataset manager, so multiple datasets can be active at
+    once without any risk of cross-dataset crosstalk.
+
+    `plan` must already have passed data_engine.plan_validator.
+    validate_plan() - this function performs no plan validation of its
+    own, matching the ExecutionEngine contract's `validated_plan`.
+    """
+
+    # Imported lazily: data_engine.execution imports execute_plan from
+    # this module (for its Pandas adapter), so importing the execution
+    # package back at module load time would create a circular import.
+    from data_engine.execution import select_engine_for
+
+    engine = select_engine_for(dataset)
+
+    return engine.execute(dataset, plan)

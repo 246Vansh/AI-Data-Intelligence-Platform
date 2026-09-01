@@ -1,16 +1,99 @@
+import logging
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from backend.routes.dataset import router as dataset_router
+from backend.routes.dataset import PARQUET_STORAGE_ROOT, router as dataset_router
 from backend.routes.analysis import router as analysis_router
+from data_engine.dataset import Dataset
+from data_engine.dataset_manifest import find_manifest_paths, read_manifest
+from data_engine.dataset_registry import DatasetRegistry, dataset_registry
+from data_engine.storage import DuckDBStorage
+
+
+logger = logging.getLogger(__name__)
+
+
+def _recover_datasets(
+    storage_root: str = PARQUET_STORAGE_ROOT,
+    registry: DatasetRegistry = dataset_registry,
+) -> None:
+    """
+    Step 4 - restart durability: re-register every dataset whose
+    manifest sidecar and Parquet artifact both still exist on disk, so
+    datasets uploaded by a prior process remain reachable after a
+    restart (DatasetRegistry is otherwise in-memory only).
+
+    Never raises and never fails startup - a bad manifest, a missing
+    Parquet file, an unreadable Parquet file, or a duplicate
+    dataset_id is logged and that one dataset is skipped; every other
+    valid dataset is still recovered.
+    """
+
+    seen_ids: set[str] = set()
+
+    for manifest_path in find_manifest_paths(storage_root):
+        try:
+            manifest = read_manifest(manifest_path)
+
+        except ValueError as exc:
+            logger.error("Skipping unreadable manifest %r: %s", manifest_path, exc)
+            continue
+
+        if manifest.dataset_id in seen_ids:
+            logger.error(
+                "Skipping duplicate dataset_id=%r from manifest %r.",
+                manifest.dataset_id,
+                manifest_path,
+            )
+            continue
+
+        if not os.path.exists(manifest.parquet_path):
+            logger.warning(
+                "Skipping dataset_id=%r: Parquet file missing at %r.",
+                manifest.dataset_id,
+                manifest.parquet_path,
+            )
+            continue
+
+        try:
+            storage = DuckDBStorage.from_parquet(manifest.parquet_path)
+
+        except Exception as exc:
+            logger.error(
+                "Skipping dataset_id=%r: failed to open Parquet file %r: %s",
+                manifest.dataset_id,
+                manifest.parquet_path,
+                exc,
+            )
+            continue
+
+        registry.register(
+            Dataset(
+                storage=storage,
+                name=manifest.name,
+                dataset_id=manifest.dataset_id,
+                created_at=manifest.created_at,
+            )
+        )
+        seen_ids.add(manifest.dataset_id)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _recover_datasets()
+    yield
 
 
 app = FastAPI(
     title="AI Data Intelligence Platform",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
