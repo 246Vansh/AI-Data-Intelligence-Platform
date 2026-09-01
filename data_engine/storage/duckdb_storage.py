@@ -50,9 +50,10 @@ class DuckDBStorage(DatasetStorage):
     @classmethod
     def from_parquet(cls, parquet_path: str) -> "DuckDBStorage":
         """
-        Build a DuckDBStorage instance directly from a Parquet file on
-        disk, via DuckDB's own native ``read_parquet`` - a Pandas
-        DataFrame of the source is never constructed to get here.
+        Build a DuckDBStorage instance as a zero-copy VIEW over a
+        Parquet file on disk, via DuckDB's own native ``read_parquet``
+        - neither a Pandas DataFrame nor a physical copy of the
+        dataset's rows is ever created to get here.
 
         This is the constructor the ingestion -> registration path
         (Step 10) uses: ``ingest_to_parquet`` only ever hands back a
@@ -61,16 +62,30 @@ class DuckDBStorage(DatasetStorage):
 
         Bypasses ``__init__`` (which requires a DataFrame) via
         ``__new__`` and sets up the same private-connection /
-        namespaced-table invariants inline.
+        namespaced-table invariants inline - except the table is a
+        ``CREATE VIEW ... AS SELECT * FROM read_parquet(?)``, not a
+        physical ``CREATE TABLE ... AS SELECT``. DuckDB resolves the
+        view against the Parquet file itself at query time, so
+        registration never scans or copies the dataset's rows - the
+        connection only stores the view's query plan. Every downstream
+        consumer (execute_plan_duckdb, profiling, to_dataframe/
+        row_count/column_count/column_names/schema_info) keeps working
+        unmodified: DuckDB queries a view exactly like a table.
         """
         instance = cls.__new__(cls)
 
         instance._connection = duckdb.connect(database=":memory:")
         instance._table_name = f"dataset_{uuid.uuid4().hex}"
+        instance._parquet_path = parquet_path
 
+        # DuckDB DDL (CREATE VIEW) cannot be a prepared statement, so
+        # the path can't be passed as a bound parameter here the way
+        # the old CREATE TABLE ... AS SELECT statement did - it is
+        # escaped and inlined into the view definition instead.
+        escaped_parquet_path = str(parquet_path).replace("'", "''")
         instance._connection.execute(
-            f'CREATE TABLE "{instance._table_name}" AS SELECT * FROM read_parquet(?)',
-            [parquet_path],
+            f'CREATE VIEW "{instance._table_name}" AS '
+            f"SELECT * FROM read_parquet('{escaped_parquet_path}')"
         )
 
         instance._columns = list(instance._connection.table(instance._table_name).columns)
