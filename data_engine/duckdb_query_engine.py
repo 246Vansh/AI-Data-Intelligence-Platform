@@ -46,6 +46,13 @@ ALLOWED_SORT_BY = {"metric", "time"}
 
 ALLOWED_TIME_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
+# Safety net for the DuckDB analytical execution path only: applied
+# solely when a plan reaches here with no explicit limit (plan.limit
+# is None), so a high-cardinality GROUP BY can't produce an unbounded
+# result that fetchdf() would then materialize into Pandas in full.
+# An explicit plan.limit is always honored as-is and never overridden.
+DEFAULT_MAX_RESULT_ROWS = 10_000
+
 
 def _quote_identifier(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
@@ -198,7 +205,8 @@ def execute_plan_duckdb(
             raise ValueError("Time sorting requires a datetime group-by column.")
         order_clause = f"ORDER BY {_quote_identifier(time_bucket_column)} {direction}"
 
-    limit_clause = f"LIMIT {int(plan.limit)}" if plan.limit is not None else ""
+    effective_limit = plan.limit if plan.limit is not None else DEFAULT_MAX_RESULT_ROWS
+    limit_clause = f"LIMIT {int(effective_limit)}"
 
     query = (
         f"SELECT {select_columns}, {metric_expr} "

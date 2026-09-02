@@ -18,6 +18,7 @@ import pytest
 
 from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 from data_engine.dataset import Dataset
+from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.execution import DuckDBExecutionEngine, ExecutionEngine
 from data_engine.plan_executor import execute_plan
 from data_engine.storage import DuckDBStorage
@@ -29,6 +30,18 @@ def _make_dataframe() -> pd.DataFrame:
             "region": ["north", "north", "south", "south", "east", "east"],
             "category": ["a", "b", "a", "b", "a", "b"],
             "quantity": [10, 20, 30, 40, 50, 60],
+        }
+    )
+
+
+def _make_many_groups_dataframe(group_count: int) -> pd.DataFrame:
+    # One row per distinct "region" group - the minimal shape needed to
+    # exercise a grouped aggregation with `group_count` output rows,
+    # keeping the fixture small/deterministic regardless of size.
+    return pd.DataFrame(
+        {
+            "region": [f"region_{i}" for i in range(group_count)],
+            "quantity": [1] * group_count,
         }
     )
 
@@ -167,6 +180,38 @@ def test_duckdb_engine_never_calls_to_dataframe():
     engine.execute(dataset, plan)
 
     assert storage.to_dataframe_calls == []
+
+
+# =========================================================
+# RESULT-ROW SAFETY BOUND - DEFAULT_MAX_RESULT_ROWS
+# =========================================================
+
+
+def test_duckdb_engine_caps_unbounded_group_by_at_default_max_result_rows():
+    df = _make_many_groups_dataframe(DEFAULT_MAX_RESULT_ROWS + 1)
+    dataset = Dataset(storage=DuckDBStorage(df))
+    plan = AnalysisPlan(group_by=["region"], metric="quantity", aggregation="sum")
+
+    engine = DuckDBExecutionEngine()
+    result = engine.execute(dataset, plan)
+
+    assert len(result) == DEFAULT_MAX_RESULT_ROWS
+
+
+def test_duckdb_engine_preserves_explicit_limit_of_five():
+    df = _make_many_groups_dataframe(DEFAULT_MAX_RESULT_ROWS + 1)
+    dataset = Dataset(storage=DuckDBStorage(df))
+    plan = AnalysisPlan(
+        group_by=["region"],
+        metric="quantity",
+        aggregation="sum",
+        limit=5,
+    )
+
+    engine = DuckDBExecutionEngine()
+    result = engine.execute(dataset, plan)
+
+    assert len(result) == 5
 
 
 # =========================================================
