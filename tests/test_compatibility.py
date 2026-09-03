@@ -479,6 +479,7 @@ FORBIDDEN_ROUTE_IMPORTS = {
     "DuckDBStorage",
     "DuckDBExecutionEngine",
     "PandasExecutionEngine",
+    "PandasStorage",
 }
 
 
