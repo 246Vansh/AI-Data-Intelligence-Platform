@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
 
 from data_engine.analysis_plan import AnalysisPlan
 from data_engine.dataset import Dataset
+from data_engine.execution.result import ExecutionResult
 
 
 class ExecutionEngine(ABC):
@@ -28,10 +28,12 @@ class ExecutionEngine(ABC):
       - does not materialize or own the dataset itself; it delegates to
         whatever access pattern the underlying storage/engine supports.
 
-    The return type is intentionally left as the existing analytical
-    result representation used downstream (e.g. a DataFrame today) -
-    this boundary is about decoupling *how* a plan is executed, not
-    about redesigning *what* a result looks like.
+    The return type is ExecutionResult - an engine-neutral result
+    representation (columns/rows/row_count/truncated). No concrete
+    engine may return a raw pandas DataFrame (or any other
+    backend-specific object) from execute(); each engine converts its
+    own internal result into an ExecutionResult exactly once, at the
+    end of execute().
     """
 
     @abstractmethod
@@ -39,7 +41,7 @@ class ExecutionEngine(ABC):
         self,
         dataset_reference: Dataset,
         validated_plan: AnalysisPlan,
-    ) -> Any:
+    ) -> ExecutionResult:
         """
         Execute a validated AnalysisPlan against a dataset and return
         the analytical result.

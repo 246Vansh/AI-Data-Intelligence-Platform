@@ -24,8 +24,20 @@ import pytest
 
 from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 from data_engine.dataset import Dataset
+from data_engine.execution.result import ExecutionResult
 from data_engine.plan_executor import execute_plan, execute_plan_for_dataset
 from data_engine.storage import DuckDBStorage, PandasStorage
+
+
+def _to_dataframe(execution_result: ExecutionResult) -> pd.DataFrame:
+    """
+    Test-only compatibility conversion: execute_plan_for_dataset() now
+    returns an engine-neutral ExecutionResult. Existing assertions in
+    this file compare against pandas DataFrames (execute_plan()'s
+    direct return value), so results are converted back for the
+    comparison rather than rewriting every assertion.
+    """
+    return pd.DataFrame(execution_result.rows, columns=execution_result.columns)
 
 
 def _make_dataframe() -> pd.DataFrame:
@@ -90,7 +102,7 @@ def test_duckdb_string_filters_match_pandas(operator, value):
     )
 
     duckdb_dataset = Dataset(storage=DuckDBStorage(df))
-    duckdb_result = execute_plan_for_dataset(duckdb_dataset, plan)
+    duckdb_result = _to_dataframe(execute_plan_for_dataset(duckdb_dataset, plan))
     pandas_result = execute_plan(df, plan)
 
     pd.testing.assert_frame_equal(duckdb_result, pandas_result, check_dtype=False)
@@ -114,7 +126,7 @@ def test_duckdb_numeric_filters_match_pandas(operator, value):
     )
 
     duckdb_dataset = Dataset(storage=DuckDBStorage(df))
-    duckdb_result = execute_plan_for_dataset(duckdb_dataset, plan)
+    duckdb_result = _to_dataframe(execute_plan_for_dataset(duckdb_dataset, plan))
     pandas_result = execute_plan(df, plan)
 
     pd.testing.assert_frame_equal(
@@ -148,9 +160,11 @@ def test_duckdb_time_bucketing_matches_pandas_for_every_granularity(granularity)
     duckdb_result = execute_plan_for_dataset(duckdb_dataset, plan)
     pandas_result = execute_plan(df, plan)
 
-    assert list(duckdb_result.columns) == list(pandas_result.columns)
-    assert len(duckdb_result) == len(pandas_result)
-    assert list(duckdb_result["sum_quantity"]) == list(pandas_result["sum_quantity"])
+    assert duckdb_result.columns == list(pandas_result.columns)
+    assert duckdb_result.row_count == len(pandas_result)
+    assert [row["sum_quantity"] for row in duckdb_result.rows] == list(
+        pandas_result["sum_quantity"]
+    )
 
 
 # =========================================================
@@ -241,7 +255,7 @@ def test_pandas_backed_dataset_still_uses_to_dataframe_fallback():
         aggregation="sum",
     )
 
-    result = execute_plan_for_dataset(dataset, plan)
+    result = _to_dataframe(execute_plan_for_dataset(dataset, plan))
     direct_result = execute_plan(df, plan)
 
     pd.testing.assert_frame_equal(result, direct_result)

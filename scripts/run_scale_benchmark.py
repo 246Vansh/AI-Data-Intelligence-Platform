@@ -304,7 +304,7 @@ def _op_duckdb(args: dict) -> dict:
         return {
             "elapsed_s": elapsed,
             "peak_rss_bytes": peak_rss_bytes(),
-            "result_rows": int(len(result_df)),
+            "result_rows": int(result_df.row_count),
             "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
         }
     finally:
@@ -360,7 +360,7 @@ def _op_pandas(args: dict) -> dict:
     return {
         "elapsed_s": elapsed,
         "peak_rss_bytes": peak_rss_bytes(),
-        "result_rows": int(len(result_df)),
+        "result_rows": int(result_df.row_count),
     }
 
 

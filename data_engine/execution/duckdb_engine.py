@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import pandas as pd
-
 from data_engine.analysis_plan import AnalysisPlan
 from data_engine.dataset import Dataset
 from data_engine.duckdb_query_engine import execute_plan_duckdb
 from data_engine.execution.base import ExecutionEngine
+from data_engine.execution.result import ExecutionResult
 
 
 class DuckDBExecutionEngine(ExecutionEngine):
@@ -29,9 +28,21 @@ class DuckDBExecutionEngine(ExecutionEngine):
         self,
         dataset_reference: Dataset,
         validated_plan: AnalysisPlan,
-    ) -> pd.DataFrame:
+    ) -> ExecutionResult:
         # Pass the storage object straight through to the DuckDB-native
         # query engine. No to_dataframe() call, no full-dataset
         # materialization - execute_plan_duckdb() runs SQL directly
         # against dataset_reference.storage.connection/table_name.
-        return execute_plan_duckdb(dataset_reference.storage, validated_plan)
+        dataframe = execute_plan_duckdb(dataset_reference.storage, validated_plan)
+
+        # Single conversion point, at the same place a DataFrame was
+        # already being produced - no additional materialization, no
+        # extra query. Truncation is not tracked by execute_plan_duckdb()
+        # today (the LIMIT clause doesn't reveal whether more rows
+        # existed), so it is never claimed as True here.
+        return ExecutionResult(
+            columns=dataframe.columns.tolist(),
+            rows=dataframe.to_dict(orient="records"),
+            row_count=len(dataframe),
+            truncated=False,
+        )

@@ -1,5 +1,6 @@
 import re
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -289,17 +290,26 @@ def analyze_dataset(
             "data_execution",
             timings,
         ):
-            result = execute_plan_for_dataset(
+            execution_result = execute_plan_for_dataset(
                 dataset,
                 plan,
             )
 
-            safe_rows = sanitize_records(result.to_dict(orient="records"))
+            # Compatibility conversion: this is the one place an
+            # engine-neutral ExecutionResult is turned back into a
+            # pandas DataFrame, so the existing insight/visualization
+            # logic below (which expects a DataFrame) needs no changes.
+            result = pd.DataFrame(
+                execution_result.rows,
+                columns=execution_result.columns,
+            )
+
+            safe_rows = sanitize_records(execution_result.rows)
 
             analysis_result = {
-                "columns": result.columns.tolist(),
+                "columns": execution_result.columns,
                 "rows": safe_rows,
-                "row_count": len(result),
+                "row_count": execution_result.row_count,
             }
 
     except ValueError as exc:

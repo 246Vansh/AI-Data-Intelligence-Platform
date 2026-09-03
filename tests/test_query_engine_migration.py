@@ -39,9 +39,21 @@ import data_engine.query_engine as query_engine_module
 from data_engine.analysis_plan import AnalysisPlan
 from data_engine.dataset import Dataset
 from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
+from data_engine.execution.result import ExecutionResult
 from data_engine.plan_executor import execute_plan, execute_plan_for_dataset
 from data_engine.query_engine import analyze
 from data_engine.storage import DuckDBStorage, PandasStorage
+
+
+def _to_dataframe(execution_result: ExecutionResult) -> pd.DataFrame:
+    """
+    Test-only compatibility conversion: execute_plan_for_dataset() now
+    returns an engine-neutral ExecutionResult. Existing assertions in
+    this file compare against pandas DataFrames, so results are
+    converted back for the comparison rather than rewriting every
+    assertion.
+    """
+    return pd.DataFrame(execution_result.rows, columns=execution_result.columns)
 
 
 def _make_dataframe() -> pd.DataFrame:
@@ -88,8 +100,12 @@ def test_grouped_aggregation_parity_between_duckdb_and_pandas(aggregation):
     df = _make_dataframe()
     plan = AnalysisPlan(group_by=["region"], metric="quantity", aggregation=aggregation)
 
-    duckdb_result = execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
-    pandas_result = execute_plan_for_dataset(Dataset(storage=PandasStorage(df)), plan)
+    duckdb_result = _to_dataframe(
+        execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
+    )
+    pandas_result = _to_dataframe(
+        execute_plan_for_dataset(Dataset(storage=PandasStorage(df)), plan)
+    )
 
     assert list(duckdb_result.columns) == list(pandas_result.columns)
     duckdb_sorted = duckdb_result.sort_values("region").reset_index(drop=True)
@@ -107,9 +123,9 @@ def test_global_aggregation_parity_between_duckdb_and_pandas(aggregation):
     duckdb_result = execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
     pandas_result = execute_plan_for_dataset(Dataset(storage=PandasStorage(df)), plan)
 
-    assert list(duckdb_result.columns) == [f"{aggregation}_quantity"]
-    assert duckdb_result[f"{aggregation}_quantity"].iloc[0] == pytest.approx(
-        pandas_result[f"{aggregation}_quantity"].iloc[0]
+    assert duckdb_result.columns == [f"{aggregation}_quantity"]
+    assert duckdb_result.rows[0][f"{aggregation}_quantity"] == pytest.approx(
+        pandas_result.rows[0][f"{aggregation}_quantity"]
     )
 
 
@@ -134,10 +150,14 @@ def test_sort_and_limit_combinations_parity(sort, limit):
     duckdb_result = execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
     pandas_result = execute_plan_for_dataset(Dataset(storage=PandasStorage(df)), plan)
 
-    assert list(duckdb_result["region"]) == list(pandas_result["region"])
-    assert list(duckdb_result["sum_quantity"]) == list(pandas_result["sum_quantity"])
+    assert [row["region"] for row in duckdb_result.rows] == [
+        row["region"] for row in pandas_result.rows
+    ]
+    assert [row["sum_quantity"] for row in duckdb_result.rows] == [
+        row["sum_quantity"] for row in pandas_result.rows
+    ]
     if limit is not None:
-        assert len(duckdb_result) == limit
+        assert duckdb_result.row_count == limit
 
 
 @pytest.mark.parametrize(
@@ -158,7 +178,9 @@ def test_sort_by_time_parity(time_granularity):
     duckdb_result = execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
     pandas_result = execute_plan_for_dataset(Dataset(storage=PandasStorage(df)), plan)
 
-    assert list(duckdb_result["sum_quantity"]) == list(pandas_result["sum_quantity"])
+    assert [row["sum_quantity"] for row in duckdb_result.rows] == [
+        row["sum_quantity"] for row in pandas_result.rows
+    ]
 
 
 # =========================================================
@@ -312,11 +334,11 @@ def test_pandas_grouped_aggregation_caps_result_when_limit_none_but_honors_expli
     )
     capped_result = execute_plan_for_dataset(dataset, uncapped_plan)
 
-    assert len(capped_result) == DEFAULT_MAX_RESULT_ROWS
+    assert capped_result.row_count == DEFAULT_MAX_RESULT_ROWS
 
     explicit_limit_plan = AnalysisPlan(
         group_by=["region"], metric="quantity", aggregation="sum", limit=5
     )
     limited_result = execute_plan_for_dataset(dataset, explicit_limit_plan)
 
-    assert len(limited_result) == 5
+    assert limited_result.row_count == 5

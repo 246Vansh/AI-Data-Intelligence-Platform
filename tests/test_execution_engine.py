@@ -103,7 +103,9 @@ def test_pandas_engine_matches_direct_execute_plan_global_aggregation():
     engine_result = engine.execute(dataset, plan)
     direct_result = execute_plan(df, plan)
 
-    pd.testing.assert_frame_equal(engine_result, direct_result)
+    assert engine_result.columns == list(direct_result.columns)
+    assert engine_result.rows == direct_result.to_dict(orient="records")
+    assert engine_result.row_count == len(direct_result)
 
 
 def test_pandas_engine_matches_direct_execute_plan_group_by_filter_sort_limit():
@@ -123,8 +125,9 @@ def test_pandas_engine_matches_direct_execute_plan_group_by_filter_sort_limit():
     engine_result = engine.execute(dataset, plan)
     direct_result = execute_plan(df, plan)
 
-    pd.testing.assert_frame_equal(engine_result, direct_result)
-    assert len(engine_result) == 2
+    assert engine_result.columns == list(direct_result.columns)
+    assert engine_result.rows == direct_result.to_dict(orient="records")
+    assert engine_result.row_count == 2
 
 
 def test_pandas_engine_result_footprint_has_expected_columns():
@@ -135,8 +138,8 @@ def test_pandas_engine_result_footprint_has_expected_columns():
     engine = PandasExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert list(result.columns) == ["category", "mean_quantity"]
-    assert len(result) == 2
+    assert result.columns == ["category", "mean_quantity"]
+    assert result.row_count == 2
 
 
 # =========================================================

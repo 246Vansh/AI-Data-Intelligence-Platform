@@ -20,6 +20,7 @@ from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 from data_engine.dataset import Dataset
 from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.execution import DuckDBExecutionEngine, ExecutionEngine
+from data_engine.execution.result import ExecutionResult
 from data_engine.plan_executor import execute_plan
 from data_engine.storage import DuckDBStorage
 
@@ -96,12 +97,12 @@ def test_duckdb_engine_handles_filter_group_by_agg_sort_limit():
     engine = DuckDBExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert isinstance(result, pd.DataFrame)
-    assert list(result.columns) == ["region", "sum_quantity"]
-    assert len(result) == 2
+    assert isinstance(result, ExecutionResult)
+    assert result.columns == ["region", "sum_quantity"]
+    assert result.row_count == 2
     # south=30+40=70, east=50+60=110, north(only 20 survives filter)=20
-    assert list(result["region"]) == ["east", "south"]
-    assert list(result["sum_quantity"]) == [110, 70]
+    assert [row["region"] for row in result.rows] == ["east", "south"]
+    assert [row["sum_quantity"] for row in result.rows] == [110, 70]
 
 
 def test_duckdb_engine_global_aggregation_matches_pandas_path():
@@ -113,8 +114,8 @@ def test_duckdb_engine_global_aggregation_matches_pandas_path():
     duckdb_result = engine.execute(dataset, plan)
     pandas_result = execute_plan(df, plan)
 
-    assert list(duckdb_result.columns) == list(pandas_result.columns)
-    assert duckdb_result["sum_quantity"].iloc[0] == pandas_result["sum_quantity"].iloc[0]
+    assert duckdb_result.columns == list(pandas_result.columns)
+    assert duckdb_result.rows[0]["sum_quantity"] == pandas_result["sum_quantity"].iloc[0]
 
 
 @pytest.mark.parametrize(
@@ -129,8 +130,8 @@ def test_duckdb_engine_supports_all_canonical_aggregations(aggregation):
     engine = DuckDBExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert list(result.columns) == ["region", f"{aggregation}_quantity"]
-    assert len(result) == 3
+    assert result.columns == ["region", f"{aggregation}_quantity"]
+    assert result.row_count == 3
 
 
 @pytest.mark.parametrize("operator", ["=", "!=", ">", ">=", "<", "<="])
@@ -146,7 +147,7 @@ def test_duckdb_engine_supports_all_logical_operators(operator):
     engine = DuckDBExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert list(result.columns) == ["count_quantity"]
+    assert result.columns == ["count_quantity"]
 
 
 def test_duckdb_engine_rejects_unknown_metric_and_group_column():
@@ -195,7 +196,7 @@ def test_duckdb_engine_caps_unbounded_group_by_at_default_max_result_rows():
     engine = DuckDBExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert len(result) == DEFAULT_MAX_RESULT_ROWS
+    assert result.row_count == DEFAULT_MAX_RESULT_ROWS
 
 
 def test_duckdb_engine_preserves_explicit_limit_of_five():
@@ -211,7 +212,7 @@ def test_duckdb_engine_preserves_explicit_limit_of_five():
     engine = DuckDBExecutionEngine()
     result = engine.execute(dataset, plan)
 
-    assert len(result) == 5
+    assert result.row_count == 5
 
 
 # =========================================================

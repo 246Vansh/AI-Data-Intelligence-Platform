@@ -41,6 +41,7 @@ from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 from data_engine.dataset import Dataset
 from data_engine.dataset_manager import DatasetManager
 from data_engine.dataset_registry import DatasetRegistry
+from data_engine.execution.result import ExecutionResult
 from data_engine.execution import (
     DuckDBExecutionEngine,
     PandasExecutionEngine,
@@ -50,7 +51,7 @@ from data_engine.ingestion import ingest_to_parquet
 from data_engine.insight_engine import build_deterministic_insights
 from data_engine.insight_generator import build_insight_response
 from data_engine.plan_executor import execute_plan, execute_plan_for_dataset
-from data_engine.storage import DuckDBStorage, PandasStorage
+from data_engine.storage import DatasetStorage, DuckDBStorage, PandasStorage
 from data_engine.visualization import create_visualization_spec
 
 client = TestClient(app)
@@ -302,6 +303,18 @@ def test_dataset_preview_schema_identical_for_pandas_and_duckdb_backed(isolated_
 # =========================================================
 
 
+def _to_dataframe(execution_result: ExecutionResult) -> pd.DataFrame:
+    """
+    Test-only compatibility conversion: execute_plan_for_dataset() now
+    returns an engine-neutral ExecutionResult. Existing assertions in
+    this file compare against pandas DataFrames (or feed a DataFrame
+    into create_visualization_spec()/build_deterministic_insights(),
+    which are unmodified by this change), so results are converted
+    back here rather than rewriting every assertion.
+    """
+    return pd.DataFrame(execution_result.rows, columns=execution_result.columns)
+
+
 def test_select_engine_for_dispatches_duckdb_storage_to_duckdb_engine():
     df = _make_dataframe()
 
@@ -310,6 +323,31 @@ def test_select_engine_for_dispatches_duckdb_storage_to_duckdb_engine():
 
     assert isinstance(select_engine_for(duckdb_dataset), DuckDBExecutionEngine)
     assert isinstance(select_engine_for(pandas_dataset), PandasExecutionEngine)
+
+
+def test_select_engine_for_raises_explicitly_for_unsupported_storage_type():
+    # An unsupported storage backend must fail loudly here rather than
+    # silently stepping down into PandasExecutionEngine - see Step 14A.
+    class _UnsupportedStorage(DatasetStorage):
+        def to_dataframe(self):
+            raise NotImplementedError
+
+        def row_count(self):
+            return 0
+
+        def column_count(self):
+            return 0
+
+        def column_names(self):
+            return []
+
+        def close(self):
+            pass
+
+    dataset = Dataset(storage=_UnsupportedStorage())
+
+    with pytest.raises(TypeError, match="_UnsupportedStorage"):
+        select_engine_for(dataset)
 
 
 def test_duckdb_backed_analysis_plan_computes_natively_without_pandas_materialization():
@@ -329,9 +367,9 @@ def test_duckdb_backed_analysis_plan_computes_natively_without_pandas_materializ
     result = execute_plan_for_dataset(dataset, plan)
 
     # No full-dataset materialization happened to compute this result -
-    # only the final, already-aggregated DataFrame exists.
+    # only the final, already-aggregated result exists.
     assert storage.to_dataframe_calls == []
-    assert list(result.columns) == ["region", "sum_quantity"]
+    assert result.columns == ["region", "sum_quantity"]
 
 
 def test_duckdb_native_result_matches_historical_pandas_result_exactly():
@@ -344,7 +382,9 @@ def test_duckdb_native_result_matches_historical_pandas_result_exactly():
         sort_by="metric",
     )
 
-    duckdb_result = execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
+    duckdb_result = _to_dataframe(
+        execute_plan_for_dataset(Dataset(storage=DuckDBStorage(df)), plan)
+    )
     pandas_result = execute_plan(df, plan)
 
     pd.testing.assert_frame_equal(
@@ -367,7 +407,7 @@ def test_pandas_backed_dataset_still_falls_back_to_pandas_execution_engine():
     engine = select_engine_for(dataset)
     assert isinstance(engine, PandasExecutionEngine)
 
-    result = execute_plan_for_dataset(dataset, plan)
+    result = _to_dataframe(execute_plan_for_dataset(dataset, plan))
     direct_result = execute_plan(df, plan)
 
     pd.testing.assert_frame_equal(result, direct_result)
@@ -413,7 +453,7 @@ def test_visualization_and_insight_pipeline_accepts_native_results_identically(
         sort_by="metric",
     )
 
-    result = execute_plan_for_dataset(dataset, plan)
+    result = _to_dataframe(execute_plan_for_dataset(dataset, plan))
 
     # Visualization: categorical grouping -> bar chart spec.
     viz_spec = create_visualization_spec(
@@ -453,7 +493,7 @@ def test_time_series_transformation_downstream_parity(storage_cls):
         sort_by="time",
     )
 
-    result = execute_plan_for_dataset(dataset, plan)
+    result = _to_dataframe(execute_plan_for_dataset(dataset, plan))
 
     viz_spec = create_visualization_spec(
         result=result,

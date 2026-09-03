@@ -210,11 +210,15 @@ def apply_time_granularity(
 def execute_plan_for_dataset(
     dataset: Dataset,
     plan: AnalysisPlan,
-) -> pd.DataFrame:
+) -> "ExecutionResult":
     """
     Execute an already-validated AnalysisPlan against a specific
     Dataset, using whichever ExecutionEngine matches that Dataset's
     own storage backend.
+
+    Returns an ExecutionResult (data_engine.execution.result) - the
+    engine-neutral columns/rows/row_count/truncated boundary type, not
+    a raw pandas DataFrame.
 
     This is the storage-aware entry point: a DuckDB-backed dataset no
     longer needs a full storage.to_dataframe() materialization just to
