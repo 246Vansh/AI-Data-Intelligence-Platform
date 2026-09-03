@@ -1,5 +1,7 @@
 import pandas as pd
 
+from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
+
 
 ALLOWED_AGGREGATIONS = {
     "sum": "sum",
@@ -177,13 +179,22 @@ def analyze(
 
     # -----------------------------------------
     # Limit
+    #
+    # An explicit limit is always authoritative. When absent, cap at
+    # DEFAULT_MAX_RESULT_ROWS (same safety net as the DuckDB execution
+    # path in duckdb_query_engine.py) so a high-cardinality group-by
+    # can't produce an unbounded result on the Pandas fallback path.
     # -----------------------------------------
 
-    if limit is not None:
+    effective_limit = (
+        limit
+        if limit is not None
+        else DEFAULT_MAX_RESULT_ROWS
+    )
 
-        result = result.head(
-            limit
-        )
+    result = result.head(
+        effective_limit
+    )
 
     return result.reset_index(
         drop=True

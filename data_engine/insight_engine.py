@@ -204,17 +204,68 @@ class InsightEngine:
         if not self.group_by:
             return
 
+        # Bounded prefix size used to cheaply reject an obviously
+        # non-date column (e.g. thousands of categorical strings)
+        # before paying for a full-column parse. See the sampling
+        # short-circuit below for why this stays exact, not a
+        # heuristic.
+        SAMPLE_SIZE = 20
+
         date_column = None
 
         for column in self.group_by:
             if column not in self.result.columns:
                 continue
 
-            parsed = pd.to_datetime(
-                self.result[column],
-                errors="coerce",
-                format="mixed",
-            )
+            series = self.result[column]
+
+            # -----------------------------------------
+            # Fast path: already a datetime dtype.
+            #
+            # pd.to_datetime() on a series that is already
+            # datetime64 is a no-op (existing values, including
+            # any NaT, pass through unchanged) - so the column can
+            # be treated as parsed directly, with no reparsing
+            # cost, and the exact same notna().all() acceptance
+            # check below still applies.
+            # -----------------------------------------
+
+            if pd.api.types.is_datetime64_any_dtype(series):
+                parsed = series
+
+            else:
+                # -----------------------------------------
+                # Exact short-circuit via a small prefix sample.
+                #
+                # The acceptance condition below requires EVERY
+                # value in the column to parse successfully, so a
+                # single failure (including a null, which coerces
+                # to NaT and fails notna()) anywhere in the sample
+                # already proves the full column would fail too -
+                # reject immediately without a full format="mixed"
+                # scan over a purely categorical column. If the
+                # sample fully parses, fall through to the existing
+                # full-column parse to confirm the rest of the
+                # column (e.g. a null appearing after the sampled
+                # prefix).
+                # -----------------------------------------
+
+                sample = series.head(SAMPLE_SIZE)
+
+                sample_parsed = pd.to_datetime(
+                    sample,
+                    errors="coerce",
+                    format="mixed",
+                )
+
+                if not sample_parsed.notna().all():
+                    continue
+
+                parsed = pd.to_datetime(
+                    series,
+                    errors="coerce",
+                    format="mixed",
+                )
 
             if parsed.notna().all():
                 date_column = column

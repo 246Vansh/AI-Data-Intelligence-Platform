@@ -38,6 +38,7 @@ import pytest
 import data_engine.query_engine as query_engine_module
 from data_engine.analysis_plan import AnalysisPlan
 from data_engine.dataset import Dataset
+from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.plan_executor import execute_plan, execute_plan_for_dataset
 from data_engine.query_engine import analyze
 from data_engine.storage import DuckDBStorage, PandasStorage
@@ -139,14 +140,17 @@ def test_sort_and_limit_combinations_parity(sort, limit):
         assert len(duckdb_result) == limit
 
 
-def test_sort_by_time_parity():
+@pytest.mark.parametrize(
+    "time_granularity", ["day", "week", "month", "quarter", "year"]
+)
+def test_sort_by_time_parity(time_granularity):
     df = _make_dataframe()
     plan = AnalysisPlan(
         group_by=["signed_up_at"],
         metric="quantity",
         aggregation="sum",
         time_column="signed_up_at",
-        time_granularity="month",
+        time_granularity=time_granularity,
         sort="desc",
         sort_by="time",
     )
@@ -281,3 +285,38 @@ def test_query_engine_module_has_no_raw_sql_or_storage_type_checks():
     assert "SELECT" not in source.upper()
     assert "isinstance" not in source
     assert "Storage" not in source
+
+
+# =========================================================
+# STEP 12A - PANDAS RESULT-BOUNDARY HARDENING
+#
+# Grouped aggregation on the Pandas fallback path caps at
+# DEFAULT_MAX_RESULT_ROWS when plan.limit is None, mirroring the
+# DuckDB path's existing safety net (duckdb_query_engine.py). An
+# explicit plan.limit remains authoritative either way.
+# =========================================================
+
+
+def test_pandas_grouped_aggregation_caps_result_when_limit_none_but_honors_explicit_limit():
+    num_groups = DEFAULT_MAX_RESULT_ROWS + 500
+    df = pd.DataFrame(
+        {
+            "region": [f"region_{i}" for i in range(num_groups)],
+            "quantity": list(range(num_groups)),
+        }
+    )
+    dataset = Dataset(storage=PandasStorage(df))
+
+    uncapped_plan = AnalysisPlan(
+        group_by=["region"], metric="quantity", aggregation="sum", limit=None
+    )
+    capped_result = execute_plan_for_dataset(dataset, uncapped_plan)
+
+    assert len(capped_result) == DEFAULT_MAX_RESULT_ROWS
+
+    explicit_limit_plan = AnalysisPlan(
+        group_by=["region"], metric="quantity", aggregation="sum", limit=5
+    )
+    limited_result = execute_plan_for_dataset(dataset, explicit_limit_plan)
+
+    assert len(limited_result) == 5

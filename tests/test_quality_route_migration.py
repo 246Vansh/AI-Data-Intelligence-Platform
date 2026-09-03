@@ -192,9 +192,10 @@ def test_quality_by_id_response_schema_unchanged(isolated_manager):
     assert isinstance(body["issues"], list)
 
 
-def test_active_quality_route_response_schema_unchanged(isolated_manager):
+@pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
+def test_active_quality_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=PandasStorage(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
     registry.register(dataset)
 
     with manager._lock:

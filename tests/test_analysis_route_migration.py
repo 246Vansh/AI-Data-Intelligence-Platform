@@ -255,3 +255,117 @@ def test_response_envelope_unchanged(isolated_registry):
     assert body["visualization"]["type"] in {"bar", "table"}
     assert body["plan"]["metric"] == "quantity"
     assert body["plan"]["aggregation"] == "sum"
+
+
+def test_duckdb_backed_response_envelope_unchanged(isolated_registry):
+    df = _make_dataframe()
+    metadata = get_metadata(df)
+    dataset = _register(isolated_registry, DuckDBStorage(df), precomputed_metadata=metadata)
+
+    response = _ask(dataset.dataset_id, QUESTION)
+
+    assert response.status_code == 200
+    body = response.json()
+
+    for key in (
+        "success",
+        "question",
+        "planner",
+        "data",
+        "insights",
+        "insight_status",
+        "insight_source",
+        "insight_error",
+        "visualization",
+        "plan",
+        "performance",
+    ):
+        assert key in body
+
+    assert body["data"]["columns"] == ["region", "sum_quantity"]
+    assert body["visualization"]["type"] in {"bar", "table"}
+    assert body["plan"]["metric"] == "quantity"
+    assert body["plan"]["aggregation"] == "sum"
+
+
+# =========================================================
+# GROUPED ROUTE FLOW - full /api/analyze pipeline, small N
+#
+# The exact DEFAULT_MAX_RESULT_ROWS cap itself is verified cheaply,
+# at the engine level with no insight/visualization involved, by
+# tests/test_duckdb_execution_engine.py::
+# test_duckdb_engine_caps_unbounded_group_by_at_default_max_result_rows.
+#
+# Routing a full DEFAULT_MAX_RESULT_ROWS (10,000) row grouped result
+# through the real /api/analyze route pays an unrelated ~50s cost
+# inside InsightEngine._add_date_coverage() (data_engine/insight_engine.py),
+# which does a full-column pd.to_datetime(..., format="mixed") scan over
+# every result row. That cost is a function of row count only, not of
+# whether the cap logic itself is correct - a much smaller grouped
+# result exercises the exact same route/insight/visualization code
+# paths for a fraction of the runtime.
+# =========================================================
+
+
+SMALL_GROUP_COUNT = 25
+
+
+def _make_many_groups_dataframe(group_count: int) -> pd.DataFrame:
+    # One row per distinct "region" group - the minimal shape needed to
+    # exercise a grouped aggregation with `group_count` output rows,
+    # mirroring tests/test_duckdb_execution_engine.py's fixture.
+    return pd.DataFrame(
+        {
+            "region": [f"region_{i}" for i in range(group_count)],
+            "quantity": [1] * group_count,
+        }
+    )
+
+
+def test_duckdb_backed_analyze_route_flow_with_small_n(isolated_registry, monkeypatch):
+    df = _make_many_groups_dataframe(SMALL_GROUP_COUNT)
+    metadata = get_metadata(df)
+    dataset = _register(isolated_registry, DuckDBStorage(df), precomputed_metadata=metadata)
+
+    plan = AnalysisPlan(
+        group_by=["region"],
+        metric="quantity",
+        aggregation="sum",
+        limit=None,
+    )
+
+    monkeypatch.setattr(
+        analysis_route.FastPlanner,
+        "create_plan",
+        lambda self, question, metadata: plan,
+    )
+
+    response = _ask(dataset.dataset_id, QUESTION)
+
+    assert response.status_code == 200
+    body = response.json()
+
+    for key in (
+        "success",
+        "question",
+        "planner",
+        "data",
+        "insights",
+        "insight_status",
+        "insight_source",
+        "insight_error",
+        "visualization",
+        "plan",
+        "performance",
+    ):
+        assert key in body
+
+    assert body["data"]["row_count"] == SMALL_GROUP_COUNT
+    assert "rows" in body["data"]
+    assert len(body["data"]["rows"]) == SMALL_GROUP_COUNT
+
+    assert body["insight_status"] in {"success", "unavailable"}
+    assert "insights" in body["insights"]
+
+    assert "type" in body["visualization"]
+    assert body["visualization"]["type"] in {"bar", "table"}

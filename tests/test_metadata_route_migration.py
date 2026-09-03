@@ -282,9 +282,10 @@ def test_preview_by_id_response_schema_unchanged(isolated_manager):
     assert len(body["rows"]) == 6
 
 
-def test_active_metadata_route_response_schema_unchanged(isolated_manager):
+@pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
+def test_active_metadata_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=PandasStorage(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
     registry.register(dataset)
 
     with manager._lock:
@@ -298,9 +299,10 @@ def test_active_metadata_route_response_schema_unchanged(isolated_manager):
     assert body["column_count"] == 3
 
 
-def test_active_preview_route_response_schema_unchanged(isolated_manager):
+@pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
+def test_active_preview_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=PandasStorage(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
     registry.register(dataset)
 
     with manager._lock:

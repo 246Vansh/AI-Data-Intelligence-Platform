@@ -132,6 +132,32 @@ def test_profile_by_id_route_uses_basic_statistics_for_dataset(isolated_manager,
 
 
 # =========================================================
+# CACHING SEMANTICS PRESERVED
+# =========================================================
+
+
+def test_profile_by_id_route_caches_after_first_call(isolated_manager, monkeypatch):
+    registry, _ = isolated_manager
+    dataset = _register(registry, PandasStorage(_make_dataframe()))
+
+    calls = []
+
+    def _spy_stats(dataset_arg):
+        calls.append(dataset_arg)
+        return basic_statistics_for_dataset(dataset_arg)
+
+    monkeypatch.setattr(dataset_route, "basic_statistics_for_dataset", _spy_stats)
+
+    first = client.get(f"/api/dataset/{dataset.dataset_id}/profile")
+    second = client.get(f"/api/dataset/{dataset.dataset_id}/profile")
+
+    assert first.status_code == second.status_code == 200
+    assert len(calls) == 1
+    assert first.json() == second.json()
+    assert "basic_statistics" in dataset.cache
+
+
+# =========================================================
 # DUCKDB-BACKED PROFILE: ZERO to_dataframe() CALLS
 # =========================================================
 
@@ -234,9 +260,10 @@ def test_duckdb_backed_profile_reports_null_memory_usage(isolated_manager):
     assert body["duplicate_rows"] == 0
 
 
-def test_active_profile_route_response_schema_unchanged(isolated_manager):
+@pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
+def test_active_profile_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=PandasStorage(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
     registry.register(dataset)
 
     with manager._lock:
