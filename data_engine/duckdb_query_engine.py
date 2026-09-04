@@ -186,7 +186,7 @@ def execute_plan_duckdb(
 
     if not group_by:
         query = f"SELECT {metric_expr} FROM ({working_sql})"
-        result = storage.connection.execute(query, params).fetchdf()
+        result = storage.execute_df(query, params)
         return result.reset_index(drop=True)
 
     # =========================================
@@ -216,5 +216,5 @@ def execute_plan_duckdb(
         f"{limit_clause}"
     ).strip()
 
-    result = storage.connection.execute(query, params).fetchdf()
+    result = storage.execute_df(query, params)
     return result.reset_index(drop=True)

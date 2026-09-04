@@ -39,9 +39,9 @@ def preview_dataset(
 
     if isinstance(storage, DuckDBStorage):
         table = _quote_identifier(storage.table_name)
-        preview_df = storage.connection.execute(
+        preview_df = storage.execute_df(
             f"SELECT * FROM {table} LIMIT {int(limit)}"
-        ).df()
+        )
         columns = list(preview_df.columns)
     else:
         preview_df = storage.to_dataframe().head(limit)

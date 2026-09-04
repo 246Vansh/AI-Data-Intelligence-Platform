@@ -57,17 +57,17 @@ class DuckDBProfilingEngine(ProfilingEngine):
         schema = storage.schema_info()
         column_names = storage.column_names()
 
-        row_count = storage.connection.execute(
+        row_count = storage.execute_one(
             f"SELECT COUNT(*) FROM {table}"
-        ).fetchone()[0]
+        )[0]
 
         # Legacy-only stat (data_engine.profiler.profile_dataset's
         # "duplicate_rows") - computed as a single native aggregate
         # (row_count minus the count of distinct full rows), never by
         # pulling raw rows out of DuckDB for a Python-side comparison.
-        distinct_row_count = storage.connection.execute(
+        distinct_row_count = storage.execute_one(
             f"SELECT COUNT(*) FROM (SELECT DISTINCT * FROM {table}) AS distinct_rows"
-        ).fetchone()[0]
+        )[0]
 
         duplicate_rows = int(row_count) - int(distinct_row_count)
 
@@ -92,7 +92,7 @@ class DuckDBProfilingEngine(ProfilingEngine):
             select_parts.append(f"MAX({quoted}) AS max_{index}")
 
         query = f"SELECT {', '.join(select_parts)} FROM {table}"
-        row = storage.connection.execute(query).fetchone()
+        row = storage.execute_one(query)
 
         columns: dict[str, Any] = {}
 

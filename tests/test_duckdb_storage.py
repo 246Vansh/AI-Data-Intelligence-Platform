@@ -14,6 +14,7 @@ Generic synthetic data only (no domain/Walmart references). Verifies:
 
 import inspect
 import re
+import threading
 
 import pandas as pd
 import pytest
@@ -544,3 +545,128 @@ def test_pandas_storage_path_still_works_unaffected():
 
     assert isinstance(result, pd.DataFrame)
     assert set(result["region"]) == {"north", "south", "east"}
+
+
+# =========================================================
+# STEP 17B: execute_df() / execute_one() LOCK-LIFETIME SAFETY
+#
+# The connection property only ever guarded the *handoff* of the raw
+# connection - the lock was released before a caller's .execute(...)
+# ran, so a concurrent close() could invalidate the connection
+# mid-query. execute_df()/execute_one() hold storage._lock across the
+# entire query lifetime instead. These tests exercise the lock
+# mechanism directly (via storage._lock) rather than trying to
+# intercept DuckDB's C-extension connection object, and use
+# threading.Event + bounded joins instead of sleeps for determinism.
+# =========================================================
+
+
+def test_execute_df_blocks_while_storage_lock_is_externally_held():
+    storage = DuckDBStorage(_make_dataframe())
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_lock():
+        with storage._lock:
+            lock_acquired.set()
+            release_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=2)
+
+    result_holder = {}
+
+    def _run_execute_df():
+        result_holder["df"] = storage.execute_df(
+            f'SELECT COUNT(*) AS n FROM "{storage.table_name}"'
+        )
+
+    waiter = threading.Thread(target=_run_execute_df)
+    waiter.start()
+
+    # The lock is still held externally, so execute_df() must still be
+    # blocked trying to acquire it - it must not have run its query.
+    waiter.join(timeout=0.3)
+    assert waiter.is_alive()
+    assert "df" not in result_holder
+
+    release_lock.set()
+    waiter.join(timeout=2)
+    assert not waiter.is_alive()
+    assert result_holder["df"]["n"].iloc[0] == 6
+
+    holder.join(timeout=2)
+
+
+def test_close_waits_for_in_flight_protected_operation_then_closes():
+    storage = DuckDBStorage(_make_dataframe())
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold_lock():
+        with storage._lock:
+            lock_acquired.set()
+            release_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=_hold_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=2)
+
+    closer = threading.Thread(target=storage.close)
+    closer.start()
+
+    # close() must block behind the same lock a live query would be
+    # holding for its entire execute-and-materialize lifetime.
+    closer.join(timeout=0.3)
+    assert closer.is_alive()
+
+    release_lock.set()
+    closer.join(timeout=2)
+    assert not closer.is_alive()
+    assert storage._closed is True
+
+    holder.join(timeout=2)
+
+
+def test_execute_df_and_execute_one_raise_controlled_error_after_close():
+    storage = DuckDBStorage(_make_dataframe())
+    table = storage.table_name
+    storage.close()
+
+    with pytest.raises(RuntimeError):
+        storage.execute_df(f'SELECT * FROM "{table}"')
+
+    with pytest.raises(RuntimeError):
+        storage.execute_one(f'SELECT COUNT(*) FROM "{table}"')
+
+
+def test_execute_df_different_instances_never_block_each_other():
+    storage_a = DuckDBStorage(_make_dataframe())
+    storage_b = DuckDBStorage(pd.DataFrame({"col": [1, 2, 3]}))
+
+    a_lock_acquired = threading.Event()
+    release_a_lock = threading.Event()
+
+    def _hold_a_lock():
+        with storage_a._lock:
+            a_lock_acquired.set()
+            release_a_lock.wait(timeout=2)
+
+    holder = threading.Thread(target=_hold_a_lock)
+    holder.start()
+    assert a_lock_acquired.wait(timeout=2)
+
+    try:
+        # storage_b has its own independent lock - execute_df() against
+        # it must succeed immediately even while storage_a's lock is
+        # held by another thread.
+        result_b = storage_b.execute_df(
+            f'SELECT COUNT(*) AS n FROM "{storage_b.table_name}"'
+        )
+        assert result_b["n"].iloc[0] == 3
+    finally:
+        release_a_lock.set()
+        holder.join(timeout=2)

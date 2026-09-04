@@ -27,13 +27,13 @@ class DuckDBStorage(DatasetStorage):
     Thread-safety: every instance also owns a private ``RLock``
     guarding its connection. Every method that touches the connection
     (``relation``, ``to_dataframe``, ``row_count``, ``column_count``,
-    ``column_names``, ``schema_info``, the ``connection`` property) and
-    ``close()`` itself all acquire it before doing anything. That
-    makes ``close()`` and any in-flight read mutually exclusive on
-    *this* instance: a read already holding the lock keeps a
-    concurrent ``close()`` waiting until it finishes, and once
-    ``close()`` has run, any later read finds ``_closed`` set and
-    raises before it ever touches the (by then invalid) connection,
+    ``column_names``, ``schema_info``, ``execute_df``, ``execute_one``,
+    the ``connection`` property) and ``close()`` itself all acquire it
+    before doing anything. That makes ``close()`` and any in-flight
+    read mutually exclusive on *this* instance: a read already holding
+    the lock keeps a concurrent ``close()`` waiting until it finishes,
+    and once ``close()`` has run, any later read finds ``_closed`` set
+    and raises before it ever touches the (by then invalid) connection,
     instead of segfaulting DuckDB or racing it. It is an ``RLock``
     (reentrant), not a plain ``Lock``, because these methods call each
     other from the same thread (e.g. ``to_dataframe()`` calls
@@ -42,6 +42,14 @@ class DuckDBStorage(DatasetStorage):
     strictly per-instance: it never coordinates across different
     DuckDBStorage instances, and nothing here is a global/shared lock,
     a connection pool, or an async primitive.
+
+    Step 17B: ``execute_df()``/``execute_one()`` hold the lock across
+    the query's full execute-and-materialize lifetime, not just a
+    connection handoff - see their docstrings and the ``connection``
+    property's docstring for why that distinction matters. Every live
+    production call site (analysis execution, preview, metadata,
+    profiling, quality) goes through these two methods; the raw
+    ``connection`` property remains only for direct/diagnostic use.
     """
 
     def __init__(self, dataframe: pd.DataFrame):
@@ -134,20 +142,61 @@ class DuckDBStorage(DatasetStorage):
         """
         The private DuckDB connection backing this dataset.
 
-        Exposed so an execution layer (e.g. a DuckDB-native query
-        engine) can run SQL directly against the engine instead of
-        materializing the dataset into pandas first.
+        Step 17B: this property only guards the *access* to the
+        connection object - the instance lock cannot stay held across
+        whatever a caller subsequently does with the returned
+        reference, since that execution happens outside of this
+        method's call frame. That gap made ``storage.connection
+        .execute(...)`` racy against a concurrent ``close()``. Every
+        live production call site has been migrated to
+        ``execute_df()``/``execute_one()`` below, which hold the lock
+        for the query's entire execution, not just the handoff.
 
-        Guarded like every other read boundary: accessing this after
-        close() raises rather than handing back a connection that has
-        already been closed. Note this only guards the *access* - the
-        instance-level lock cannot stay held across whatever the
-        caller subsequently does with the returned connection, since
-        that execution happens outside of this method's call frame.
+        This property is kept only for direct low-level/diagnostic use
+        (e.g. isolation tests that compare connection identity or run
+        ad-hoc DDL). New production call sites should use
+        ``execute_df()``/``execute_one()`` instead of this property.
         """
         with self._lock:
             self._raise_if_closed()
             return self._connection
+
+    def execute_df(self, query: str, params: list | None = None) -> pd.DataFrame:
+        """
+        Run a read-only SQL query against this dataset's connection and
+        materialize the result as a DataFrame.
+
+        Lock-safe replacement for the ``storage.connection.execute(...)
+        .fetchdf()`` pattern: the connection-closed check, the query's
+        execution, and its materialization into a DataFrame all happen
+        inside the same ``with self._lock:`` critical section that
+        ``close()`` also acquires. A concurrent ``close()`` therefore
+        either finishes first (this call then raises the same
+        controlled "already closed" error every other read boundary
+        raises) or waits for this call to finish (close() blocks on
+        the lock until this method returns) - it can never run
+        in between this method's connection access and its query
+        execution the way it could through the raw ``connection``
+        property.
+        """
+        with self._lock:
+            self._raise_if_closed()
+            if params is None:
+                return self._connection.execute(query).fetchdf()
+            return self._connection.execute(query, params).fetchdf()
+
+    def execute_one(self, query: str, params: list | None = None):
+        """
+        Like ``execute_df()``, but for a single-row/scalar result
+        (``COUNT(*)``, quantile aggregates, etc.) fetched via
+        ``fetchone()`` instead of materializing a DataFrame. Same
+        full-lock-coverage guarantee as ``execute_df()``.
+        """
+        with self._lock:
+            self._raise_if_closed()
+            if params is None:
+                return self._connection.execute(query).fetchone()
+            return self._connection.execute(query, params).fetchone()
 
     @property
     def table_name(self) -> str:

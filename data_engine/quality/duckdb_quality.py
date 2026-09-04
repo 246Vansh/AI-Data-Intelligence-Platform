@@ -100,7 +100,7 @@ class DuckDBQualityEngine(QualityEngine):
         column_names = storage.column_names()
 
         row_count = int(
-            storage.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            storage.execute_one(f"SELECT COUNT(*) FROM {table}")[0]
         )
 
         if row_count == 0:
@@ -124,9 +124,9 @@ class DuckDBQualityEngine(QualityEngine):
         # -----------------------------------------------------
 
         distinct_row_count = int(
-            storage.connection.execute(
+            storage.execute_one(
                 f"SELECT COUNT(*) FROM (SELECT DISTINCT * FROM {table}) AS distinct_rows"
-            ).fetchone()[0]
+            )[0]
         )
         duplicate_count = row_count - distinct_row_count
 
@@ -157,9 +157,9 @@ class DuckDBQualityEngine(QualityEngine):
             select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
             select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
 
-        counts_row = storage.connection.execute(
+        counts_row = storage.execute_one(
             f"SELECT {', '.join(select_parts)} FROM {table}"
-        ).fetchone()
+        )
 
         # -----------------------------------------------------
         # IQR outlier bounds - one aggregate query computing Q1/Q3
@@ -181,9 +181,9 @@ class DuckDBQualityEngine(QualityEngine):
                 quantile_parts.append(f"quantile_cont({quoted}, 0.25) AS q1_{index}")
                 quantile_parts.append(f"quantile_cont({quoted}, 0.75) AS q3_{index}")
 
-            quantile_row = storage.connection.execute(
+            quantile_row = storage.execute_one(
                 f"SELECT {', '.join(quantile_parts)} FROM {table}"
-            ).fetchone()
+            )
 
             bounds: dict[str, tuple[float, float]] = {}
 
@@ -210,9 +210,9 @@ class DuckDBQualityEngine(QualityEngine):
                         f"AS {_quote_identifier('outliers_' + column)}"
                     )
 
-                outlier_row = storage.connection.execute(
+                outlier_row = storage.execute_one(
                     f"SELECT {', '.join(outlier_parts)} FROM {table}"
-                ).fetchone()
+                )
 
                 outlier_counts = {
                     column: int(count)

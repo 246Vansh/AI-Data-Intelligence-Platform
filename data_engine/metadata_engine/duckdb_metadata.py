@@ -93,9 +93,9 @@ class DuckDBMetadataEngine(MetadataEngine):
         column_names = storage.column_names()
 
         if not column_names:
-            row_count = storage.connection.execute(
+            row_count = storage.execute_one(
                 f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
+            )[0]
 
             return {
                 "row_count": int(row_count),
@@ -116,16 +116,16 @@ class DuckDBMetadataEngine(MetadataEngine):
             select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
 
         counts_query = f"SELECT {', '.join(select_parts)} FROM {table}"
-        counts_row = storage.connection.execute(counts_query).fetchone()
+        counts_row = storage.execute_one(counts_query)
 
         row_count = int(counts_row[0])
         per_column_counts = counts_row[1:]
 
         # Bounded LIMIT 100 sample - the only rows ever pulled into
         # pandas, used purely for role detection and sample_values.
-        sample_df = storage.connection.execute(
+        sample_df = storage.execute_df(
             f"SELECT * FROM {table} LIMIT {METADATA_SAMPLE_LIMIT}"
-        ).df()
+        )
 
         columns: dict[str, Any] = {}
         time_columns: list[str] = []
