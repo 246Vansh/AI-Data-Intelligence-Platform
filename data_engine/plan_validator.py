@@ -5,6 +5,7 @@ from data_engine.analysis_plan import (
     AGGREGATION_ALIASES,
     CANONICAL_AGGREGATIONS as ALLOWED_AGGREGATIONS,
 )
+from data_engine.duckdb_query_engine import MAX_RESULT_ROWS
 
 
 # =========================================================
@@ -214,6 +215,9 @@ def validate_plan(
 
         if plan.limit <= 0:
             raise ValueError("Limit must be greater than zero.")
+
+        if plan.limit > MAX_RESULT_ROWS:
+            raise ValueError(f"Limit must not exceed {MAX_RESULT_ROWS} rows.")
 
     # =====================================================
     # Validate visualization

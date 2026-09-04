@@ -53,6 +53,19 @@ ALLOWED_TIME_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 # An explicit plan.limit is always honored as-is and never overridden.
 DEFAULT_MAX_RESULT_ROWS = 10_000
 
+# Hard ceiling on an *explicit* plan.limit (Step 18B). DEFAULT_MAX_
+# RESULT_ROWS above only guards the no-limit case; before this
+# constant existed, a caller-supplied plan.limit had no upper bound at
+# all and was honored verbatim all the way through fetchdf() /
+# ExecutionResult.rows / JSON serialization. This is the single
+# source of truth for that ceiling - enforced by
+# data_engine.plan_validator.validate_plan() (which imports this
+# constant) before a plan ever reaches execution, not re-checked here
+# or in query_engine.py. An explicit limit within this ceiling is
+# still honored as-is; one above it is rejected during validation, not
+# silently clamped.
+MAX_RESULT_ROWS = 100_000
+
 
 def _quote_identifier(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
