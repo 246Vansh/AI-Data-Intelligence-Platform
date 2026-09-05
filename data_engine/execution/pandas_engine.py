@@ -32,14 +32,16 @@ class PandasExecutionEngine(ExecutionEngine):
 
         result = execute_plan(dataframe, validated_plan)
 
-        # Single conversion point, at the same place a DataFrame was
-        # already being produced - no additional materialization, no
-        # extra query. Truncation is not tracked by execute_plan()/
+        # Step 21: the DataFrame execute_plan() already produced is
+        # handed to ExecutionResult as-is - no additional
+        # materialization, no extra query, and no eager conversion to
+        # rows (ExecutionResult.rows computes and caches that lazily,
+        # on first access). Truncation is not tracked by execute_plan()/
         # analyze() today (the head(effective_limit) call doesn't reveal
         # whether more rows existed), so it is never claimed as True here.
         return ExecutionResult(
             columns=result.columns.tolist(),
-            rows=result.to_dict(orient="records"),
             row_count=len(result),
             truncated=False,
+            _dataframe=result,
         )

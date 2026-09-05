@@ -1,16 +1,28 @@
-"""Step 13A: ExecutionResult - the engine-neutral boundary type returned
+"""Step 13A/21: ExecutionResult - the engine-neutral boundary type returned
 by ExecutionEngine.execute() implementations, replacing a raw pandas
 DataFrame.
 
+Step 21 makes the engine-produced DataFrame the canonical internal
+representation: ExecutionResult is constructed from that DataFrame (not
+a pre-built rows list). `.rows` becomes a lazily computed, cached
+property, and `.to_dataframe()` returns the exact DataFrame object the
+result was built from - never a rebuilt/copied one.
+
 Verifies:
-  - ExecutionResult exposes exactly the four documented fields.
-  - DuckDBExecutionEngine.execute() returns an ExecutionResult.
-  - PandasExecutionEngine.execute() returns an ExecutionResult.
+  - ExecutionResult can be constructed from a DataFrame.
+  - `.columns` / `.row_count` / `.truncated` behave exactly as before.
+  - `.rows` is lazy: constructing an ExecutionResult never converts the
+    DataFrame to records; the conversion happens once, on first `.rows`
+    access, and is cached for every later access.
+  - `.to_dataframe()` returns the canonical DataFrame object itself.
+  - DuckDBExecutionEngine.execute() and PandasExecutionEngine.execute()
+    still return an ExecutionResult with the same observable values.
   - Neither engine claims `truncated=True` without a provable signal
     (execute_plan_duckdb()/execute_plan() don't track it today).
 """
 
 import dataclasses
+from unittest import mock
 
 import pandas as pd
 import pytest
@@ -31,30 +43,141 @@ def _make_dataframe() -> pd.DataFrame:
     )
 
 
-def test_execution_result_has_exactly_the_documented_fields():
+def _make_grouped_dataframe() -> pd.DataFrame:
+    return pd.DataFrame({"region": ["north", "south"], "sum_quantity": [30, 70]})
+
+
+# =========================================================
+# CONSTRUCTION FROM A DATAFRAME
+# =========================================================
+
+
+def test_execution_result_can_be_constructed_from_a_dataframe():
+    df = _make_grouped_dataframe()
+
     result = ExecutionResult(
         columns=["region", "sum_quantity"],
-        rows=[{"region": "north", "sum_quantity": 30}],
-        row_count=1,
+        row_count=2,
         truncated=False,
+        _dataframe=df,
+    )
+
+    assert isinstance(result, ExecutionResult)
+
+
+def test_columns_matches_dataframe_columns():
+    df = _make_grouped_dataframe()
+
+    result = ExecutionResult(
+        columns=df.columns.tolist(),
+        row_count=len(df),
+        truncated=False,
+        _dataframe=df,
     )
 
     assert result.columns == ["region", "sum_quantity"]
-    assert result.rows == [{"region": "north", "sum_quantity": 30}]
-    assert result.row_count == 1
+
+
+def test_row_count_matches_dataframe_length():
+    df = _make_grouped_dataframe()
+
+    result = ExecutionResult(
+        columns=df.columns.tolist(),
+        row_count=len(df),
+        truncated=False,
+        _dataframe=df,
+    )
+
+    assert result.row_count == len(df) == 2
+
+
+def test_truncated_behavior_unchanged():
+    df = _make_grouped_dataframe()
+
+    result = ExecutionResult(
+        columns=df.columns.tolist(),
+        row_count=len(df),
+        truncated=False,
+        _dataframe=df,
+    )
+
     assert result.truncated is False
 
 
 def test_execution_result_is_frozen():
-    result = ExecutionResult(columns=[], rows=[], row_count=0, truncated=False)
+    df = _make_grouped_dataframe()
+
+    result = ExecutionResult(
+        columns=df.columns.tolist(),
+        row_count=len(df),
+        truncated=False,
+        _dataframe=df,
+    )
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.row_count = 5
 
 
 def test_execution_result_rejects_negative_row_count():
+    df = _make_grouped_dataframe()
+
     with pytest.raises(ValueError):
-        ExecutionResult(columns=[], rows=[], row_count=-1, truncated=False)
+        ExecutionResult(columns=[], row_count=-1, truncated=False, _dataframe=df)
+
+
+# =========================================================
+# LAZY, CACHED .rows
+# =========================================================
+
+
+def test_rows_is_lazy_and_cached():
+    df = _make_grouped_dataframe()
+    expected_rows = df.to_dict(orient="records")
+
+    call_count = {"n": 0}
+    original_to_dict = pd.DataFrame.to_dict
+
+    def _spy_to_dict(self, *args, **kwargs):
+        call_count["n"] += 1
+        return original_to_dict(self, *args, **kwargs)
+
+    with mock.patch.object(pd.DataFrame, "to_dict", _spy_to_dict):
+        result = ExecutionResult(
+            columns=df.columns.tolist(),
+            row_count=len(df),
+            truncated=False,
+            _dataframe=df,
+        )
+
+        # Construction itself must never have converted the DataFrame.
+        assert call_count["n"] == 0
+
+        first_access = result.rows
+        assert call_count["n"] == 1
+        assert first_access == expected_rows
+
+        second_access = result.rows
+        # Cached - no second conversion, same list object returned.
+        assert call_count["n"] == 1
+        assert second_access is first_access
+
+
+def test_to_dataframe_returns_the_canonical_dataframe_object():
+    df = _make_grouped_dataframe()
+
+    result = ExecutionResult(
+        columns=df.columns.tolist(),
+        row_count=len(df),
+        truncated=False,
+        _dataframe=df,
+    )
+
+    assert result.to_dataframe() is df
+
+
+# =========================================================
+# ENGINE PARITY - unchanged observable behavior
+# =========================================================
 
 
 def test_duckdb_engine_returns_execution_result():
@@ -69,6 +192,7 @@ def test_duckdb_engine_returns_execution_result():
     assert result.columns == ["region", "sum_quantity"]
     assert result.row_count == 2
     assert result.truncated is False
+    assert result.rows == result.to_dataframe().to_dict(orient="records")
 
 
 def test_pandas_engine_returns_execution_result():
@@ -83,3 +207,4 @@ def test_pandas_engine_returns_execution_result():
     assert result.columns == ["region", "sum_quantity"]
     assert result.row_count == 2
     assert result.truncated is False
+    assert result.rows == result.to_dataframe().to_dict(orient="records")

@@ -1,6 +1,5 @@
 import re
 
-import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -299,10 +298,11 @@ def analyze_dataset(
             # engine-neutral ExecutionResult is turned back into a
             # pandas DataFrame, so the existing insight/visualization
             # logic below (which expects a DataFrame) needs no changes.
-            result = pd.DataFrame(
-                execution_result.rows,
-                columns=execution_result.columns,
-            )
+            #
+            # Step 21: to_dataframe() returns the exact DataFrame the
+            # execution engine already produced - no DataFrame is
+            # rebuilt from execution_result.rows here anymore.
+            result = execution_result.to_dataframe()
 
             safe_rows = sanitize_records(execution_result.rows)
 
