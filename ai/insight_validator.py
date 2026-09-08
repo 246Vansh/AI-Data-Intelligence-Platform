@@ -44,6 +44,16 @@ def validate_insights(
     # Validate individual insights
     # -----------------------------------------
 
+    # Request-local cache of _ResultRowIndex instances, keyed by
+    # id(result_rows). Every insight in this response shares the same
+    # context, so this lets multiple MultiRowEvidence checks in the
+    # same call reuse one index instead of rebuilding it per insight.
+    # Built lazily (only if/when multi-row evidence is actually
+    # encountered) and discarded when validate_insights() returns -
+    # never persisted, cached across requests, or attached to a
+    # Dataset/global object.
+    _row_index_cache: dict[int, "_ResultRowIndex"] = {}
+
     for index, insight in enumerate(response.insights):
         # -------------------------------------
         # Validate type
@@ -84,6 +94,7 @@ def validate_insights(
                 insight=insight,
                 index=index,
                 context=context,
+                index_cache=_row_index_cache,
             )
 
         # -------------------------------------
@@ -107,6 +118,7 @@ def _validate_evidence(
     insight,
     index: int,
     context: dict,
+    index_cache: dict | None = None,
 ) -> None:
 
     evidence = insight.evidence
@@ -139,6 +151,7 @@ def _validate_evidence(
             evidence=evidence,
             index=index,
             context=context,
+            index_cache=index_cache,
         )
 
         return
@@ -237,6 +250,7 @@ def _validate_multi_row_evidence(
     evidence: MultiRowEvidence,
     index: int,
     context: dict,
+    index_cache: dict | None = None,
 ) -> None:
 
     rows = evidence.rows
@@ -264,25 +278,44 @@ def _validate_multi_row_evidence(
         )
 
     # -----------------------------------------
+    # Build (or reuse) a candidate index over result_rows once, instead
+    # of rescanning all of result_rows for every evidence row below.
+    # See _ResultRowIndex for the exact safety argument - the final
+    # match decision always still goes through the unmodified
+    # _rows_match(), this only narrows which result rows are even
+    # considered.
+    # -----------------------------------------
+
+    row_index = None
+
+    if index_cache is not None:
+        row_index = index_cache.get(id(result_rows))
+
+        if row_index is None:
+            row_index = _ResultRowIndex(result_rows)
+            index_cache[id(result_rows)] = row_index
+
+    # -----------------------------------------
     # Every evidence row must exist in result
     # -----------------------------------------
 
-    for row_index, evidence_row in enumerate(rows):
+    for row_position, evidence_row in enumerate(rows):
         if not isinstance(
             evidence_row,
             dict,
         ):
             raise ValueError(
-                f"Multi-row evidence contains an invalid row at index {row_index}."
+                f"Multi-row evidence contains an invalid row at index {row_position}."
             )
 
         if not _row_exists(
             evidence_row,
             result_rows,
+            index=row_index,
         ):
             raise ValueError(
                 f"Evidence row at index "
-                f"{row_index} does not exist "
+                f"{row_position} does not exist "
                 f"in the computed analysis result."
             )
 
@@ -911,12 +944,155 @@ def _rows_match(
     return True
 
 
+class _ResultRowIndex:
+    """
+    Request-local candidate index over ``result_rows``, used to narrow
+    which result rows ``_row_exists`` even has to check with the full
+    ``_rows_match`` comparison, instead of rescanning every result row
+    for every evidence row (the O(evidence x result) behavior this
+    class exists to avoid).
+
+    ``_rows_match`` remains the sole authority on whether two rows
+    match. This index never makes a match/no-match decision itself -
+    it only ever narrows the candidate list that ``_rows_match`` is
+    then run against, and it is built so that narrowing can never
+    exclude a row ``_rows_match`` would have accepted:
+
+    1. Rows are first partitioned by their exact column set
+       (``frozenset(row.keys())``), mirroring ``_rows_match``'s own
+       first check (``set(actual.keys()) != set(expected.keys())``) -
+       two rows with different column sets can never match, so this
+       partition alone loses nothing.
+
+    2. Within a column-set bucket, a column is only used to narrow
+       further ("safe column") if EVERY result row in that bucket
+       holds a non-numeric (not int/float/bool) value for it. Because
+       ``_rows_match`` only ever applies tolerant (``isclose``)
+       comparison when *both* the evidence-side and result-side values
+       for a column are numeric, a column whose result-side value is
+       never numeric always forces the exact ``str(x) == str(y)``
+       branch instead, regardless of what the evidence row's value for
+       that column is. That means grouping rows by ``str(value)`` for
+       such a column reproduces `_rows_match`'s own equality decision
+       for that column exactly - it is not an approximation.
+
+       A column is never treated as safe merely because it happens to
+       be non-numeric on the evidence side, or on only some result
+       rows - only when it is guaranteed non-numeric on every result
+       row sharing that bucket, since the narrowing must hold for
+       every evidence row that could ever be looked up against it.
+
+    3. Numeric columns (where tolerant, non-exact comparison applies)
+       are never used to narrow candidates - two numerically "close"
+       but not identical values must remain able to match, and hashing
+       or rounding them could silently exclude a valid match. If a
+       bucket has no safe columns at all (e.g. every column is
+       numeric), no narrowing happens and every row in that bucket is
+       returned as a candidate - degrading to the same full scan
+       `_row_exists` always did for that bucket, never less correct.
+
+    4. Rows are stored by reference, not copied - the index adds one
+       additional set of Python container objects (buckets, per-bucket
+       group dicts) sized O(number of result rows), not additional
+       copies of the row dictionaries themselves.
+
+    Built once per validation call (see ``validate_insights``'s
+    ``index_cache``) and discarded when that call returns - never
+    persisted, cached across requests, or attached to a Dataset.
+    """
+
+    def __init__(self, result_rows: list[dict]) -> None:
+
+        self._buckets: dict[frozenset, dict] = {}
+
+        for result_row in result_rows:
+            key_set = frozenset(result_row.keys())
+
+            bucket = self._buckets.get(key_set)
+
+            if bucket is None:
+                bucket = {"rows": []}
+                self._buckets[key_set] = bucket
+
+            bucket["rows"].append(result_row)
+
+        for bucket in self._buckets.values():
+            self._finalize_bucket(bucket)
+
+    @staticmethod
+    def _finalize_bucket(bucket: dict) -> None:
+
+        rows = bucket["rows"]
+
+        unsafe_columns: set = set()
+
+        for result_row in rows:
+            for column, value in result_row.items():
+                if column in unsafe_columns:
+                    continue
+
+                if isinstance(value, (int, float)):
+                    unsafe_columns.add(column)
+
+        # Sorted so the same set of safe columns always produces the
+        # same group-key ordering, independent of dict iteration order.
+        safe_columns = tuple(
+            sorted(set(rows[0].keys()) - unsafe_columns)
+        )
+
+        groups: dict[tuple, list[dict]] = {}
+
+        for result_row in rows:
+            group_key = tuple(
+                str(result_row[column]) for column in safe_columns
+            )
+            groups.setdefault(group_key, []).append(result_row)
+
+        bucket["safe_columns"] = safe_columns
+        bucket["groups"] = groups
+
+    def candidates_for(self, target_row: dict) -> list[dict]:
+        """
+        Return every result row that could possibly match
+        ``target_row`` under ``_rows_match`` - never fewer.
+        """
+
+        key_set = frozenset(target_row.keys())
+
+        bucket = self._buckets.get(key_set)
+
+        if bucket is None:
+            return []
+
+        safe_columns = bucket["safe_columns"]
+
+        if not safe_columns:
+            # No column in this bucket is guaranteed to always take
+            # _rows_match's exact-comparison branch - fall back to
+            # every row sharing this column set, exactly as the
+            # original unindexed scan would have considered.
+            return bucket["rows"]
+
+        group_key = tuple(
+            str(target_row[column]) for column in safe_columns
+        )
+
+        return bucket["groups"].get(group_key, [])
+
+
 def _row_exists(
     target_row: dict,
     result_rows: list[dict],
+    index: "_ResultRowIndex | None" = None,
 ) -> bool:
 
-    for result_row in result_rows:
+    candidates = (
+        index.candidates_for(target_row)
+        if index is not None
+        else result_rows
+    )
+
+    for result_row in candidates:
         if _rows_match(
             target_row,
             result_row,

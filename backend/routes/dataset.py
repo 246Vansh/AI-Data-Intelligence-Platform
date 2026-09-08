@@ -1,5 +1,5 @@
-import io
 import os
+import tempfile
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -75,12 +75,39 @@ def resolve_dataset(dataset_id: str) -> Dataset:
 # =========================================================
 
 
-MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB limit
+# Step 24: the production target is 100M+ row datasets. At a rough
+# ~100 bytes/row for a typical numeric/string CSV, that's on the order
+# of 10 GB - so the ceiling below is sized for that, not for the old
+# 100 MB smoke-test limit. It exists purely to reject a genuinely
+# unbounded/runaway request body, not to constrain realistic uploads.
+#
+# Overridable via the MAX_UPLOAD_BYTES environment variable (bytes),
+# since this project has no other configuration mechanism yet - kept
+# to a plain env var rather than introducing one.
+_DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
 
 
-# Read in fixed-size chunks so an oversized upload is rejected as
-# soon as it crosses the limit, instead of being buffered into
-# memory in full first.
+def _read_max_upload_bytes() -> int:
+    raw = os.environ.get("MAX_UPLOAD_BYTES")
+
+    if raw is None:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+
+    return value if value > 0 else _DEFAULT_MAX_UPLOAD_BYTES
+
+
+MAX_UPLOAD_BYTES = _read_max_upload_bytes()
+
+
+# Read/copy in fixed-size chunks so memory stays bounded regardless of
+# upload size, and so an oversized upload is rejected as soon as it
+# crosses the limit instead of being buffered into memory in full
+# first.
 UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MB
 
 
@@ -115,15 +142,44 @@ def upload_dataset(file: UploadFile = File(...)):
             detail="Only CSV files are currently supported.",
         )
 
+    # Step 24: the HTTP body is never accumulated into one in-memory
+    # bytes object. It is copied, in fixed-size chunks, straight to a
+    # temporary file on disk - the only thing that scales to a 100M+
+    # row upload - and that temporary file (not a bytes buffer) is
+    # what gets handed to the existing bounded-memory ingestion
+    # pipeline below. The temp file is always removed in the `finally`
+    # block, on every exit path (success, ingestion failure,
+    # registration failure, oversized upload, or any other exception).
+    tmp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        prefix="dataset_upload_",
+        suffix=".csv",
+    )
+    tmp_path = tmp_file.name
+
     try:
-        chunks = []
         total_bytes = 0
+        first_chunk = True
 
         while True:
             chunk = file.file.read(UPLOAD_CHUNK_BYTES)
 
             if not chunk:
                 break
+
+            # A CSV is text. Null bytes are the cheapest signal that
+            # this is actually a binary file wearing a ".csv"
+            # extension (the CSV parser would otherwise fail deep
+            # inside its C implementation with a much more confusing
+            # error). Only the first chunk is checked, matching the
+            # original whole-buffer check's effective behavior.
+            if first_chunk:
+                first_chunk = False
+                if b"\x00" in chunk:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The uploaded file does not look like a text CSV file.",
+                    )
 
             total_bytes += len(chunk)
 
@@ -133,24 +189,14 @@ def upload_dataset(file: UploadFile = File(...)):
                     detail=f"Uploaded file exceeds maximum allowed size of {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
                 )
 
-            chunks.append(chunk)
+            tmp_file.write(chunk)
 
-        contents = b"".join(chunks)
+        tmp_file.close()
 
-        if not contents:
+        if total_bytes == 0:
             raise HTTPException(
                 status_code=400,
                 detail="The uploaded CSV file is empty.",
-            )
-
-        # A CSV is text. Null bytes are the cheapest signal that
-        # this is actually a binary file wearing a ".csv" extension
-        # (pandas would otherwise fail deep inside the C parser with
-        # a much more confusing error).
-        if b"\x00" in contents[:UPLOAD_CHUNK_BYTES]:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded file does not look like a text CSV file.",
             )
 
         # Stream straight to Parquet through the bounded-memory
@@ -172,11 +218,12 @@ def upload_dataset(file: UploadFile = File(...)):
         # dataset_id yet - that's unchanged in this step.
         dataset_id = str(uuid.uuid4())
 
-        ingestion_result = ingest_to_parquet(
-            source_stream=io.BytesIO(contents),
-            dataset_id=dataset_id,
-            storage_root=PARQUET_STORAGE_ROOT,
-        )
+        with open(tmp_path, "rb") as source_stream:
+            ingestion_result = ingest_to_parquet(
+                source_stream=source_stream,
+                dataset_id=dataset_id,
+                storage_root=PARQUET_STORAGE_ROOT,
+            )
 
         dataset = dataset_manager.register_ingested_dataset(
             ingestion_result,
@@ -199,6 +246,22 @@ def upload_dataset(file: UploadFile = File(...)):
             status_code=400,
             detail=f"Unable to load dataset: {str(exc)}",
         )
+
+    finally:
+        # tmp_file may already be closed (the normal path above closes
+        # it before ingestion) - closing an already-closed file object
+        # is a no-op, so this also covers every early-exit/exception
+        # path where it's still open.
+        try:
+            tmp_file.close()
+        except Exception:
+            pass
+
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 # =========================================================

@@ -8,7 +8,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from backend.routes.dataset import PARQUET_STORAGE_ROOT, router as dataset_router
+from backend.routes.dataset import (
+    MAX_UPLOAD_BYTES,
+    PARQUET_STORAGE_ROOT,
+    router as dataset_router,
+)
 from backend.routes.analysis import router as analysis_router
 from data_engine.dataset import Dataset
 from data_engine.dataset_manifest import find_manifest_paths, read_manifest
@@ -97,10 +101,12 @@ app = FastAPI(
 )
 
 
-# Keep in sync with MAX_UPLOAD_BYTES in backend/routes/dataset.py.
-# A little headroom is added for multipart boundary/header overhead
-# around the actual file bytes.
-MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024 + 1024 * 1024
+# Derived from MAX_UPLOAD_BYTES (backend/routes/dataset.py) - the
+# single source of truth for the upload-size policy - so this
+# middleware ceiling and the route's own streaming enforcement can
+# never silently disagree. A little headroom is added on top for
+# multipart boundary/header overhead around the actual file bytes.
+MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024
 
 
 class MaxBodySizeMiddleware(BaseHTTPMiddleware):
