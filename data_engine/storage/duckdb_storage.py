@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import threading
 import uuid
 
@@ -7,6 +10,54 @@ import duckdb
 import pandas as pd
 
 from data_engine.storage.base import DatasetStorage
+
+# Step 30: every DuckDBStorage connection gets an explicit memory_limit
+# and a private, per-instance temp_directory, so a heavy full-table
+# aggregate (e.g. the duplicate-row `SELECT DISTINCT *` check in
+# data_engine.profiling.duckdb_profiling /
+# data_engine.quality.duckdb_quality) spills to disk under memory
+# pressure instead of running against DuckDB's unconfigured default
+# with no verified spill path (see
+# step29a_duplicate_detection_feasibility.txt, which proved spilling
+# works once these two settings are present - the duplicate-row SQL
+# itself is unchanged).
+#
+# Overridable via the DUCKDB_MEMORY_LIMIT / DUCKDB_TEMP_ROOT
+# environment variables, matching the plain-env-var pattern already
+# used for MAX_UPLOAD_BYTES (backend/routes/dataset.py) - this project
+# has no other configuration mechanism yet.
+_DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
+
+
+def _read_duckdb_memory_limit() -> str:
+    return os.environ.get("DUCKDB_MEMORY_LIMIT") or _DEFAULT_DUCKDB_MEMORY_LIMIT
+
+
+def _read_duckdb_temp_root() -> str:
+    return os.environ.get("DUCKDB_TEMP_ROOT") or tempfile.gettempdir()
+
+
+def _configure_connection_and_temp_dir(
+    connection: duckdb.DuckDBPyConnection, table_name: str
+) -> str:
+    """
+    Apply the configured memory_limit and a private, per-instance
+    temp_directory to a freshly opened connection, before any table or
+    view is created on it. The directory is namespaced with the same
+    unique ``table_name`` every instance already uses, so it can never
+    collide with another instance's spill files. Returns the created
+    directory's path so the caller can remove it again in close().
+    """
+    memory_limit = str(_read_duckdb_memory_limit()).replace("'", "''")
+    temp_dir = os.path.join(_read_duckdb_temp_root(), f"duckdb_spill_{table_name}")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    escaped_temp_dir = temp_dir.replace("'", "''")
+
+    connection.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    connection.execute(f"PRAGMA temp_directory='{escaped_temp_dir}'")
+
+    return temp_dir
 
 
 class DuckDBStorage(DatasetStorage):
@@ -50,6 +101,12 @@ class DuckDBStorage(DatasetStorage):
     production call site (analysis execution, preview, metadata,
     profiling, quality) goes through these two methods; the raw
     ``connection`` property remains only for direct/diagnostic use.
+
+    Step 30: every connection also gets an explicit ``memory_limit``
+    and its own private ``temp_directory`` (see
+    ``_configure_connection_and_temp_dir`` above), applied identically
+    by both constructors before any table/view is created. The temp
+    directory is removed again in ``close()``.
     """
 
     def __init__(self, dataframe: pd.DataFrame):
@@ -74,6 +131,12 @@ class DuckDBStorage(DatasetStorage):
         # Unique table name, namespaced per instance as a second,
         # independent layer of isolation.
         self._table_name = f"dataset_{uuid.uuid4().hex}"
+
+        # Step 30: explicit memory_limit + private spill directory,
+        # applied before any table exists on this connection.
+        self._temp_dir = _configure_connection_and_temp_dir(
+            self._connection, self._table_name
+        )
 
         self._connection.register("_source_df", dataframe)
         self._connection.execute(
@@ -116,6 +179,13 @@ class DuckDBStorage(DatasetStorage):
         instance._connection = duckdb.connect(database=":memory:")
         instance._table_name = f"dataset_{uuid.uuid4().hex}"
         instance._parquet_path = parquet_path
+
+        # Step 30: explicit memory_limit + private spill directory,
+        # applied before the view exists on this connection - same
+        # helper, same guarantees as the DataFrame-backed constructor.
+        instance._temp_dir = _configure_connection_and_temp_dir(
+            instance._connection, instance._table_name
+        )
 
         # DuckDB DDL (CREATE VIEW) cannot be a prepared statement, so
         # the path can't be passed as a bound parameter here the way
@@ -259,6 +329,14 @@ class DuckDBStorage(DatasetStorage):
         row_count/schema_info/connection) finishes first; once this
         returns, every subsequent read on this instance raises instead
         of touching the closed connection.
+
+        Step 30: DuckDB itself deletes its own spill files from
+        temp_directory when the connection closes, but leaves the
+        directory itself behind - so this also removes the private
+        per-instance temp directory created at construction.
+        ``ignore_errors=True`` keeps this a safe, best-effort cleanup
+        (e.g. if the directory was already removed by something else)
+        rather than turning close() into a new failure point.
         """
         with self._lock:
             if self._closed:
@@ -266,3 +344,5 @@ class DuckDBStorage(DatasetStorage):
 
             self._connection.close()
             self._closed = True
+
+            shutil.rmtree(self._temp_dir, ignore_errors=True)

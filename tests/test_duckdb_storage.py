@@ -13,9 +13,11 @@ Generic synthetic data only (no domain/Walmart references). Verifies:
 """
 
 import inspect
+import os
 import re
 import threading
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -670,3 +672,153 @@ def test_execute_df_different_instances_never_block_each_other():
     finally:
         release_a_lock.set()
         holder.join(timeout=2)
+
+
+# =========================================================
+# STEP 30: DUCKDB MEMORY GOVERNANCE (memory_limit + per-instance
+# temp_directory)
+#
+# Step 29A proved the existing exact `SELECT DISTINCT *` duplicate-row
+# query already spills to disk correctly once a DuckDB connection has
+# an explicit memory_limit and temp_directory - it was simply never
+# configured. These tests pin: the configured defaults land on every
+# connection (both constructors), an env-var override is honored, each
+# instance gets its own private spill directory, and that directory is
+# created on construction and removed again on close() - without
+# touching the duplicate-row SQL or any other behavior.
+# =========================================================
+
+
+def _expected_memory_limit_setting(value: str) -> str:
+    """
+    DuckDB normalizes whatever unit a memory_limit string is given in
+    (e.g. "4GB" -> "3.7 GiB") - so tests ask DuckDB itself what a given
+    value normalizes to, instead of hardcoding that conversion.
+    """
+    probe = duckdb.connect(":memory:")
+    try:
+        probe.execute(f"PRAGMA memory_limit='{value}'")
+        return probe.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+    finally:
+        probe.close()
+
+
+def test_init_constructor_applies_default_memory_limit_and_temp_directory():
+    storage = DuckDBStorage(_make_dataframe())
+    try:
+        current_limit = storage.connection.execute(
+            "SELECT current_setting('memory_limit')"
+        ).fetchone()[0]
+        current_temp_dir = storage.connection.execute(
+            "SELECT current_setting('temp_directory')"
+        ).fetchone()[0]
+
+        assert current_limit == _expected_memory_limit_setting(
+            duckdb_storage_module._DEFAULT_DUCKDB_MEMORY_LIMIT
+        )
+        assert current_temp_dir == storage._temp_dir
+        assert os.path.isdir(storage._temp_dir)
+    finally:
+        storage.close()
+
+
+def test_from_parquet_constructor_applies_default_memory_limit_and_temp_directory(
+    tmp_path,
+):
+    df = _make_dataframe()
+    parquet_path = tmp_path / "memory_governance.parquet"
+    df.to_parquet(parquet_path)
+
+    storage = DuckDBStorage.from_parquet(str(parquet_path))
+    try:
+        current_limit = storage.connection.execute(
+            "SELECT current_setting('memory_limit')"
+        ).fetchone()[0]
+        current_temp_dir = storage.connection.execute(
+            "SELECT current_setting('temp_directory')"
+        ).fetchone()[0]
+
+        assert current_limit == _expected_memory_limit_setting(
+            duckdb_storage_module._DEFAULT_DUCKDB_MEMORY_LIMIT
+        )
+        assert current_temp_dir == storage._temp_dir
+        assert os.path.isdir(storage._temp_dir)
+    finally:
+        storage.close()
+
+
+def test_memory_limit_is_overridable_via_environment_variable(monkeypatch):
+    monkeypatch.setenv("DUCKDB_MEMORY_LIMIT", "123MB")
+
+    storage = DuckDBStorage(_make_dataframe())
+    try:
+        current_limit = storage.connection.execute(
+            "SELECT current_setting('memory_limit')"
+        ).fetchone()[0]
+        assert current_limit == _expected_memory_limit_setting("123MB")
+        assert current_limit != _expected_memory_limit_setting(
+            duckdb_storage_module._DEFAULT_DUCKDB_MEMORY_LIMIT
+        )
+    finally:
+        storage.close()
+
+
+def test_temp_root_is_overridable_via_environment_variable(monkeypatch, tmp_path):
+    custom_root = tmp_path / "custom_duckdb_temp_root"
+    monkeypatch.setenv("DUCKDB_TEMP_ROOT", str(custom_root))
+
+    storage = DuckDBStorage(_make_dataframe())
+    try:
+        assert str(custom_root) in storage._temp_dir
+        assert os.path.isdir(storage._temp_dir)
+    finally:
+        storage.close()
+
+
+def test_each_instance_gets_its_own_private_temp_directory():
+    storage_a = DuckDBStorage(_make_dataframe())
+    storage_b = DuckDBStorage(_make_dataframe())
+    try:
+        assert storage_a._temp_dir != storage_b._temp_dir
+        assert os.path.isdir(storage_a._temp_dir)
+        assert os.path.isdir(storage_b._temp_dir)
+    finally:
+        storage_a.close()
+        storage_b.close()
+
+
+def test_close_removes_the_instance_temp_directory():
+    storage = DuckDBStorage(_make_dataframe())
+    temp_dir = storage._temp_dir
+    assert os.path.isdir(temp_dir)
+
+    storage.close()
+
+    assert not os.path.exists(temp_dir)
+
+
+def test_close_is_idempotent_and_safe_even_if_temp_directory_already_gone():
+    storage = DuckDBStorage(_make_dataframe())
+    temp_dir = storage._temp_dir
+
+    # Simulate the directory having already been removed by something
+    # else before close() runs - cleanup must not raise.
+    os.rmdir(temp_dir)
+
+    storage.close()
+    storage.close()  # calling twice must remain a no-op, not an error
+
+    assert not os.path.exists(temp_dir)
+
+
+def test_duplicate_row_sql_is_unchanged_by_memory_governance():
+    """
+    Step 30 must not touch the duplicate-row detection query itself -
+    only connection configuration. Pins the exact SQL shape Step 29A
+    proved spills correctly under memory_limit/temp_directory.
+    """
+    from data_engine.profiling import duckdb_profiling
+
+    source = inspect.getsource(duckdb_profiling)
+    assert "SELECT DISTINCT * FROM" in source
+    assert "approx_count_distinct" not in source
