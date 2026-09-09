@@ -65,9 +65,18 @@ class DuckDBProfilingEngine(ProfilingEngine):
         # "duplicate_rows") - computed as a single native aggregate
         # (row_count minus the count of distinct full rows), never by
         # pulling raw rows out of DuckDB for a Python-side comparison.
-        distinct_row_count = storage.execute_one(
-            f"SELECT COUNT(*) FROM (SELECT DISTINCT * FROM {table}) AS distinct_rows"
-        )[0]
+        #
+        # Step 33: this exact scan is also needed by
+        # DuckDBQualityEngine.check_quality() for the same dataset, so
+        # it's routed through storage.distinct_row_count(), which
+        # caches the scalar on the dataset's own DuckDBStorage instance
+        # - whichever of profiling/quality runs first for this dataset
+        # pays for the scan, the other reuses the cached value.
+        distinct_row_count = storage.distinct_row_count(
+            lambda: storage.execute_one(
+                f"SELECT COUNT(*) FROM (SELECT DISTINCT * FROM {table}) AS distinct_rows"
+            )[0]
+        )
 
         duplicate_rows = int(row_count) - int(distinct_row_count)
 

@@ -107,6 +107,19 @@ class DuckDBStorage(DatasetStorage):
     ``_configure_connection_and_temp_dir`` above), applied identically
     by both constructors before any table/view is created. The temp
     directory is removed again in ``close()``.
+
+    Step 33: ``distinct_row_count()`` memoizes the one scalar both
+    ``DuckDBProfilingEngine.basic_statistics()`` and
+    ``DuckDBQualityEngine.check_quality()`` derive their duplicate-row
+    count from - the exact `SELECT COUNT(*) FROM (SELECT DISTINCT *
+    FROM table)` scan is expensive and otherwise ran twice per dataset
+    (see step32_post_governance_scalability_audit.txt). Since this
+    instance already exists exactly once per dataset and already owns
+    a lock serializing every query against its connection, that lock
+    is reused here too: whichever caller reaches this method first on
+    a fresh instance runs its own copy of the scan and caches the
+    result; a concurrent second caller blocks on the same lock and
+    then reuses the cached value instead of running the scan again.
     """
 
     def __init__(self, dataframe: pd.DataFrame):
@@ -118,6 +131,10 @@ class DuckDBStorage(DatasetStorage):
 
         self._lock = threading.RLock()
         self._closed = False
+
+        # Step 33: memoized exact distinct-row-count, shared between
+        # profiling and quality - see distinct_row_count() below.
+        self._distinct_row_count: int | None = None
 
         # No on-disk artifact - this constructor builds a physical,
         # in-memory-only table from an already-materialized DataFrame.
@@ -175,6 +192,10 @@ class DuckDBStorage(DatasetStorage):
 
         instance._lock = threading.RLock()
         instance._closed = False
+
+        # Step 33: memoized exact distinct-row-count, shared between
+        # profiling and quality - see distinct_row_count() below.
+        instance._distinct_row_count = None
 
         instance._connection = duckdb.connect(database=":memory:")
         instance._table_name = f"dataset_{uuid.uuid4().hex}"
@@ -267,6 +288,30 @@ class DuckDBStorage(DatasetStorage):
             if params is None:
                 return self._connection.execute(query).fetchone()
             return self._connection.execute(query, params).fetchone()
+
+    def distinct_row_count(self, compute) -> int:
+        """
+        Return this dataset's cached exact distinct-row count, calling
+        ``compute()`` (a zero-arg callable) to obtain it only on the
+        first call for this instance.
+
+        ``compute`` is supplied by the caller rather than hardcoded
+        here, so the actual `SELECT DISTINCT *` query text/logic stays
+        exactly where it already lives (``data_engine.profiling.
+        duckdb_profiling`` / ``data_engine.quality.duckdb_quality``),
+        unchanged - this method only adds the memoization and the
+        concurrency guard around it. See the class docstring's Step 33
+        note for why the existing per-instance lock is what makes a
+        concurrent second caller reuse the cached value instead of
+        running its own copy of the scan.
+        """
+        with self._lock:
+            self._raise_if_closed()
+
+            if self._distinct_row_count is None:
+                self._distinct_row_count = int(compute())
+
+            return self._distinct_row_count
 
     @property
     def table_name(self) -> str:
