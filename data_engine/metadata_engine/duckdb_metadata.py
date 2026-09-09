@@ -105,21 +105,20 @@ class DuckDBMetadataEngine(MetadataEngine):
                 "time_columns": [],
             }
 
-        # Single consolidated aggregate query for counts: row_count
-        # plus, per column, a non-null count (-> missing_count) and a
-        # distinct count (-> unique_values).
-        select_parts = ["COUNT(*) AS row_count"]
+        # Row count: cheap on its own (DuckDB answers an unconditional
+        # COUNT(*) from Parquet/table metadata, not a column scan).
+        #
+        # Per-column non-null count (-> missing_count) and distinct
+        # count (-> unique_values): sourced from DuckDBStorage's single
+        # shared aggregate scan - memoized on the dataset's own storage
+        # instance and reused as-is by DuckDBProfilingEngine and
+        # DuckDBQualityEngine too, instead of each engine running its
+        # own separate copy of this query (Step 35 - see
+        # step34_post_step33_scalability_audit.txt /
+        # step35_shared_column_stats_audit.txt).
+        row_count = int(storage.execute_one(f"SELECT COUNT(*) FROM {table}")[0])
 
-        for index, column in enumerate(column_names):
-            quoted = _quote_identifier(column)
-            select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
-            select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
-
-        counts_query = f"SELECT {', '.join(select_parts)} FROM {table}"
-        counts_row = storage.execute_one(counts_query)
-
-        row_count = int(counts_row[0])
-        per_column_counts = counts_row[1:]
+        column_statistics = storage.column_statistics()
 
         # Bounded LIMIT 100 sample - the only rows ever pulled into
         # pandas, used purely for role detection and sample_values.
@@ -130,10 +129,10 @@ class DuckDBMetadataEngine(MetadataEngine):
         columns: dict[str, Any] = {}
         time_columns: list[str] = []
 
-        for index, column in enumerate(column_names):
-            non_null, distinct = per_column_counts[index * 2 : index * 2 + 2]
-            missing_count = row_count - int(non_null or 0)
-            unique_values = int(distinct or 0)
+        for column in column_names:
+            stats = column_statistics[column]
+            missing_count = row_count - stats.non_null_count
+            unique_values = stats.distinct_count
 
             sample_series = sample_df[column]
 

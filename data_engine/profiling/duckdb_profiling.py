@@ -91,24 +91,22 @@ class DuckDBProfilingEngine(ProfilingEngine):
                 "memory_usage_bytes": None,
             }
 
-        select_parts = []
-
-        for index, column in enumerate(column_names):
-            quoted = _quote_identifier(column)
-            select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
-            select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
-            select_parts.append(f"MIN({quoted}) AS min_{index}")
-            select_parts.append(f"MAX({quoted}) AS max_{index}")
-
-        query = f"SELECT {', '.join(select_parts)} FROM {table}"
-        row = storage.execute_one(query)
+        # Step 35: non-null count, distinct count, min, and max for
+        # every column all come from DuckDBStorage's single shared
+        # aggregate scan - memoized on the dataset's own storage
+        # instance and reused as-is by DuckDBMetadataEngine and
+        # DuckDBQualityEngine too, instead of each engine running its
+        # own separate copy of this query (see
+        # step34_post_step33_scalability_audit.txt /
+        # step35_shared_column_stats_audit.txt).
+        column_statistics = storage.column_statistics()
 
         columns: dict[str, Any] = {}
 
-        for index, column in enumerate(column_names):
-            non_null, distinct, min_value, max_value = row[index * 4 : index * 4 + 4]
+        for column in column_names:
+            stats = column_statistics[column]
 
-            missing_count = int(row_count) - int(non_null or 0)
+            missing_count = int(row_count) - stats.non_null_count
 
             columns[column] = {
                 "data_type": _categorize_duckdb_type(schema[column]),
@@ -117,9 +115,9 @@ class DuckDBProfilingEngine(ProfilingEngine):
                     (missing_count / row_count) * 100 if row_count else 0.0,
                     2,
                 ),
-                "distinct_count": int(distinct or 0),
-                "min": safe_scalar(min_value),
-                "max": safe_scalar(max_value),
+                "distinct_count": stats.distinct_count,
+                "min": safe_scalar(stats.min_value),
+                "max": safe_scalar(stats.max_value),
             }
 
         return {

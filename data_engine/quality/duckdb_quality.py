@@ -155,21 +155,19 @@ class DuckDBQualityEngine(QualityEngine):
             return {"status": status, "issue_count": len(issues), "issues": issues}
 
         # -----------------------------------------------------
-        # Single consolidated aggregate query: per-column non-null
-        # and distinct counts, for missing-value / constant-column /
-        # high-cardinality checks.
+        # Per-column non-null and distinct counts, for missing-value /
+        # constant-column / high-cardinality checks.
+        #
+        # Step 35: sourced from DuckDBStorage's single shared aggregate
+        # scan - memoized on the dataset's own storage instance and
+        # reused as-is by DuckDBMetadataEngine and
+        # DuckDBProfilingEngine too, instead of each engine running its
+        # own separate copy of this query (see
+        # step34_post_step33_scalability_audit.txt /
+        # step35_shared_column_stats_audit.txt).
         # -----------------------------------------------------
 
-        select_parts = []
-
-        for index, column in enumerate(column_names):
-            quoted = _quote_identifier(column)
-            select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
-            select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
-
-        counts_row = storage.execute_one(
-            f"SELECT {', '.join(select_parts)} FROM {table}"
-        )
+        column_statistics = storage.column_statistics()
 
         # -----------------------------------------------------
         # IQR outlier bounds - one aggregate query computing Q1/Q3
@@ -235,10 +233,10 @@ class DuckDBQualityEngine(QualityEngine):
         # constant -> high cardinality -> outliers, column by column.
         # -----------------------------------------------------
 
-        for index, column in enumerate(column_names):
-            non_null, distinct = counts_row[index * 2], counts_row[index * 2 + 1]
-            missing_count = row_count - int(non_null or 0)
-            unique_count = int(distinct or 0)
+        for column in column_names:
+            stats = column_statistics[column]
+            missing_count = row_count - stats.non_null_count
+            unique_count = stats.distinct_count
 
             if missing_count > 0:
                 missing_percentage = (missing_count / row_count) * 100

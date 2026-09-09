@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+from dataclasses import dataclass
 
 import duckdb
 import pandas as pd
@@ -58,6 +59,34 @@ def _configure_connection_and_temp_dir(
     connection.execute(f"PRAGMA temp_directory='{escaped_temp_dir}'")
 
     return temp_dir
+
+
+def _quote_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+@dataclass(frozen=True)
+class ColumnStatistics:
+    """
+    Per-column non-null count, distinct count, and min/max bounds - the
+    single aggregate DuckDBStorage.column_statistics() computes at most
+    once per instance (see that method's docstring), consumed
+    identically by DuckDBMetadataEngine.get_metadata(),
+    DuckDBProfilingEngine.basic_statistics(), and
+    DuckDBQualityEngine.check_quality() instead of each engine running
+    its own separate copy of this same per-column scan (Step 35 - see
+    step34_post_step33_scalability_audit.txt /
+    step35_shared_column_stats_audit.txt).
+
+    Internal representation only - never returned directly by any HTTP
+    route; each consumer still builds its own public response shape
+    from these values.
+    """
+
+    non_null_count: int
+    distinct_count: int
+    min_value: object
+    max_value: object
 
 
 class DuckDBStorage(DatasetStorage):
@@ -120,6 +149,19 @@ class DuckDBStorage(DatasetStorage):
     a fresh instance runs its own copy of the scan and caches the
     result; a concurrent second caller blocks on the same lock and
     then reuses the cached value instead of running the scan again.
+
+    Step 35: ``column_statistics()`` applies the exact same memoization
+    pattern to the per-column non-null/distinct/min/max aggregate that
+    ``DuckDBMetadataEngine.get_metadata()``,
+    ``DuckDBProfilingEngine.basic_statistics()``, and
+    ``DuckDBQualityEngine.check_quality()`` each used to compute via
+    their own separate, unshared full-table-per-column scan (see
+    step34_post_step33_scalability_audit.txt). Whichever of the three
+    engines reaches it first for this instance pays for the one
+    consolidated scan (which computes MIN/MAX too, at no extra scan
+    cost, so every consumer's needs are covered by the same result
+    regardless of call order); every other caller - including a
+    concurrent first caller - reuses the cached mapping.
     """
 
     def __init__(self, dataframe: pd.DataFrame):
@@ -135,6 +177,11 @@ class DuckDBStorage(DatasetStorage):
         # Step 33: memoized exact distinct-row-count, shared between
         # profiling and quality - see distinct_row_count() below.
         self._distinct_row_count: int | None = None
+
+        # Step 35: memoized per-column statistics (non-null count,
+        # distinct count, min, max), shared between metadata,
+        # profiling, and quality - see column_statistics() below.
+        self._column_statistics: dict[str, ColumnStatistics] | None = None
 
         # No on-disk artifact - this constructor builds a physical,
         # in-memory-only table from an already-materialized DataFrame.
@@ -196,6 +243,11 @@ class DuckDBStorage(DatasetStorage):
         # Step 33: memoized exact distinct-row-count, shared between
         # profiling and quality - see distinct_row_count() below.
         instance._distinct_row_count = None
+
+        # Step 35: memoized per-column statistics, shared between
+        # metadata, profiling, and quality - see column_statistics()
+        # below.
+        instance._column_statistics = None
 
         instance._connection = duckdb.connect(database=":memory:")
         instance._table_name = f"dataset_{uuid.uuid4().hex}"
@@ -312,6 +364,77 @@ class DuckDBStorage(DatasetStorage):
                 self._distinct_row_count = int(compute())
 
             return self._distinct_row_count
+
+    def column_statistics(self) -> dict[str, ColumnStatistics]:
+        """
+        Return this dataset's cached per-column statistics - non-null
+        count, distinct count, min, and max for every column - computing
+        them via a single aggregate SQL scan over every column the
+        first time this is called for this instance, and reusing the
+        cached mapping on every later call, including from a different
+        consumer (DuckDBMetadataEngine, DuckDBProfilingEngine, or
+        DuckDBQualityEngine - see the class docstring's Step 35 note).
+
+        Unlike ``distinct_row_count()``, the query itself isn't
+        supplied by the caller: metadata/profiling/quality need
+        overlapping but not identical subsets of the same per-column
+        statistics (profiling additionally needs min/max; metadata and
+        quality don't), so the single query that serves all three
+        regardless of which one runs first has to be the same query
+        every time - that query is built and run here, not by each
+        caller. Computing min/max unconditionally costs nothing extra:
+        DuckDB derives every aggregate in the SELECT list from the same
+        single table scan.
+
+        Reentrant through ``self.execute_one()`` while ``self._lock``
+        is already held - safe only because the lock is an ``RLock``,
+        exactly as documented on the class and exercised by
+        ``distinct_row_count()`` above.
+        """
+        with self._lock:
+            self._raise_if_closed()
+
+            if self._column_statistics is None:
+                self._column_statistics = self._compute_column_statistics()
+
+            return self._column_statistics
+
+    def _compute_column_statistics(self) -> dict[str, ColumnStatistics]:
+        """
+        Build and run the single aggregate query producing every
+        column's non-null count, distinct count, min, and max at once.
+
+        Only ever called from column_statistics() while self._lock is
+        already held.
+        """
+        if not self._columns:
+            return {}
+
+        table = _quote_identifier(self._table_name)
+        select_parts = []
+
+        for index, column in enumerate(self._columns):
+            quoted = _quote_identifier(column)
+            select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
+            select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
+            select_parts.append(f"MIN({quoted}) AS min_{index}")
+            select_parts.append(f"MAX({quoted}) AS max_{index}")
+
+        row = self.execute_one(f"SELECT {', '.join(select_parts)} FROM {table}")
+
+        statistics: dict[str, ColumnStatistics] = {}
+
+        for index, column in enumerate(self._columns):
+            non_null, distinct, min_value, max_value = row[index * 4 : index * 4 + 4]
+
+            statistics[column] = ColumnStatistics(
+                non_null_count=int(non_null or 0),
+                distinct_count=int(distinct or 0),
+                min_value=min_value,
+                max_value=max_value,
+            )
+
+        return statistics
 
     @property
     def table_name(self) -> str:
