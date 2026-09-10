@@ -26,6 +26,28 @@ exact methodology):
                    through the legacy Pandas path (PandasStorage +
                    PandasExecutionEngine/PandasProfilingEngine), but
                    only up to ``--pandas-max-rows`` to avoid host OOM.
+  5. QUALITY      - ``data_engine.quality.selector.
+                   check_quality_for_dataset`` (production DuckDB
+                   quality path) against the same DuckDB dataset.
+  6. DUPLICATES   - The same ``basic_statistics_for_dataset`` call as
+                   (3), on its own fresh DuckDBStorage instance, to
+                   time the exact Step 33 shared ``distinct_row_count()``
+                   scan (used by both profiling and quality) in
+                   isolation. No new duplicate-detection query is
+                   written anywhere in this script.
+
+STEP 38A - DuckDB memory/spill governance (Step 30) is exercised for
+every DuckDB-backed worker op: each gets its own isolated spill
+directory under ``--duckdb-temp-root`` (default: system temp dir) and
+the configured ``--duckdb-memory-limit`` (default: 4GB, matching
+production), passed the only way production itself reads them - the
+``DUCKDB_MEMORY_LIMIT``/``DUCKDB_TEMP_ROOT`` environment variables
+consumed by ``data_engine.storage.duckdb_storage`` - since
+``DuckDBStorage.from_parquet`` takes no such parameters and is not
+modified here. Spill-file bytes/count are measured just before that
+worker's storage closes (close() deletes the spill directory), and the
+per-invocation spill directory is removed by the parent afterwards
+regardless of success, failure, or a subprocess timeout/kill.
 
 Every measured operation runs in its own subprocess ("worker mode",
 ``--worker``). This is the key methodological choice: peak RSS is read
@@ -67,6 +89,17 @@ if REPO_ROOT not in sys.path:
 DEFAULT_SIZES = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 DEFAULT_PANDAS_MAX_ROWS = 100_000
 DEFAULT_TIME_BUDGET_SECONDS = 1800
+# Single per-operation timeout ceiling, replacing the previous
+# hardcoded 600s (gen_csv/ingest) and 300s (duckdb/profiling/pandas)
+# constants - set to the larger of the two so no existing operation
+# becomes stricter than before.
+DEFAULT_OP_TIMEOUT_SECONDS = 600.0
+# Matches data_engine.storage.duckdb_storage's own
+# _DEFAULT_DUCKDB_MEMORY_LIMIT / _read_duckdb_temp_root() defaults -
+# kept as separate constants here (not imported) so this script never
+# depends on that module's private names.
+DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
+DEFAULT_DUCKDB_TEMP_ROOT = tempfile.gettempdir()
 # Rough worst-case bytes/row for the synthetic schema below, used only
 # for a pre-flight free-disk-space check before generating a size.
 BYTES_PER_ROW_ESTIMATE = 120
@@ -224,6 +257,52 @@ def _make_spy_duckdb_storage():
     return _SpyDuckDBStorage
 
 
+def _apply_duckdb_governance(args: dict) -> None:
+    """
+    Set ``DUCKDB_MEMORY_LIMIT``/``DUCKDB_TEMP_ROOT`` for this worker
+    process before any ``DuckDBStorage`` is constructed.
+
+    This is the only knob production itself exposes (see
+    ``data_engine.storage.duckdb_storage._read_duckdb_memory_limit``/
+    ``_read_duckdb_temp_root``) - ``DuckDBStorage.from_parquet`` takes
+    no such parameters, and is not modified here. Every worker op runs
+    in its own subprocess, so setting these process-wide env vars here
+    cannot leak into any other op or into the parent orchestrator.
+    """
+    if args.get("duckdb_memory_limit"):
+        os.environ["DUCKDB_MEMORY_LIMIT"] = str(args["duckdb_memory_limit"])
+    if args.get("duckdb_temp_root"):
+        os.environ["DUCKDB_TEMP_ROOT"] = str(args["duckdb_temp_root"])
+
+
+def _measure_spill(storage) -> dict:
+    """
+    Best-effort total size/count of spill files DuckDB has written so
+    far under ``storage``'s own private ``temp_directory``.
+
+    Must be called before ``storage.close()``, which deletes that
+    directory (see ``DuckDBStorage.close``'s docstring). Reaches into
+    the private ``_temp_dir`` attribute rather than reconstructing the
+    ``duckdb_spill_<table_name>`` naming convention itself, so this
+    stays correct even if that convention ever changes - production
+    code is not modified to expose it any more publicly than that.
+    """
+    temp_dir = getattr(storage, "_temp_dir", None)
+    if not temp_dir or not os.path.isdir(temp_dir):
+        return {"spill_bytes": 0, "spill_file_count": 0}
+
+    total_bytes = 0
+    file_count = 0
+    for root, _dirs, files in os.walk(temp_dir):
+        for name in files:
+            try:
+                total_bytes += os.path.getsize(os.path.join(root, name))
+                file_count += 1
+            except OSError:
+                pass
+    return {"spill_bytes": total_bytes, "spill_file_count": file_count}
+
+
 def _build_plan(kind: str):
     from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 
@@ -288,6 +367,7 @@ def _op_ingest(args: dict) -> dict:
 
 
 def _op_duckdb(args: dict) -> dict:
+    _apply_duckdb_governance(args)
     from data_engine.dataset import Dataset
     from data_engine.plan_executor import execute_plan_for_dataset
 
@@ -301,17 +381,20 @@ def _op_duckdb(args: dict) -> dict:
         result_df = execute_plan_for_dataset(dataset, plan)
         elapsed = time.perf_counter() - t0
 
+        spill = _measure_spill(storage)
         return {
             "elapsed_s": elapsed,
             "peak_rss_bytes": peak_rss_bytes(),
             "result_rows": int(result_df.row_count),
             "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
+            **spill,
         }
     finally:
         storage.close()
 
 
 def _op_duckdb_profile(args: dict) -> dict:
+    _apply_duckdb_governance(args)
     from data_engine.dataset import Dataset
     from data_engine.profiling import basic_statistics_for_dataset
 
@@ -324,11 +407,94 @@ def _op_duckdb_profile(args: dict) -> dict:
         stats = basic_statistics_for_dataset(dataset)
         elapsed = time.perf_counter() - t0
 
+        spill = _measure_spill(storage)
         return {
             "elapsed_s": elapsed,
             "peak_rss_bytes": peak_rss_bytes(),
             "result_rows": int(stats["row_count"]),
+            "duplicate_rows": int(stats.get("duplicate_rows") or 0),
             "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
+            **spill,
+        }
+    finally:
+        storage.close()
+
+
+def _op_duckdb_quality(args: dict) -> dict:
+    """
+    Runs the production DuckDB quality path (``data_engine.quality.
+    selector.check_quality_for_dataset``) against the benchmark
+    dataset. No quality logic is reimplemented here - this only calls
+    the existing entry point, which itself routes duplicate-row
+    detection through ``storage.distinct_row_count()`` (Step 33).
+    """
+    _apply_duckdb_governance(args)
+    from data_engine.dataset import Dataset
+    from data_engine.quality.selector import check_quality_for_dataset
+
+    spy_cls = _make_spy_duckdb_storage()
+    storage = spy_cls.from_parquet(args["parquet_path"])
+    try:
+        dataset = Dataset(storage=storage)
+
+        t0 = time.perf_counter()
+        report = check_quality_for_dataset(dataset)
+        elapsed = time.perf_counter() - t0
+
+        duplicate_issue = next(
+            (
+                issue
+                for issue in report.get("issues", [])
+                if issue.get("type") == "duplicate_rows"
+            ),
+            None,
+        )
+
+        spill = _measure_spill(storage)
+        return {
+            "elapsed_s": elapsed,
+            "peak_rss_bytes": peak_rss_bytes(),
+            "result_rows": int(report.get("issue_count", 0)),
+            "status": report.get("status"),
+            "duplicate_rows": int(duplicate_issue["count"]) if duplicate_issue else 0,
+            "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
+            **spill,
+        }
+    finally:
+        storage.close()
+
+
+def _op_duckdb_duplicates(args: dict) -> dict:
+    """
+    Exercises the exact Step 33 shared duplicate-row computation
+    (``storage.distinct_row_count()``) through the production DuckDB
+    profiling path - the same ``basic_statistics_for_dataset`` call
+    ``_op_duckdb_profile`` uses - but on its own fresh DuckDBStorage
+    instance/subprocess, so the underlying `SELECT DISTINCT *` scan is
+    genuinely (re-)run here rather than reusing another op's cached
+    scalar. No new duplicate-detection query is written in this file.
+    """
+    _apply_duckdb_governance(args)
+    from data_engine.dataset import Dataset
+    from data_engine.profiling import basic_statistics_for_dataset
+
+    spy_cls = _make_spy_duckdb_storage()
+    storage = spy_cls.from_parquet(args["parquet_path"])
+    try:
+        dataset = Dataset(storage=storage)
+
+        t0 = time.perf_counter()
+        stats = basic_statistics_for_dataset(dataset)
+        elapsed = time.perf_counter() - t0
+
+        spill = _measure_spill(storage)
+        return {
+            "elapsed_s": elapsed,
+            "peak_rss_bytes": peak_rss_bytes(),
+            "result_rows": int(stats["row_count"]),
+            "duplicate_rows": int(stats.get("duplicate_rows") or 0),
+            "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
+            **spill,
         }
     finally:
         storage.close()
@@ -393,6 +559,8 @@ _WORKER_OPS = {
     "ingest": _op_ingest,
     "duckdb": _op_duckdb,
     "duckdb_profile": _op_duckdb_profile,
+    "duckdb_quality": _op_duckdb_quality,
+    "duckdb_duplicates": _op_duckdb_duplicates,
     "pandas": _op_pandas,
     "pandas_profile": _op_pandas_profile,
 }
@@ -423,6 +591,11 @@ class OpResult:
     elapsed_s: Optional[float] = None
     peak_rss_bytes: Optional[int] = None
     result_rows: Optional[int] = None
+    # Populated only for DuckDB-backed operations (see
+    # _measure_spill/_apply_duckdb_governance); stays None for
+    # generate_synthetic_csv/ingest_to_parquet/pandas rows, which is
+    # backward compatible with any existing report consumer.
+    spill_bytes: Optional[int] = None
     extra: dict = field(default_factory=dict)
     error: Optional[str] = None
 
@@ -462,6 +635,38 @@ def _run_subprocess_op(op: str, args: dict, workdir: str, timeout: float) -> dic
     return payload
 
 
+def _run_duckdb_op(
+    op: str,
+    base_args: dict,
+    workdir: str,
+    timeout: float,
+    duckdb_memory_limit: str,
+    duckdb_temp_root: str,
+) -> dict:
+    """
+    Like ``_run_subprocess_op``, but for a DuckDB-backed op: gives it
+    its own isolated spill directory under ``duckdb_temp_root`` (Step
+    30 governance - see ``_apply_duckdb_governance``) and removes that
+    directory here afterwards regardless of success, failure, or a
+    subprocess timeout/kill.
+
+    The worker's own ``storage.close()`` already removes it on the
+    well-behaved path (a killed/timed-out subprocess never gets to run
+    that ``finally`` block); this is the outer safety net for the
+    paths where it doesn't, so no spill directory is ever left behind
+    by this benchmark regardless of how the worker exits.
+    """
+    op_temp_root = os.path.join(workdir, f"duckdb_temp_{op}_{time.time_ns()}")
+    os.makedirs(op_temp_root, exist_ok=True)
+    full_args = dict(base_args)
+    full_args["duckdb_memory_limit"] = duckdb_memory_limit
+    full_args["duckdb_temp_root"] = op_temp_root
+    try:
+        return _run_subprocess_op(op, full_args, workdir, timeout)
+    finally:
+        shutil.rmtree(op_temp_root, ignore_errors=True)
+
+
 def _disk_has_room(path: str, rows: int) -> bool:
     try:
         free = shutil.disk_usage(path).free
@@ -495,6 +700,29 @@ def main() -> int:
         default=DEFAULT_TIME_BUDGET_SECONDS,
         help="Overall wall-clock budget (seconds) before the run stops early and "
         "records a cap.",
+    )
+    parser.add_argument(
+        "--op-timeout",
+        type=float,
+        default=DEFAULT_OP_TIMEOUT_SECONDS,
+        help="Per-operation subprocess timeout ceiling (seconds), still bounded by "
+        "the remaining --time-budget. Replaces the previous hardcoded 600s "
+        "(gen/ingest) and 300s (duckdb/profiling/pandas) ceilings with one "
+        "configurable value, defaulted to the larger of the two so existing "
+        "behavior is preserved.",
+    )
+    parser.add_argument(
+        "--duckdb-memory-limit",
+        default=DEFAULT_DUCKDB_MEMORY_LIMIT,
+        help="DuckDB memory_limit applied to every DuckDB-backed worker via the "
+        "DUCKDB_MEMORY_LIMIT env var (matches production's own default).",
+    )
+    parser.add_argument(
+        "--duckdb-temp-root",
+        default=DEFAULT_DUCKDB_TEMP_ROOT,
+        help="Parent directory for each DuckDB-backed worker's isolated spill "
+        "directory, via the DUCKDB_TEMP_ROOT env var (matches production's own "
+        "default: the system temp directory).",
     )
     parser.add_argument(
         "--out",
@@ -536,7 +764,7 @@ def main() -> int:
             storage_root = os.path.join(size_dir, "storage")
 
             remaining = max(60.0, deadline - time.time())
-            op_timeout = min(600.0, remaining)
+            op_timeout = min(args.op_timeout, remaining)
 
             gen = _run_subprocess_op(
                 "gen_csv", {"csv_path": csv_path, "rows": size, "seed": 42}, workdir, op_timeout
@@ -561,7 +789,7 @@ def main() -> int:
                 break
 
             remaining = max(60.0, deadline - time.time())
-            op_timeout = min(600.0, remaining)
+            op_timeout = min(args.op_timeout, remaining)
             ing = _run_subprocess_op(
                 "ingest",
                 {
@@ -598,9 +826,14 @@ def main() -> int:
 
             for kind in ("global_agg", "grouped_agg", "filter", "sort_limit"):
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(300.0, remaining)
-                res = _run_subprocess_op(
-                    "duckdb", {"parquet_path": parquet_path, "kind": kind}, workdir, op_timeout
+                op_timeout = min(args.op_timeout, remaining)
+                res = _run_duckdb_op(
+                    "duckdb",
+                    {"parquet_path": parquet_path, "kind": kind},
+                    workdir,
+                    op_timeout,
+                    args.duckdb_memory_limit,
+                    args.duckdb_temp_root,
                 )
                 report["results"].append(
                     asdict(
@@ -612,16 +845,25 @@ def main() -> int:
                             elapsed_s=res.get("elapsed_s"),
                             peak_rss_bytes=res.get("peak_rss_bytes"),
                             result_rows=res.get("result_rows"),
-                            extra={"to_dataframe_calls": res.get("to_dataframe_calls")},
+                            spill_bytes=res.get("spill_bytes"),
+                            extra={
+                                "to_dataframe_calls": res.get("to_dataframe_calls"),
+                                "spill_file_count": res.get("spill_file_count"),
+                            },
                             error=res.get("error"),
                         )
                     )
                 )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(300.0, remaining)
-            prof = _run_subprocess_op(
-                "duckdb_profile", {"parquet_path": parquet_path}, workdir, op_timeout
+            op_timeout = min(args.op_timeout, remaining)
+            prof = _run_duckdb_op(
+                "duckdb_profile",
+                {"parquet_path": parquet_path},
+                workdir,
+                op_timeout,
+                args.duckdb_memory_limit,
+                args.duckdb_temp_root,
             )
             report["results"].append(
                 asdict(
@@ -633,8 +875,76 @@ def main() -> int:
                         elapsed_s=prof.get("elapsed_s"),
                         peak_rss_bytes=prof.get("peak_rss_bytes"),
                         result_rows=prof.get("result_rows"),
-                        extra={"to_dataframe_calls": prof.get("to_dataframe_calls")},
+                        spill_bytes=prof.get("spill_bytes"),
+                        extra={
+                            "to_dataframe_calls": prof.get("to_dataframe_calls"),
+                            "duplicate_rows": prof.get("duplicate_rows"),
+                            "spill_file_count": prof.get("spill_file_count"),
+                        },
                         error=prof.get("error"),
+                    )
+                )
+            )
+
+            remaining = max(30.0, deadline - time.time())
+            op_timeout = min(args.op_timeout, remaining)
+            qual = _run_duckdb_op(
+                "duckdb_quality",
+                {"parquet_path": parquet_path},
+                workdir,
+                op_timeout,
+                args.duckdb_memory_limit,
+                args.duckdb_temp_root,
+            )
+            report["results"].append(
+                asdict(
+                    OpResult(
+                        size=size,
+                        operation="quality",
+                        engine="duckdb",
+                        ok=qual.get("ok", False),
+                        elapsed_s=qual.get("elapsed_s"),
+                        peak_rss_bytes=qual.get("peak_rss_bytes"),
+                        result_rows=qual.get("result_rows"),
+                        spill_bytes=qual.get("spill_bytes"),
+                        extra={
+                            "status": qual.get("status"),
+                            "duplicate_rows": qual.get("duplicate_rows"),
+                            "to_dataframe_calls": qual.get("to_dataframe_calls"),
+                            "spill_file_count": qual.get("spill_file_count"),
+                        },
+                        error=qual.get("error"),
+                    )
+                )
+            )
+
+            remaining = max(30.0, deadline - time.time())
+            op_timeout = min(args.op_timeout, remaining)
+            dupes = _run_duckdb_op(
+                "duckdb_duplicates",
+                {"parquet_path": parquet_path},
+                workdir,
+                op_timeout,
+                args.duckdb_memory_limit,
+                args.duckdb_temp_root,
+            )
+            report["results"].append(
+                asdict(
+                    OpResult(
+                        size=size,
+                        operation="duplicate_detection",
+                        engine="duckdb",
+                        ok=dupes.get("ok", False),
+                        elapsed_s=dupes.get("elapsed_s"),
+                        peak_rss_bytes=dupes.get("peak_rss_bytes"),
+                        result_rows=dupes.get("result_rows"),
+                        spill_bytes=dupes.get("spill_bytes"),
+                        extra={
+                            "duplicate_rows": dupes.get("duplicate_rows"),
+                            "to_dataframe_calls": dupes.get("to_dataframe_calls"),
+                            "spill_file_count": dupes.get("spill_file_count"),
+                        },
+                        error=dupes.get("error"),
                     )
                 )
             )
@@ -642,7 +952,7 @@ def main() -> int:
             if size <= args.pandas_max_rows:
                 for kind in ("global_agg", "grouped_agg", "filter", "sort_limit"):
                     remaining = max(30.0, deadline - time.time())
-                    op_timeout = min(300.0, remaining)
+                    op_timeout = min(args.op_timeout, remaining)
                     res = _run_subprocess_op(
                         "pandas", {"csv_path": csv_path, "kind": kind}, workdir, op_timeout
                     )
@@ -662,7 +972,7 @@ def main() -> int:
                     )
 
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(300.0, remaining)
+                op_timeout = min(args.op_timeout, remaining)
                 pprof = _run_subprocess_op(
                     "pandas_profile", {"csv_path": csv_path}, workdir, op_timeout
                 )
