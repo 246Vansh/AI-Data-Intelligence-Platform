@@ -373,14 +373,27 @@ def get_cached_on(
 
     The builder receives the DataFrame materialized through the
     DatasetStorage abstraction.
+
+    A cache hit never touches dataset.cache_lock - only a miss falls
+    through to the locked section, so the common (already-computed)
+    case stays a single dict lookup. Inside the lock, the cache is
+    re-checked before calling builder(): if another thread won the
+    race and already populated `key` while this thread was waiting
+    for the lock, that value is reused instead of computing a second
+    time. This keeps concurrent first access to the same dataset/key
+    from running the (potentially expensive) builder more than once.
     """
 
     if key in dataset.cache:
         return dataset.cache[key]
 
-    value = builder(dataset.storage.to_dataframe())
+    with dataset.cache_lock:
+        if key in dataset.cache:
+            return dataset.cache[key]
 
-    dataset.cache[key] = value
+        value = builder(dataset.storage.to_dataframe())
+
+        dataset.cache[key] = value
 
     return value
 
@@ -400,14 +413,24 @@ def get_cached_on_dataset(
     free to skip a full-dataset materialization themselves for
     backends that don't need one - handing them an already-
     materialized DataFrame here would defeat that entirely.
+
+    Same locking discipline as get_cached_on(): a cache hit returns
+    without touching dataset.cache_lock, and a miss re-checks the
+    cache inside the lock before calling builder(), so concurrent
+    first access to the same dataset/key runs the builder at most
+    once.
     """
 
     if key in dataset.cache:
         return dataset.cache[key]
 
-    value = builder(dataset)
+    with dataset.cache_lock:
+        if key in dataset.cache:
+            return dataset.cache[key]
 
-    dataset.cache[key] = value
+        value = builder(dataset)
+
+        dataset.cache[key] = value
 
     return value
 
