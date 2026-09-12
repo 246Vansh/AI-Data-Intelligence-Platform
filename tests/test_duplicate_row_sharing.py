@@ -10,12 +10,24 @@ instance (i.e. once per dataset), guarded by the instance's existing
 per-connection lock, and both engines route through it instead of each
 running their own copy of the scan.
 
+Step 38 replaced the scan itself (single full-table `SELECT DISTINCT
+*`) with one-pass physical hash partitioning - see
+DuckDBStorage._compute_distinct_row_count_partitioned() - but left
+distinct_row_count()'s memoization/locking contract, and both engines'
+call sites, unchanged. The "runs exactly once" tests below now spy on
+that private computation method directly (rather than counting
+`SELECT DISTINCT *` occurrences in executed SQL, which now legitimately
+runs once per non-empty partition instead of once per dataset), and the
+"builder" tests are updated to reflect that the `compute` callable
+callers still pass in is accepted only for call-site compatibility and
+is never actually invoked any more.
+
 Verifies:
   - profiling's duplicate_rows stays exactly correct.
   - quality's duplicate_rows count stays exactly correct.
-  - the expensive scan runs exactly once per dataset no matter which
-    engine (or order) touches it first, including under concurrent
-    first access.
+  - the expensive partitioned computation runs exactly once per
+    dataset no matter which engine (or order) touches it first,
+    including under concurrent first access.
   - the existing dataset.cache / get_cached_on_dataset behavior for
     the full basic_statistics/quality results is untouched.
 """
@@ -44,17 +56,20 @@ def _make_dataframe_with_duplicates() -> pd.DataFrame:
 
 class _SpyDuckDBStorage(DuckDBStorage):
     """DuckDBStorage that counts how many times it actually runs the
-    expensive `SELECT DISTINCT *` scan (via execute_one), regardless of
-    which engine triggered it."""
+    expensive partitioned distinct-row computation (COPY + per-partition
+    `SELECT DISTINCT *` scans), regardless of which engine triggered
+    it. Spies on the private computation method itself rather than on
+    individual `SELECT DISTINCT *` occurrences, since Step 38 legitimately
+    runs one such scan per non-empty partition instead of one per
+    dataset."""
 
     def __init__(self, dataframe: pd.DataFrame):
         super().__init__(dataframe)
-        self.distinct_scan_calls: list[str] = []
+        self.distinct_computation_calls = 0
 
-    def execute_one(self, query: str, params=None):
-        if "SELECT DISTINCT *" in query:
-            self.distinct_scan_calls.append(query)
-        return super().execute_one(query, params)
+    def _compute_distinct_row_count_partitioned(self):
+        self.distinct_computation_calls += 1
+        return super()._compute_distinct_row_count_partitioned()
 
 
 # =========================================================
@@ -114,7 +129,7 @@ def test_scan_runs_once_when_profiling_then_quality_use_same_dataset():
     basic_statistics_for_dataset(dataset)
     check_quality_for_dataset(dataset)
 
-    assert len(storage.distinct_scan_calls) == 1
+    assert storage.distinct_computation_calls == 1
 
 
 def test_scan_runs_once_when_quality_then_profiling_use_same_dataset():
@@ -124,7 +139,7 @@ def test_scan_runs_once_when_quality_then_profiling_use_same_dataset():
     check_quality_for_dataset(dataset)
     basic_statistics_for_dataset(dataset)
 
-    assert len(storage.distinct_scan_calls) == 1
+    assert storage.distinct_computation_calls == 1
 
 
 def test_repeated_calls_to_the_same_engine_do_not_rerun_the_scan():
@@ -135,7 +150,7 @@ def test_repeated_calls_to_the_same_engine_do_not_rerun_the_scan():
     basic_statistics_for_dataset(dataset)
     check_quality_for_dataset(dataset)
 
-    assert len(storage.distinct_scan_calls) == 1
+    assert storage.distinct_computation_calls == 1
 
 
 def test_distinct_row_count_is_isolated_per_dataset():
@@ -152,11 +167,18 @@ def test_distinct_row_count_is_isolated_per_dataset():
 
     assert stats_a["duplicate_rows"] == 2
     assert stats_b["duplicate_rows"] == 0
-    assert len(storage_a.distinct_scan_calls) == 1
-    assert len(storage_b.distinct_scan_calls) == 1
+    assert storage_a.distinct_computation_calls == 1
+    assert storage_b.distinct_computation_calls == 1
 
 
-def test_distinct_row_count_builder_is_not_called_once_cached():
+def test_distinct_row_count_ignores_supplied_compute_and_uses_internal_computation():
+    """
+    Step 38: `compute` is accepted only so existing call sites
+    (profiling/quality) don't have to change how they call
+    distinct_row_count() - it is never actually invoked, on the first
+    call or any later one, since the real computation is always the
+    internal partitioned scan.
+    """
     storage = DuckDBStorage(_make_dataframe_with_duplicates())
 
     calls = []
@@ -170,11 +192,12 @@ def test_distinct_row_count_builder_is_not_called_once_cached():
 
     first = storage.distinct_row_count(_builder)
     second = storage.distinct_row_count(lambda: (_ for _ in ()).throw(
-        AssertionError("builder should not run again once cached")
+        AssertionError("builder should never run - Step 38 always uses the "
+                       "internal partitioned computation")
     ))
 
     assert first == second == 4
-    assert len(calls) == 1
+    assert calls == []
 
 
 def test_scan_runs_exactly_once_under_concurrent_first_access():
@@ -199,7 +222,7 @@ def test_scan_runs_exactly_once_under_concurrent_first_access():
     t2.join(timeout=5)
 
     assert results["t1"] == results["t2"] == 2
-    assert len(storage.distinct_scan_calls) == 1
+    assert storage.distinct_computation_calls == 1
 
 
 # =========================================================

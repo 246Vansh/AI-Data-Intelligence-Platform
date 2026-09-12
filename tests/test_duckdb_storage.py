@@ -816,9 +816,163 @@ def test_duplicate_row_sql_is_unchanged_by_memory_governance():
     Step 30 must not touch the duplicate-row detection query itself -
     only connection configuration. Pins the exact SQL shape Step 29A
     proved spills correctly under memory_limit/temp_directory.
+
+    Note: as of Step 38 this text is dead code from DuckDBStorage's
+    point of view (distinct_row_count() no longer calls the `compute`
+    callable that builds this query) - it is pinned here only because
+    the source file itself must stay untouched (see
+    data_engine/profiling/duckdb_profiling.py:75-79).
     """
     from data_engine.profiling import duckdb_profiling
 
     source = inspect.getsource(duckdb_profiling)
     assert "SELECT DISTINCT * FROM" in source
     assert "approx_count_distinct" not in source
+
+
+# =========================================================
+# STEP 38: SCALABLE EXACT DUPLICATE-ROW DETECTION VIA ONE-PASS PHYSICAL
+# HASH PARTITIONING
+#
+# distinct_row_count() no longer runs a single full-table `SELECT
+# COUNT(*) FROM (SELECT DISTINCT * FROM table)` - it COPYs the dataset
+# to a private temporary Parquet directory bucketed by `hash(row) % K`,
+# runs an exact `SELECT DISTINCT *` independently within each of the K
+# partitions, and sums the per-partition distinct counts. These tests
+# pin: exact correctness (including pandas' NaN-as-equal duplicate
+# semantics) at a scale that exercises multiple non-empty partitions,
+# the configurable/default partition count, and that the partition
+# directory is fully cleaned up afterwards - on top of the existing
+# API/cache/thread-safety coverage in test_duplicate_row_sharing.py,
+# which is unchanged by this step.
+# =========================================================
+
+
+def _make_dataframe_with_many_duplicates_and_nulls() -> pd.DataFrame:
+    # 400 rows built from a 4-row pattern (one of which repeats a NaN)
+    # repeated 100x, so the default 16-way partitioning sees far more
+    # than one row per partition and genuine collisions are likely.
+    pattern = pd.DataFrame(
+        {
+            "region": ["north", "south", "north", None],
+            "quantity": [10.0, 20.0, 10.0, float("nan")],
+        }
+    )
+    return pd.concat([pattern] * 100, ignore_index=True)
+
+
+def test_distinct_row_count_matches_pandas_semantics_across_many_partitions():
+    df = _make_dataframe_with_many_duplicates_and_nulls()
+    expected = int(len(df) - df.duplicated().sum())
+
+    storage = DuckDBStorage(df)
+    try:
+        assert storage.distinct_row_count(lambda: 0) == expected
+    finally:
+        storage.close()
+
+
+def test_distinct_row_count_partition_count_is_configurable_via_environment_variable(
+    monkeypatch,
+):
+    monkeypatch.setenv("DUCKDB_DISTINCT_ROW_PARTITIONS", "2")
+    df = _make_dataframe_with_many_duplicates_and_nulls()
+    expected = int(len(df) - df.duplicated().sum())
+
+    storage = DuckDBStorage(df)
+    try:
+        assert (
+            duckdb_storage_module._read_distinct_row_partition_count() == 2
+        )
+        assert storage.distinct_row_count(lambda: 0) == expected
+    finally:
+        storage.close()
+
+
+def test_distinct_row_count_uses_default_partition_count_without_env_var(
+    monkeypatch,
+):
+    monkeypatch.delenv("DUCKDB_DISTINCT_ROW_PARTITIONS", raising=False)
+
+    assert (
+        duckdb_storage_module._read_distinct_row_partition_count()
+        == duckdb_storage_module._DEFAULT_DISTINCT_ROW_PARTITION_COUNT
+    )
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-3", "not-a-number"])
+def test_distinct_row_count_rejects_invalid_partition_count_env_var(
+    monkeypatch, bad_value
+):
+    monkeypatch.setenv("DUCKDB_DISTINCT_ROW_PARTITIONS", bad_value)
+    storage = DuckDBStorage(_make_dataframe())
+    try:
+        with pytest.raises(ValueError):
+            storage.distinct_row_count(lambda: 0)
+    finally:
+        storage.close()
+
+
+def test_distinct_row_count_cleans_up_its_partition_temp_directory():
+    storage = DuckDBStorage(_make_dataframe_with_many_duplicates_and_nulls())
+    try:
+        storage.distinct_row_count(lambda: 0)
+
+        # The private per-call partition directory created under this
+        # instance's own spill temp_dir must not be left behind - only
+        # DuckDB's own spill files (if any) may remain there.
+        leftover_partition_dirs = [
+            name
+            for name in os.listdir(storage._temp_dir)
+            if name.startswith("distinct_partitions_")
+        ]
+        assert leftover_partition_dirs == []
+    finally:
+        storage.close()
+
+
+def test_distinct_row_count_partition_temp_directory_removed_even_on_failure():
+    """
+    A failure partway through the partitioned computation - after the
+    COPY step has already written partition directories to disk, while
+    reading one of them back - must still clean up those directories,
+    exactly like close()'s own best-effort spill-directory removal.
+    """
+    storage = DuckDBStorage(_make_dataframe_with_many_duplicates_and_nulls())
+    original_execute_one = storage.execute_one
+
+    def _fail_once_partition_scan_starts(query, params=None):
+        if "read_parquet" in query:
+            raise RuntimeError("simulated mid-computation failure")
+        return original_execute_one(query, params)
+
+    storage.execute_one = _fail_once_partition_scan_starts
+
+    try:
+        with pytest.raises(RuntimeError):
+            storage.distinct_row_count(lambda: 0)
+
+        leftover_partition_dirs = [
+            name
+            for name in os.listdir(storage._temp_dir)
+            if name.startswith("distinct_partitions_")
+        ]
+        assert leftover_partition_dirs == []
+    finally:
+        storage.execute_one = original_execute_one
+        storage.close()
+
+
+def test_distinct_row_count_no_longer_runs_a_single_full_table_select_distinct():
+    """
+    Pins the new implementation shape directly: the exact scan is now
+    physical hash partitioning (COPY ... PARTITION_BY + per-partition
+    SELECT DISTINCT), not one full-table SELECT DISTINCT *.
+    """
+    source = inspect.getsource(
+        duckdb_storage_module.DuckDBStorage._compute_distinct_row_count_partitioned
+    )
+    assert "COPY" in source
+    assert "PARTITION_BY" in source
+    assert "hash(" in source
+    assert "SELECT DISTINCT *" in source  # still exact, just per-partition

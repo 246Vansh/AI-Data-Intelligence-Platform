@@ -38,6 +38,55 @@ def _read_duckdb_temp_root() -> str:
     return os.environ.get("DUCKDB_TEMP_ROOT") or tempfile.gettempdir()
 
 
+# Step 38: DuckDBStorage.distinct_row_count() computes the exact
+# duplicate-row scalar via one-pass physical hash partitioning (see
+# that method and _compute_distinct_row_count_partitioned() below)
+# instead of a single full-table `SELECT DISTINCT *` - the COPY step
+# below writes the dataset out to K independent Parquet partitions
+# (bucketed by `hash(row) % K`, so identical rows always land in the
+# same partition), and an exact `SELECT DISTINCT *` runs against each
+# partition independently, one partition's worth of rows at a time,
+# rather than needing the whole table's working set live at once.
+#
+# 16 is a conservative default for the current 4GB memory_limit: with
+# a roughly uniform hash distribution each partition holds on the
+# order of 1/16th of the dataset, so even a dataset large enough that
+# a single full-table `SELECT DISTINCT *` would exhaust the 4GB budget
+# shrinks, per partition, to a slice DuckDB can dedupe comfortably
+# inside that same budget - with the existing memory_limit/
+# temp_directory governance (Step 30) still standing behind each
+# partition's own scan as a spill-to-disk safety net for any
+# partition that ends up skewed larger than the 1/K average.
+#
+# Overridable via DUCKDB_DISTINCT_ROW_PARTITIONS, matching the
+# plain-env-var pattern already used for DUCKDB_MEMORY_LIMIT/
+# DUCKDB_TEMP_ROOT above.
+_DEFAULT_DISTINCT_ROW_PARTITION_COUNT = 16
+
+
+def _read_distinct_row_partition_count() -> int:
+    raw = os.environ.get("DUCKDB_DISTINCT_ROW_PARTITIONS")
+
+    if not raw:
+        return _DEFAULT_DISTINCT_ROW_PARTITION_COUNT
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "DUCKDB_DISTINCT_ROW_PARTITIONS must be a positive integer, "
+            f"got {raw!r}."
+        ) from exc
+
+    if value < 1:
+        raise ValueError(
+            "DUCKDB_DISTINCT_ROW_PARTITIONS must be a positive integer, "
+            f"got {raw!r}."
+        )
+
+    return value
+
+
 def _configure_connection_and_temp_dir(
     connection: duckdb.DuckDBPyConnection, table_name: str
 ) -> str:
@@ -140,15 +189,21 @@ class DuckDBStorage(DatasetStorage):
     Step 33: ``distinct_row_count()`` memoizes the one scalar both
     ``DuckDBProfilingEngine.basic_statistics()`` and
     ``DuckDBQualityEngine.check_quality()`` derive their duplicate-row
-    count from - the exact `SELECT COUNT(*) FROM (SELECT DISTINCT *
-    FROM table)` scan is expensive and otherwise ran twice per dataset
-    (see step32_post_governance_scalability_audit.txt). Since this
-    instance already exists exactly once per dataset and already owns
-    a lock serializing every query against its connection, that lock
-    is reused here too: whichever caller reaches this method first on
-    a fresh instance runs its own copy of the scan and caches the
+    count from - the exact distinct-row scan is expensive and
+    otherwise ran twice per dataset (see
+    step32_post_governance_scalability_audit.txt). Since this instance
+    already exists exactly once per dataset and already owns a lock
+    serializing every query against its connection, that lock is
+    reused here too: whichever caller reaches this method first on a
+    fresh instance runs its own copy of the scan and caches the
     result; a concurrent second caller blocks on the same lock and
     then reuses the cached value instead of running the scan again.
+
+    Step 38: the scan itself is no longer a single full-table `SELECT
+    COUNT(*) FROM (SELECT DISTINCT * FROM table)` - see
+    ``_compute_distinct_row_count_partitioned()`` for the one-pass
+    physical hash-partitioning replacement, which never needs the
+    whole table's working set live at once.
 
     Step 35: ``column_statistics()`` applies the exact same memoization
     pattern to the per-column non-null/distinct/min/max aggregate that
@@ -343,27 +398,111 @@ class DuckDBStorage(DatasetStorage):
 
     def distinct_row_count(self, compute) -> int:
         """
-        Return this dataset's cached exact distinct-row count, calling
-        ``compute()`` (a zero-arg callable) to obtain it only on the
-        first call for this instance.
+        Return this dataset's cached exact distinct-row count,
+        computing it only on the first call for this instance.
 
-        ``compute`` is supplied by the caller rather than hardcoded
-        here, so the actual `SELECT DISTINCT *` query text/logic stays
-        exactly where it already lives (``data_engine.profiling.
-        duckdb_profiling`` / ``data_engine.quality.duckdb_quality``),
-        unchanged - this method only adds the memoization and the
-        concurrency guard around it. See the class docstring's Step 33
-        note for why the existing per-instance lock is what makes a
-        concurrent second caller reuse the cached value instead of
-        running its own copy of the scan.
+        ``compute`` is accepted only for backward compatibility with
+        existing callers (``data_engine.profiling.duckdb_profiling`` /
+        ``data_engine.quality.duckdb_quality``, both still passing
+        their own zero-arg callable) and is otherwise ignored: as of
+        Step 38 the actual computation is always
+        ``_compute_distinct_row_count_partitioned()`` below, since the
+        one-pass hash-partitioning it performs needs this instance's
+        own table name/connection and can't be expressed as a query
+        text handed in from outside. Keeping the parameter (rather
+        than dropping it) means neither caller needed to change how it
+        calls this method. See the class docstring's Step 33 note for
+        why the existing per-instance lock is what makes a concurrent
+        second caller reuse the cached value instead of running its
+        own copy of the scan.
         """
         with self._lock:
             self._raise_if_closed()
 
             if self._distinct_row_count is None:
-                self._distinct_row_count = int(compute())
+                self._distinct_row_count = self._compute_distinct_row_count_partitioned()
 
             return self._distinct_row_count
+
+    def _compute_distinct_row_count_partitioned(self) -> int:
+        """
+        Exact distinct-row count via one-pass physical hash
+        partitioning, replacing the old single full-table `SELECT
+        COUNT(*) FROM (SELECT DISTINCT * FROM table)` scan (Step 38 -
+        see the class docstring's Step 33/38 notes).
+
+        The dataset is COPY'd to a private, per-call temporary Parquet
+        directory exactly once, bucketed by ``hash(row) % K`` into K
+        partitions (K = ``_read_distinct_row_partition_count()``).
+        Because the hash is a pure function of a row's own values,
+        two identical rows always hash identically and therefore
+        always land in the same partition - so an exact `SELECT
+        DISTINCT *` run independently against each partition, summed
+        across partitions, is exactly as correct as one `SELECT
+        DISTINCT *` over the whole table, while never needing more
+        than one partition's worth of rows live at once. A hash
+        collision between two *different* rows only ever costs a
+        partition some extra non-duplicate rows to distinguish - it
+        can never merge two distinct rows into one or split one row's
+        duplicates across partitions, so it can't produce a wrong
+        answer, only a less evenly balanced one.
+
+        Only ever called from distinct_row_count() while self._lock is
+        already held (an RLock, so the nested execute_one() calls
+        below are safe), exactly like _compute_column_statistics().
+        """
+        partition_count = _read_distinct_row_partition_count()
+        table = _quote_identifier(self._table_name)
+
+        partition_root = os.path.join(
+            self._temp_dir, f"distinct_partitions_{uuid.uuid4().hex}"
+        )
+        os.makedirs(partition_root, exist_ok=True)
+        escaped_root = partition_root.replace("'", "''")
+
+        try:
+            # __row is meant as a fresh row alias (so `hash(__row)`
+            # means "hash of the whole row"), but even if the dataset
+            # happened to have its own column literally named "__row",
+            # that would still produce a correct answer, only a
+            # differently-distributed one: identical rows always share
+            # every column's value - including one named __row - so
+            # they'd still hash identically and land in the same
+            # partition regardless of which meaning DuckDB resolves.
+            self.execute_one(
+                f"COPY (SELECT *, hash(__row) % {partition_count} "
+                f"AS __distinct_partition FROM {table} AS __row) "
+                f"TO '{escaped_root}' (FORMAT PARQUET, "
+                "PARTITION_BY (__distinct_partition), "
+                "OVERWRITE_OR_IGNORE 1)"
+            )
+
+            total = 0
+
+            for partition_index in range(partition_count):
+                partition_dir = os.path.join(
+                    partition_root, f"__distinct_partition={partition_index}"
+                )
+
+                if not os.path.isdir(partition_dir):
+                    # No row hashed into this bucket - nothing to scan.
+                    continue
+
+                escaped_glob = os.path.join(partition_dir, "*.parquet").replace(
+                    "'", "''"
+                )
+                count = self.execute_one(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT * "
+                    "EXCLUDE (__distinct_partition) "
+                    f"FROM read_parquet('{escaped_glob}')) AS distinct_partition_rows"
+                )[0]
+                total += int(count or 0)
+
+            return total
+        finally:
+            # Best-effort cleanup, same as close()'s own spill-directory
+            # removal - never turn cleanup itself into a new failure.
+            shutil.rmtree(partition_root, ignore_errors=True)
 
     def column_statistics(self) -> dict[str, ColumnStatistics]:
         """
