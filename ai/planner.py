@@ -22,7 +22,7 @@ def get_provider():
         except ImportError as exc:
             raise RuntimeError(
                 "OpenAI provider requires the 'openai' package. "
-                "Install it with 'pip install openai'."
+                "Install it with 'uv add openai'."
             ) from exc
 
     elif provider_name == "claude":
@@ -33,7 +33,7 @@ def get_provider():
         except ImportError as exc:
             raise RuntimeError(
                 "Claude provider requires the 'anthropic' package. "
-                "Install it with 'pip install anthropic'."
+                "Install it with 'uv add anthropic'."
             ) from exc
 
     else:

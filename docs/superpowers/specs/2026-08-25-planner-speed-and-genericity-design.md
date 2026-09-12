@@ -250,7 +250,7 @@ exact-question plan cache) → `plan_validator` (two new checks) →
 ## Risks / open questions for the implementer
 
 - Anthropic SDK's exact `cache_control` block shape depends on the
-  installed `anthropic` SDK version (`requirements.txt` pins
+  installed `anthropic` SDK version (`pyproject.toml` specifies
   `anthropic>=0.18.0`, a floor not a ceiling) — confirm the block
   syntax against the installed version before wiring it in.
 - `plan_executor.py` wasn't read in detail during design; confirm
