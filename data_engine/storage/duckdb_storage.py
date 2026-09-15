@@ -508,22 +508,23 @@ class DuckDBStorage(DatasetStorage):
         """
         Return this dataset's cached per-column statistics - non-null
         count, distinct count, min, and max for every column - computing
-        them via a single aggregate SQL scan over every column the
-        first time this is called for this instance, and reusing the
-        cached mapping on every later call, including from a different
-        consumer (DuckDBMetadataEngine, DuckDBProfilingEngine, or
-        DuckDBQualityEngine - see the class docstring's Step 35 note).
+        them via a small number of fused aggregate SQL scans over every
+        column the first time this is called for this instance, and
+        reusing the cached mapping on every later call, including from
+        a different consumer (DuckDBMetadataEngine,
+        DuckDBProfilingEngine, or DuckDBQualityEngine - see the class
+        docstring's Step 35 note).
 
         Unlike ``distinct_row_count()``, the query itself isn't
         supplied by the caller: metadata/profiling/quality need
         overlapping but not identical subsets of the same per-column
         statistics (profiling additionally needs min/max; metadata and
-        quality don't), so the single query that serves all three
-        regardless of which one runs first has to be the same query
-        every time - that query is built and run here, not by each
-        caller. Computing min/max unconditionally costs nothing extra:
-        DuckDB derives every aggregate in the SELECT list from the same
-        single table scan.
+        quality don't), so the same batched queries have to serve all
+        three regardless of which one runs first - those queries are
+        built and run here, not by each caller. Computing min/max
+        unconditionally costs nothing extra: DuckDB derives every
+        aggregate in a batch's SELECT list from that batch's own single
+        table scan.
 
         Reentrant through ``self.execute_one()`` while ``self._lock``
         is already held - safe only because the lock is an ``RLock``,
@@ -538,10 +539,23 @@ class DuckDBStorage(DatasetStorage):
 
             return self._column_statistics
 
+    # Step 44: number of columns fused into each _compute_column_statistics()
+    # batch query. A single query spanning every column in a wide table
+    # forces DuckDB to hold one intermediate hash-table/materialization per
+    # column simultaneously for the full scan; measured batching (Step 42/43
+    # benchmarks) fuses only this many columns' COUNT/COUNT DISTINCT/MIN/MAX
+    # per table scan, bounding that peak working set while still sharing the
+    # scan across every column in the batch (as opposed to one query per
+    # column, which would multiply the number of full-table scans instead).
+    _COLUMN_STATISTICS_BATCH_SIZE = 4
+
     def _compute_column_statistics(self) -> dict[str, ColumnStatistics]:
         """
-        Build and run the single aggregate query producing every
-        column's non-null count, distinct count, min, and max at once.
+        Build and run the fused aggregate queries producing every
+        column's non-null count, distinct count, min, and max, batching
+        ``_COLUMN_STATISTICS_BATCH_SIZE`` columns' worth of
+        COUNT/COUNT DISTINCT/MIN/MAX into each query instead of one
+        query spanning every column in the table.
 
         Only ever called from column_statistics() while self._lock is
         already held.
@@ -550,28 +564,33 @@ class DuckDBStorage(DatasetStorage):
             return {}
 
         table = _quote_identifier(self._table_name)
-        select_parts = []
-
-        for index, column in enumerate(self._columns):
-            quoted = _quote_identifier(column)
-            select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
-            select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
-            select_parts.append(f"MIN({quoted}) AS min_{index}")
-            select_parts.append(f"MAX({quoted}) AS max_{index}")
-
-        row = self.execute_one(f"SELECT {', '.join(select_parts)} FROM {table}")
-
         statistics: dict[str, ColumnStatistics] = {}
+        batch_size = self._COLUMN_STATISTICS_BATCH_SIZE
 
-        for index, column in enumerate(self._columns):
-            non_null, distinct, min_value, max_value = row[index * 4 : index * 4 + 4]
+        for batch_start in range(0, len(self._columns), batch_size):
+            batch = self._columns[batch_start : batch_start + batch_size]
+            select_parts = []
 
-            statistics[column] = ColumnStatistics(
-                non_null_count=int(non_null or 0),
-                distinct_count=int(distinct or 0),
-                min_value=min_value,
-                max_value=max_value,
-            )
+            for offset, column in enumerate(batch):
+                quoted = _quote_identifier(column)
+                select_parts.append(f"COUNT({quoted}) AS non_null_{offset}")
+                select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{offset}")
+                select_parts.append(f"MIN({quoted}) AS min_{offset}")
+                select_parts.append(f"MAX({quoted}) AS max_{offset}")
+
+            row = self.execute_one(f"SELECT {', '.join(select_parts)} FROM {table}")
+
+            for offset, column in enumerate(batch):
+                non_null, distinct, min_value, max_value = row[
+                    offset * 4 : offset * 4 + 4
+                ]
+
+                statistics[column] = ColumnStatistics(
+                    non_null_count=int(non_null or 0),
+                    distinct_count=int(distinct or 0),
+                    min_value=min_value,
+                    max_value=max_value,
+                )
 
         return statistics
 

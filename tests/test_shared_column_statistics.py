@@ -24,6 +24,8 @@ Verifies:
   - Step 33's duplicate-row sharing keeps working alongside this.
 """
 
+import datetime
+import re
 import threading
 
 import pandas as pd
@@ -277,3 +279,164 @@ def test_close_still_raises_controlled_error_for_column_statistics():
 
     with pytest.raises(RuntimeError):
         storage.column_statistics()
+
+
+# =========================================================
+# STEP 44: FUSED BATCHES OF 4 COLUMNS
+# =========================================================
+
+
+def _make_wide_mixed_type_dataframe() -> pd.DataFrame:
+    """7 columns (mixed types, each with at least one null) so a
+    batch size of 4 must split this into two fused batches: [name,
+    age, score, active] and [signup_date, event_time, all_null]."""
+    return pd.DataFrame(
+        {
+            "name": ["alice", "bob", "carol", "dave", None, "alice"],
+            "age": [25, 30, 35, 40, None, 25],
+            "score": [1.5, 2.5, 3.5, None, 5.5, 5.5],
+            "active": [True, False, True, False, None, True],
+            "signup_date": [
+                datetime.date(2024, 1, 1),
+                datetime.date(2024, 1, 2),
+                datetime.date(2024, 1, 3),
+                None,
+                datetime.date(2024, 1, 1),
+                datetime.date(2024, 1, 3),
+            ],
+            "event_time": [
+                datetime.datetime(2024, 1, 1, 10, 0),
+                datetime.datetime(2024, 1, 1, 11, 0),
+                None,
+                datetime.datetime(2024, 1, 1, 10, 0),
+                datetime.datetime(2024, 1, 2, 9, 0),
+                datetime.datetime(2024, 1, 2, 9, 0),
+            ],
+            "all_null": [None] * 6,
+        }
+    )
+
+
+def _count_select_columns(query: str) -> int:
+    return len(re.findall(r"AS non_null_\d+", query))
+
+
+def test_batching_splits_wide_table_into_fused_queries_of_four_columns():
+    storage = _SpyDuckDBStorage(_make_wide_mixed_type_dataframe())
+
+    storage.column_statistics()
+
+    # 7 columns at batch size 4 -> two fused queries, not one query per
+    # column and not one query spanning all seven columns.
+    assert len(storage.column_stats_scan_calls) == 2
+    per_batch_column_counts = [
+        _count_select_columns(query) for query in storage.column_stats_scan_calls
+    ]
+    assert per_batch_column_counts == [4, 3]
+    assert all(count <= 4 for count in per_batch_column_counts)
+
+
+def test_batching_uses_exactly_one_query_at_the_four_column_boundary():
+    df = _make_wide_mixed_type_dataframe()[["name", "age", "score", "active"]]
+    storage = _SpyDuckDBStorage(df)
+
+    storage.column_statistics()
+
+    assert len(storage.column_stats_scan_calls) == 1
+    assert _count_select_columns(storage.column_stats_scan_calls[0]) == 4
+
+
+def test_batching_splits_five_columns_into_four_plus_one():
+    df = _make_wide_mixed_type_dataframe()[
+        ["name", "age", "score", "active", "signup_date"]
+    ]
+    storage = _SpyDuckDBStorage(df)
+
+    storage.column_statistics()
+
+    per_batch_column_counts = [
+        _count_select_columns(query) for query in storage.column_stats_scan_calls
+    ]
+    assert per_batch_column_counts == [4, 1]
+
+
+def test_exact_statistics_across_mixed_types_and_nulls_with_batching():
+    storage = DuckDBStorage(_make_wide_mixed_type_dataframe())
+
+    stats = storage.column_statistics()
+
+    assert stats["name"].non_null_count == 5
+    assert stats["name"].distinct_count == 4
+    assert stats["name"].min_value == "alice"
+    assert stats["name"].max_value == "dave"
+
+    assert stats["age"].non_null_count == 5
+    assert stats["age"].distinct_count == 4
+    assert stats["age"].min_value == 25
+    assert stats["age"].max_value == 40
+
+    assert stats["score"].non_null_count == 5
+    assert stats["score"].distinct_count == 4
+    assert stats["score"].min_value == 1.5
+    assert stats["score"].max_value == 5.5
+
+    assert stats["active"].non_null_count == 5
+    assert stats["active"].distinct_count == 2
+    assert stats["active"].min_value is False
+    assert stats["active"].max_value is True
+
+    assert stats["signup_date"].non_null_count == 5
+    assert stats["signup_date"].distinct_count == 3
+    assert stats["signup_date"].min_value == datetime.date(2024, 1, 1)
+    assert stats["signup_date"].max_value == datetime.date(2024, 1, 3)
+
+    assert stats["event_time"].non_null_count == 5
+    assert stats["event_time"].distinct_count == 3
+    assert stats["event_time"].min_value == datetime.datetime(2024, 1, 1, 10, 0)
+    assert stats["event_time"].max_value == datetime.datetime(2024, 1, 2, 9, 0)
+
+    assert stats["all_null"].non_null_count == 0
+    assert stats["all_null"].distinct_count == 0
+    assert stats["all_null"].min_value is None
+    assert stats["all_null"].max_value is None
+
+
+def test_batched_statistics_match_single_query_baseline_for_same_data():
+    """Cross-checks the batched result against a hand-run single
+    all-column aggregate query (the pre-Step-44 approach), proving
+    batching didn't change any value, only how many queries compute
+    them."""
+    df = _make_wide_mixed_type_dataframe()
+    storage = DuckDBStorage(df)
+    columns = list(df.columns)
+
+    batched = storage.column_statistics()
+
+    select_parts = []
+    for index, column in enumerate(columns):
+        quoted = f'"{column}"'
+        select_parts.append(f"COUNT({quoted}) AS non_null_{index}")
+        select_parts.append(f"COUNT(DISTINCT {quoted}) AS distinct_{index}")
+        select_parts.append(f"MIN({quoted}) AS min_{index}")
+        select_parts.append(f"MAX({quoted}) AS max_{index}")
+    row = storage.execute_one(
+        f"SELECT {', '.join(select_parts)} FROM {storage.table_name}"
+    )
+
+    for index, column in enumerate(columns):
+        non_null, distinct, min_value, max_value = row[index * 4 : index * 4 + 4]
+        assert batched[column].non_null_count == int(non_null or 0)
+        assert batched[column].distinct_count == int(distinct or 0)
+        assert batched[column].min_value == min_value
+        assert batched[column].max_value == max_value
+
+
+def test_cache_still_reused_across_calls_with_wide_batched_table():
+    storage = _SpyDuckDBStorage(_make_wide_mixed_type_dataframe())
+
+    first = storage.column_statistics()
+    second = storage.column_statistics()
+
+    assert first is second
+    # Still exactly two batch queries total, not two more on the second call.
+    assert len(storage.column_stats_scan_calls) == 2
