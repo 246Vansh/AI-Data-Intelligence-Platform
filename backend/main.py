@@ -15,7 +15,11 @@ from backend.routes.dataset import (
 )
 from backend.routes.analysis import router as analysis_router
 from data_engine.dataset import Dataset
-from data_engine.dataset_manifest import find_manifest_paths, read_manifest
+from data_engine.dataset_manifest import (
+    LegacyManifestError,
+    find_manifest_paths,
+    read_manifest,
+)
 from data_engine.dataset_registry import DatasetRegistry, dataset_registry
 from data_engine.storage import DuckDBStorage
 
@@ -37,6 +41,12 @@ def _recover_datasets(
     Parquet file, an unreadable Parquet file, or a duplicate
     dataset_id is logged and that one dataset is skipped; every other
     valid dataset is still recovered.
+
+    Each recovered Dataset keeps the owner_id recorded in its
+    manifest. A legacy manifest written before ownership existed is
+    skipped with a warning rather than assigned an arbitrary owner -
+    its Parquet file and manifest are left untouched on disk so
+    ownership can be assigned deliberately later.
     """
 
     seen_ids: set[str] = set()
@@ -44,6 +54,14 @@ def _recover_datasets(
     for manifest_path in find_manifest_paths(storage_root):
         try:
             manifest = read_manifest(manifest_path)
+
+        except LegacyManifestError:
+            logger.warning(
+                "Skipping legacy manifest %r: it has no owner_id, and no "
+                "owner is assumed. Add an explicit owner_id to recover it.",
+                manifest_path,
+            )
+            continue
 
         except ValueError as exc:
             logger.error("Skipping unreadable manifest %r: %s", manifest_path, exc)
@@ -83,6 +101,7 @@ def _recover_datasets(
                 name=manifest.name,
                 dataset_id=manifest.dataset_id,
                 created_at=manifest.created_at,
+                owner_id=manifest.owner_id,
             )
         )
         seen_ids.add(manifest.dataset_id)

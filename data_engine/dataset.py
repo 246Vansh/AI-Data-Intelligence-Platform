@@ -35,6 +35,16 @@ class Dataset:
     # wants attached.
     name: str | None = None
 
+    # Identity of the user who owns this dataset, as resolved by the
+    # API layer's authentication boundary (backend.dependencies).
+    #
+    # Dataset only carries the value - it never interprets it or
+    # enforces access itself. The empty string means "unowned": the
+    # authorization boundary never grants access to an unowned
+    # dataset, so in-memory datasets built by legacy/test code paths
+    # without an owner are never reachable through owner-scoped routes.
+    owner_id: str = ""
+
     # Globally unique dataset identity.
     dataset_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 

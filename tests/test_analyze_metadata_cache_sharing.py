@@ -70,7 +70,7 @@ def isolated(monkeypatch):
 
 
 def _register(registry: DatasetRegistry, storage) -> Dataset:
-    dataset = Dataset(storage=storage)
+    dataset = Dataset(storage=storage, owner_id="dev-user")
     registry.register(dataset)
     return dataset
 

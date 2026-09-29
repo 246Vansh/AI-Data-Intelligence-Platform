@@ -36,7 +36,7 @@ def test_register_ingested_dataset_becomes_active_and_duckdb_backed(tmp_path):
     manager = DatasetManager(registry=DatasetRegistry())
     result = _ingest(tmp_path, "manager_ds", "id,amount\n1,10\n2,20\n3,30\n")
 
-    dataset = manager.register_ingested_dataset(result, filename="orders.csv")
+    dataset = manager.register_ingested_dataset(result, filename="orders.csv", owner_id="dev-user")
 
     assert dataset.dataset_id == "manager_ds"
     assert isinstance(dataset.storage, DuckDBStorage)
@@ -52,7 +52,7 @@ def test_register_ingested_dataset_is_discoverable_via_registry(tmp_path):
     manager = DatasetManager(registry=registry)
     result = _ingest(tmp_path, "manager_ds_registry", "id\n1\n2\n")
 
-    dataset = manager.register_ingested_dataset(result, filename="ids.csv")
+    dataset = manager.register_ingested_dataset(result, filename="ids.csv", owner_id="dev-user")
 
     assert registry.exists("manager_ds_registry")
     assert registry.get("manager_ds_registry") is dataset
@@ -70,7 +70,7 @@ def test_register_ingested_dataset_cleans_up_parquet_on_storage_failure(tmp_path
     )
 
     with pytest.raises(RuntimeError, match="simulated storage build failure"):
-        manager.register_ingested_dataset(result, filename="orders.csv")
+        manager.register_ingested_dataset(result, filename="orders.csv", owner_id="dev-user")
 
     # No half-registered dataset, and the orphaned Parquet fragment is
     # scrubbed rather than left behind.

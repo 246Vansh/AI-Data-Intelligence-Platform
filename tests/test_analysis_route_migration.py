@@ -87,7 +87,7 @@ def isolated_registry(monkeypatch):
 
 
 def _register(registry: DatasetRegistry, storage, *, precomputed_metadata=None) -> Dataset:
-    dataset = Dataset(storage=storage)
+    dataset = Dataset(storage=storage, owner_id="dev-user")
 
     # Metadata generation (get_cached_on -> get_metadata) is Step 9/10
     # territory, out of scope here - pre-seed the cache so this test's

@@ -99,7 +99,7 @@ def isolated_manager(monkeypatch):
 
 
 def _register(registry: DatasetRegistry, storage, *, name="dataset.csv") -> Dataset:
-    dataset = Dataset(storage=storage, name=name)
+    dataset = Dataset(storage=storage, name=name, owner_id="dev-user")
     registry.register(dataset)
     return dataset
 
@@ -180,7 +180,7 @@ def test_duckdb_backed_preview_by_id_never_materializes_full_dataframe(isolated_
 def test_duckdb_backed_active_metadata_never_materializes_full_dataframe(isolated_manager):
     registry, manager = isolated_manager
     storage = _SpyDuckDBStorage(_make_dataframe())
-    dataset = Dataset(storage=storage, name="active.csv")
+    dataset = Dataset(storage=storage, name="active.csv", owner_id="dev-user")
     registry.register(dataset)
 
     with manager._lock:
@@ -195,7 +195,7 @@ def test_duckdb_backed_active_metadata_never_materializes_full_dataframe(isolate
 def test_duckdb_backed_active_preview_never_materializes_full_dataframe(isolated_manager):
     registry, manager = isolated_manager
     storage = _SpyDuckDBStorage(_make_dataframe())
-    dataset = Dataset(storage=storage, name="active.csv")
+    dataset = Dataset(storage=storage, name="active.csv", owner_id="dev-user")
     registry.register(dataset)
 
     with manager._lock:
@@ -285,7 +285,7 @@ def test_preview_by_id_response_schema_unchanged(isolated_manager):
 @pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
 def test_active_metadata_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv", owner_id="dev-user")
     registry.register(dataset)
 
     with manager._lock:
@@ -302,7 +302,7 @@ def test_active_metadata_route_response_schema_unchanged(isolated_manager, stora
 @pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
 def test_active_preview_route_response_schema_unchanged(isolated_manager, storage_cls):
     registry, manager = isolated_manager
-    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv")
+    dataset = Dataset(storage=storage_cls(_make_dataframe()), name="active.csv", owner_id="dev-user")
     registry.register(dataset)
 
     with manager._lock:

@@ -1,6 +1,6 @@
 """
 Dataset manifest: small JSON sidecar recording a dataset's identity
-(dataset_id, name, created_at, parquet_path) next to its Parquet
+(dataset_id, owner_id, name, created_at, parquet_path) next to its Parquet
 artifact, so that identity survives a process restart even though
 DatasetRegistry itself is in-memory only.
 
@@ -17,9 +17,23 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+class LegacyManifestError(ValueError):
+    """
+    Raised by read_manifest() for a manifest written before dataset
+    ownership existed (no "owner_id" field).
+
+    A distinct ValueError subclass so startup recovery can report it
+    explicitly rather than as generic corruption - and so no caller is
+    ever tempted to guess an owner for it. Such a dataset is left
+    untouched on disk and simply not registered until its ownership is
+    assigned deliberately.
+    """
+
+
 @dataclass
 class DatasetManifest:
     dataset_id: str
+    owner_id: str
     name: str | None
     created_at: datetime
     parquet_path: str
@@ -42,18 +56,24 @@ def write_manifest(
     created_at: datetime,
     parquet_path: str,
     storage_root: str,
+    owner_id: str,
 ) -> str:
     """
     Write dataset_id's manifest. Returns the path written.
 
-    Raises on any I/O failure - the caller (DatasetManager) is
-    responsible for rollback.
+    Raises ValueError for a missing owner_id - a persisted dataset must
+    always record who owns it. Raises on any I/O failure - the caller
+    (DatasetManager) is responsible for rollback.
     """
+    if not isinstance(owner_id, str) or not owner_id:
+        raise ValueError("Cannot write a dataset manifest without an owner_id.")
+
     os.makedirs(storage_root, exist_ok=True)
     path = manifest_path_for(dataset_id, storage_root)
 
     payload = {
         "dataset_id": dataset_id,
+        "owner_id": owner_id,
         "name": name,
         "created_at": created_at.isoformat(),
         "parquet_path": parquet_path,
@@ -71,7 +91,8 @@ def read_manifest(path: str) -> DatasetManifest:
 
     Raises ValueError for invalid JSON or a missing/malformed required
     field - callers (startup recovery) treat this as "skip", never as
-    fatal.
+    fatal. A manifest with no "owner_id" at all raises the more
+    specific LegacyManifestError; no owner is ever invented for it.
     """
     with open(path, "r", encoding="utf-8") as fh:
         try:
@@ -100,12 +121,20 @@ def read_manifest(path: str) -> DatasetManifest:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Manifest has invalid created_at: {path}") from exc
 
+    if "owner_id" not in payload:
+        raise LegacyManifestError(f"Legacy manifest has no owner_id: {path}")
+
+    owner_id = payload["owner_id"]
+    if not isinstance(owner_id, str) or not owner_id:
+        raise ValueError(f"Manifest has invalid owner_id: {path}")
+
     name = payload.get("name")
     if name is not None and not isinstance(name, str):
         raise ValueError(f"Manifest has invalid name: {path}")
 
     return DatasetManifest(
         dataset_id=dataset_id,
+        owner_id=owner_id,
         name=name,
         created_at=created_at,
         parquet_path=parquet_path,

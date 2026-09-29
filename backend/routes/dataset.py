@@ -2,12 +2,14 @@ import os
 import tempfile
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from pathlib import Path
 
 from backend.dependencies import (
+    AuthenticatedUser,
+    authorize_dataset,
+    get_current_user,
     get_current_dataset,
-    get_current_dataset_name,
     has_dataset_loaded,
 )
 from data_engine.dataset import Dataset
@@ -15,7 +17,7 @@ from data_engine.dataset_manager import (
     dataset_manager,
     get_cached_on_dataset,
 )
-from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
+from data_engine.dataset_registry import dataset_registry
 from data_engine.ingestion import ingest_to_parquet
 from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata_engine import metadata_for_dataset
@@ -49,25 +51,59 @@ def require_dataset():
     return get_current_dataset()
 
 
-def resolve_dataset(dataset_id: str) -> Dataset:
+def resolve_dataset(
+    dataset_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Dataset:
     """
-    Resolve dataset_id to its Dataset via the registry, or raise a
-    clean, controlled 404 - the API-layer translation of
-    DatasetRegistry's framework-free DatasetNotFoundError. Any
-    dataset_id that doesn't currently resolve to a registered
-    dataset (malformed, never issued, or already deleted) gets the
-    same controlled response; the registry itself never needs to
-    know HTTP exists.
+    FastAPI dependency: resolve dataset_id to a Dataset the
+    authenticated user owns, or raise a clean, controlled 404.
+
+    Ownership is enforced by backend.dependencies.authorize_dataset -
+    the one shared authorization boundary - against this module's
+    registry. Any dataset_id that doesn't resolve to a dataset owned
+    by the caller (malformed, never issued, already deleted, or owned
+    by someone else) gets the same controlled response; the registry
+    itself never needs to know HTTP or users exist.
     """
+
+    return authorize_dataset(dataset_registry, dataset_id, user)
+
+
+def resolve_active_dataset(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Dataset:
+    """
+    FastAPI dependency for the legacy no-dataset_id routes: return the
+    process-global active dataset only if the authenticated user owns
+    it.
+
+    Ownership is enforced by the same authorize_dataset() check the
+    /{dataset_id}/... routes use. When the active dataset belongs to
+    someone else (or to no one), the caller gets exactly the "nothing
+    uploaded yet" 404 - not authorize_dataset()'s per-id 404, whose
+    detail would echo the other user's dataset_id - so the response
+    never reveals that another user's dataset is active.
+
+    Returns the Dataset object itself, never a DataFrame, and callers
+    compute on that object directly so a concurrent change of the
+    active pointer can't swap in a dataset that was never authorized.
+    """
+
+    no_dataset = HTTPException(
+        status_code=404,
+        detail="No dataset has been uploaded yet.",
+    )
+
+    if not has_dataset_loaded():
+        raise no_dataset
 
     try:
-        return dataset_registry.get(dataset_id)
+        active = dataset_manager.get_active_dataset()
+        return authorize_dataset(dataset_registry, active.dataset_id, user)
 
-    except DatasetNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No dataset found for dataset_id: {dataset_id!r}",
-        ) from exc
+    except (RuntimeError, HTTPException) as exc:
+        raise no_dataset from exc
 
 
 # =========================================================
@@ -118,7 +154,10 @@ PARQUET_STORAGE_ROOT = os.path.join("data", "uploads")
 
 
 @router.post("/upload")
-def upload_dataset(file: UploadFile = File(...)):
+def upload_dataset(
+    file: UploadFile = File(...),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Upload a CSV dataset and make it the active dataset.
 
@@ -228,6 +267,7 @@ def upload_dataset(file: UploadFile = File(...)):
         dataset = dataset_manager.register_ingested_dataset(
             ingestion_result,
             filename=file.filename,
+            owner_id=user.user_id,
         )
 
         return {
@@ -314,38 +354,34 @@ def _legacy_profile_from_stats(stats: dict) -> dict:
 
 
 @router.get("/profile")
-def get_dataset_profile():
+def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): that helper's return value
     # (get_current_dataset()) unconditionally materializes the active
     # dataset's full DataFrame via dataset_manager.get_dataframe() -
-    # exactly the raw-record pull this route no longer needs. Only the
-    # cheap "is anything loaded" gate check is wanted here.
-    if not has_dataset_loaded():
-        raise HTTPException(
-            status_code=404,
-            detail="No dataset has been uploaded yet.",
-        )
+    # exactly the raw-record pull this route no longer needs.
+    # resolve_active_dataset() only resolves the Dataset object and
+    # checks the caller owns it.
 
-    stats = dataset_manager.get_cached_dataset_aware(
+    stats = get_cached_on_dataset(
+        dataset,
         "basic_statistics",
         basic_statistics_for_dataset,
     )
 
     return {
         **_legacy_profile_from_stats(stats),
-        "filename": get_current_dataset_name(),
+        "filename": dataset.name,
     }
 
 
 @router.get("/{dataset_id}/profile")
-def get_dataset_profile_by_id(dataset_id: str):
+def get_dataset_profile_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /profile, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
     """
 
-    dataset = resolve_dataset(dataset_id)
 
     stats = get_cached_on_dataset(
         dataset,
@@ -365,35 +401,23 @@ def get_dataset_profile_by_id(dataset_id: str):
 
 
 @router.get("/preview")
-def get_dataset_preview():
+def get_dataset_preview(dataset: Dataset = Depends(resolve_active_dataset)):
 
-    # Not require_dataset(): that helper's return value
-    # (get_current_dataset()) unconditionally materializes the active
-    # dataset's full DataFrame via dataset_manager.get_dataframe() -
-    # exactly the raw-record pull this route no longer needs. Only the
-    # cheap "is anything loaded" gate check is wanted here.
-    if not has_dataset_loaded():
-        raise HTTPException(
-            status_code=404,
-            detail="No dataset has been uploaded yet.",
-        )
-
-    dataset = dataset_manager.get_active_dataset()
+    # Not require_dataset(): see get_dataset_profile() above.
 
     return {
-        "filename": get_current_dataset_name(),
+        "filename": dataset.name,
         **preview_dataset(dataset),
     }
 
 
 @router.get("/{dataset_id}/preview")
-def get_dataset_preview_by_id(dataset_id: str):
+def get_dataset_preview_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /preview, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
     """
 
-    dataset = resolve_dataset(dataset_id)
 
     return {
         "filename": dataset.name,
@@ -407,30 +431,24 @@ def get_dataset_preview_by_id(dataset_id: str):
 
 
 @router.get("/quality")
-def get_dataset_quality():
+def get_dataset_quality(dataset: Dataset = Depends(resolve_active_dataset)):
 
-    # Not require_dataset(): see get_dataset_preview() above - only
-    # the cheap "is anything loaded" gate check is wanted here.
-    if not has_dataset_loaded():
-        raise HTTPException(
-            status_code=404,
-            detail="No dataset has been uploaded yet.",
-        )
+    # Not require_dataset(): see get_dataset_profile() above.
 
-    return dataset_manager.get_cached_dataset_aware(
+    return get_cached_on_dataset(
+        dataset,
         "quality",
         check_quality_for_dataset,
     )
 
 
 @router.get("/{dataset_id}/quality")
-def get_dataset_quality_by_id(dataset_id: str):
+def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /quality, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
     """
 
-    dataset = resolve_dataset(dataset_id)
 
     return get_cached_on_dataset(
         dataset,
@@ -445,30 +463,24 @@ def get_dataset_quality_by_id(dataset_id: str):
 
 
 @router.get("/metadata")
-def get_dataset_metadata():
+def get_dataset_metadata(dataset: Dataset = Depends(resolve_active_dataset)):
 
-    # Not require_dataset(): see get_dataset_preview() above - only
-    # the cheap "is anything loaded" gate check is wanted here.
-    if not has_dataset_loaded():
-        raise HTTPException(
-            status_code=404,
-            detail="No dataset has been uploaded yet.",
-        )
+    # Not require_dataset(): see get_dataset_profile() above.
 
-    return dataset_manager.get_cached_dataset_aware(
+    return get_cached_on_dataset(
+        dataset,
         "metadata",
         metadata_for_dataset,
     )
 
 
 @router.get("/{dataset_id}/metadata")
-def get_dataset_metadata_by_id(dataset_id: str):
+def get_dataset_metadata_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /metadata, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
     """
 
-    dataset = resolve_dataset(dataset_id)
 
     return get_cached_on_dataset(
         dataset,
@@ -504,34 +516,34 @@ def _dataset_summary(dataset: Dataset) -> dict:
 
 
 @router.get("")
-def list_datasets():
+def list_datasets(user: AuthenticatedUser = Depends(get_current_user)):
     """
-    List every dataset currently registered, independent of the
-    active dataset.
+    List every registered dataset owned by the authenticated user,
+    independent of the active dataset.
     """
 
     return {
         "datasets": [
             _dataset_summary(dataset)
             for dataset in dataset_registry.list()
+            if dataset.owner_id and dataset.owner_id == user.user_id
         ]
     }
 
 
 @router.get("/{dataset_id}")
-def get_dataset_by_id(dataset_id: str):
+def get_dataset_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Return registry-level metadata for a single dataset without
     materializing its DataFrame.
     """
 
-    dataset = resolve_dataset(dataset_id)
 
     return _dataset_summary(dataset)
 
 
 @router.delete("/{dataset_id}")
-def delete_dataset(dataset_id: str):
+def delete_dataset(dataset: Dataset = Depends(resolve_dataset)):
     """
     Remove a dataset from the registry and release everything it
     holds: the registry entry, its storage's resources (e.g. a
@@ -553,9 +565,11 @@ def delete_dataset(dataset_id: str):
     is cleared too, so DatasetManager never keeps resolving to a
     dataset that no longer exists in the registry. Deleting a dataset
     that isn't the active one leaves the active pointer untouched.
+
+    Only the dataset's owner may delete it (see resolve_dataset()).
     """
 
-    resolve_dataset(dataset_id)
+    dataset_id = dataset.dataset_id
 
     dataset_registry.delete(dataset_id)
     dataset_manager.clear_dataset(dataset_id)

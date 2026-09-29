@@ -43,7 +43,7 @@ def test_manifest_written_on_dataset_creation(tmp_path):
     manager = DatasetManager(registry=registry)
 
     result = _ingest(tmp_path)
-    dataset = manager.register_ingested_dataset(result, filename="d.csv")
+    dataset = manager.register_ingested_dataset(result, filename="d.csv", owner_id="dev-user")
 
     manifest_path = manifest_path_for(dataset.dataset_id, str(tmp_path))
     assert os.path.exists(manifest_path)
@@ -63,7 +63,7 @@ def test_manifest_removed_on_dataset_deletion(tmp_path):
     manager = DatasetManager(registry=registry)
 
     result = _ingest(tmp_path)
-    dataset = manager.register_ingested_dataset(result, filename="d.csv")
+    dataset = manager.register_ingested_dataset(result, filename="d.csv", owner_id="dev-user")
     manifest_path = manifest_path_for(dataset.dataset_id, str(tmp_path))
 
     assert os.path.exists(manifest_path)
@@ -82,7 +82,7 @@ def test_startup_recovery_reregisters_dataset(tmp_path):
     manager = DatasetManager(registry=registry)
 
     result = _ingest(tmp_path)
-    original = manager.register_ingested_dataset(result, filename="d.csv")
+    original = manager.register_ingested_dataset(result, filename="d.csv", owner_id="dev-user")
 
     fresh_registry = DatasetRegistry()  # simulates a new process
     _recover_datasets(storage_root=str(tmp_path), registry=fresh_registry)
@@ -115,6 +115,7 @@ def test_recovery_skips_missing_parquet(tmp_path):
         created_at=datetime.now(timezone.utc),
         parquet_path=str(tmp_path / "ds-missing.parquet"),  # never created
         storage_root=str(tmp_path),
+        owner_id="dev-user",
     )
 
     registry = DatasetRegistry()
@@ -136,6 +137,7 @@ def test_recovery_skips_corrupt_parquet(tmp_path):
         created_at=datetime.now(timezone.utc),
         parquet_path=str(parquet_path),
         storage_root=str(tmp_path),
+        owner_id="dev-user",
     )
 
     registry = DatasetRegistry()
@@ -152,7 +154,7 @@ def test_recovery_preserves_dataset_id_and_created_at(tmp_path):
     manager = DatasetManager(registry=registry)
 
     result = _ingest(tmp_path, dataset_id="ds-fixed-id")
-    original = manager.register_ingested_dataset(result, filename="d.csv")
+    original = manager.register_ingested_dataset(result, filename="d.csv", owner_id="dev-user")
 
     fresh_registry = DatasetRegistry()
     _recover_datasets(storage_root=str(tmp_path), registry=fresh_registry)

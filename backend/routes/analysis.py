@@ -1,13 +1,18 @@
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from data_engine.performance import measure
 from data_engine.json_safety import sanitize_json, sanitize_records
 
+from backend.dependencies import (
+    AuthenticatedUser,
+    authorize_dataset,
+    get_current_user,
+)
 from data_engine.dataset_manager import get_cached_on_dataset
-from data_engine.dataset_registry import dataset_registry, DatasetNotFoundError
+from data_engine.dataset_registry import dataset_registry
 from data_engine.metadata_engine import metadata_for_dataset
 
 from data_engine.plan_validator import validate_plan
@@ -94,6 +99,7 @@ class AnalysisRequest(BaseModel):
 @router.post("")
 def analyze_dataset(
     request: AnalysisRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
 ):
     timings = {}
 
@@ -122,14 +128,11 @@ def analyze_dataset(
             "dataset_loading",
             timings,
         ):
-            try:
-                dataset = dataset_registry.get(request.dataset_id)
-
-            except DatasetNotFoundError as exc:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No dataset found for dataset_id: {request.dataset_id!r}",
-                ) from exc
+            dataset = authorize_dataset(
+                dataset_registry,
+                request.dataset_id,
+                user,
+            )
 
     except HTTPException:
         raise

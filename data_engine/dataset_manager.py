@@ -117,6 +117,8 @@ class DatasetManager:
         self,
         result: IngestionResult,
         filename: str | None = None,
+        *,
+        owner_id: str,
     ) -> Dataset:
         """
         Register a dataset already produced by bounded-memory ingestion
@@ -143,6 +145,9 @@ class DatasetManager:
         itself is removed before the exception is re-raised - the
         same deterministic cleanup ``ingest_to_parquet`` applies to
         its own failures.
+
+        `owner_id` is required: it is recorded on the Dataset and
+        persisted in its manifest, so ownership survives a restart.
         """
 
         try:
@@ -156,6 +161,7 @@ class DatasetManager:
             storage=storage,
             name=filename,
             dataset_id=result.dataset_id,
+            owner_id=owner_id,
         )
 
         try:
@@ -165,6 +171,7 @@ class DatasetManager:
                 created_at=dataset.created_at,
                 parquet_path=result.parquet_path,
                 storage_root=os.path.dirname(result.parquet_path),
+                owner_id=dataset.owner_id,
             )
 
         except Exception:
