@@ -134,7 +134,7 @@ def test_upload_flow_streams_through_ingest_to_parquet_and_registers(
         calls.append(kwargs)
         return ingest_to_parquet(**kwargs)
 
-    monkeypatch.setattr(dataset_route, "ingest_to_parquet", _spy_ingest)
+    monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _spy_ingest)
 
     response = _upload(filename="orders.csv")
 

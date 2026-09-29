@@ -72,7 +72,7 @@ def test_upload_invokes_ingest_to_parquet(isolated_registry, monkeypatch):
         calls.append(kwargs)
         return ingest_to_parquet(**kwargs)
 
-    monkeypatch.setattr(dataset_route, "ingest_to_parquet", _spy_ingest)
+    monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _spy_ingest)
 
     response = _upload()
 
@@ -116,7 +116,7 @@ def test_ingestion_failure_registers_nothing_and_raises_http_error(isolated_regi
     def _failing_ingest(**kwargs):
         raise RuntimeError("simulated ingestion failure")
 
-    monkeypatch.setattr(dataset_route, "ingest_to_parquet", _failing_ingest)
+    monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _failing_ingest)
 
     response = _upload()
 

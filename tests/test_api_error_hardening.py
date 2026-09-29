@@ -204,7 +204,7 @@ def test_clarification_still_returns_422_with_message(
 def test_upload_unexpected_error_is_generic_and_logged(
     upload_registry, monkeypatch, caplog
 ):
-    monkeypatch.setattr(dataset_route, "ingest_to_parquet", _raise_secret)
+    monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _raise_secret)
 
     with caplog.at_level(logging.ERROR, logger=dataset_route.logger.name):
         response = _upload()

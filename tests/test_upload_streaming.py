@@ -203,7 +203,7 @@ def test_temp_upload_file_removed_after_ingestion_failure(isolated_registry, mon
     def _failing_ingest(**kwargs):
         raise RuntimeError("simulated ingestion failure")
 
-    monkeypatch.setattr(dataset_route, "ingest_to_parquet", _failing_ingest)
+    monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _failing_ingest)
 
     before = _leftover_tmp_files()
 

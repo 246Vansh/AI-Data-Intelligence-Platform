@@ -5,7 +5,6 @@ import tempfile
 import uuid
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
-from pathlib import Path
 
 from backend.dependencies import (
     AuthenticatedUser,
@@ -20,7 +19,7 @@ from data_engine.dataset_manager import (
     get_cached_on_dataset,
 )
 from data_engine.dataset_registry import dataset_registry
-from data_engine.ingestion import ingest_to_parquet
+from data_engine.connectors import ConnectorValidationError, CSVConnector
 from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata_engine import metadata_for_dataset
 from data_engine.quality import check_quality_for_dataset
@@ -203,11 +202,12 @@ def upload_dataset(
             detail="No file was provided.",
         )
 
-    if Path(filename).suffix.lower() != ".csv":
-        raise HTTPException(
-            status_code=400,
-            detail="Only CSV files are currently supported.",
-        )
+    # Reject a non-CSV name before any of the body is read. What counts
+    # as a CSV source is owned by CSVConnector, not by this route.
+    try:
+        CSVConnector.check_filename(filename)
+    except ConnectorValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Step 24: the HTTP body is never accumulated into one in-memory
     # bytes object. It is copied, in fixed-size chunks, straight to a
@@ -234,19 +234,12 @@ def upload_dataset(
             if not chunk:
                 break
 
-            # A CSV is text. Null bytes are the cheapest signal that
-            # this is actually a binary file wearing a ".csv"
-            # extension (the CSV parser would otherwise fail deep
-            # inside its C implementation with a much more confusing
-            # error). Only the first chunk is checked, matching the
-            # original whole-buffer check's effective behavior.
+            # Check the first chunk as it arrives, so a binary file
+            # wearing a ".csv" extension is rejected without copying
+            # the rest of its body (CSVConnector owns the check itself).
             if first_chunk:
                 first_chunk = False
-                if b"\x00" in chunk:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="The uploaded file does not look like a text CSV file.",
-                    )
+                CSVConnector.check_leading_bytes(chunk)
 
             total_bytes += len(chunk)
 
@@ -260,16 +253,13 @@ def upload_dataset(
 
         tmp_file.close()
 
-        if total_bytes == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded CSV file is empty.",
-            )
+        connector = CSVConnector(tmp_path, filename=filename)
+        connector.validate()
 
         # Stream straight to Parquet through the bounded-memory
-        # ingestion pipeline (data_engine.ingestion.ingest_to_parquet)
-        # instead of parsing the bytes into a full Pandas DataFrame
-        # here. The dataset_id is minted up front because
+        # ingestion pipeline (CSVConnector.ingest delegates to
+        # data_engine.ingestion.ingest_to_parquet) instead of parsing
+        # the bytes into a full Pandas DataFrame here. The dataset_id is minted up front because
         # ingest_to_parquet names its output "{dataset_id}.parquet" -
         # DatasetManager then registers the Dataset under that same
         # id, so the registry entry and the on-disk Parquet file always
@@ -285,12 +275,10 @@ def upload_dataset(
         # dataset_id yet - that's unchanged in this step.
         dataset_id = str(uuid.uuid4())
 
-        with open(tmp_path, "rb") as source_stream:
-            ingestion_result = ingest_to_parquet(
-                source_stream=source_stream,
-                dataset_id=dataset_id,
-                storage_root=PARQUET_STORAGE_ROOT,
-            )
+        ingestion_result = connector.ingest(
+            dataset_id=dataset_id,
+            storage_root=PARQUET_STORAGE_ROOT,
+        )
 
         dataset = dataset_manager.register_ingested_dataset(
             ingestion_result,
@@ -308,6 +296,9 @@ def upload_dataset(
 
     except HTTPException:
         raise
+
+    except ConnectorValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except Exception as exc:
         logger.exception("Dataset upload failed")
