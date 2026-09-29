@@ -96,6 +96,24 @@ confirm batching only changes performance, not correctness. Runs
 alongside (not instead of) the existing per-size ops; when the flag is
 omitted, no batched op runs and every other op's behavior is unchanged.
 
+STEP 48 - ``--certify`` is an opt-in capacity-certification mode. It
+runs exactly the same ops as a normal run (only ``--cert-op-timeouts``
+can change a worker's timeout ceiling) and then adds a
+``capacity_certification`` section to the report: machine/library
+metadata, the configured thresholds, one record per (row count,
+operation) classified ``validated``/``stress``/``failed`` (timeout,
+OOM, worker crash, disk, correctness, infrastructure, or other
+operation error - classified from the error text the harness already
+records; correctness from invariants on already-recorded values), and
+a per-schema summary of empirical certification results (highest row
+count with every required op validated, highest with no failure, first
+failure, and per-op highest-validated/first-failed row counts). These
+describe this run only and are not a statement of supported capacity.
+Without ``--certify`` the run and report are unchanged. Example:
+    python scripts/run_scale_benchmark.py --certify --wide-schema
+        --sizes 1000000,10000000 --cert-heavy-warn-s 600
+        --cert-op-timeouts quality=1800,column_statistics=1800,generate_synthetic_csv=1800
+
 STEP 38A - DuckDB memory/spill governance (Step 30) is exercised for
 every DuckDB-backed worker op: each gets its own isolated spill
 directory under ``--duckdb-temp-root`` (default: system temp dir) and
@@ -141,6 +159,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.csv as pa_csv
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -211,6 +230,41 @@ _NOTE_WORD_POOL = [
     "sample", "test", "production", "staging", "batch", "stream", "queue",
     "sync", "async", "cached",
 ]
+
+# Pre-built once at import time (not per chunk/call) so the wide-schema
+# generator below can populate its low/mid-cardinality string columns
+# via ``pyarrow.compute.take`` - selecting straight into an Arrow
+# string array from a numpy integer index - instead of building a
+# numpy string array via ``rng.choice`` and then converting *that* to
+# Arrow. ``Generator.choice(pool, size=n)`` on a 1-D pool with the
+# default ``replace=True`` and no ``p`` is documented/verified to be
+# exactly ``pool_array[rng.integers(0, len(pool), size=n)]`` - same
+# RNG draws, same resulting values - so swapping in
+# ``rng.integers(...)`` + ``pc.take`` below changes neither the random
+# stream nor any generated value, only how the already-chosen values
+# are materialized into Arrow.
+_PA_STATUS_POOL = pa.array(STATUS_POOL, type=pa.string())
+_PA_REGION_POOL = pa.array(REGION_POOL, type=pa.string())
+_PA_TIER_POOL = pa.array(TIER_POOL, type=pa.string())
+_PA_CHANNEL_POOL = pa.array(CHANNEL_POOL, type=pa.string())
+_PA_ZIP_POOL = pa.array(ZIP_POOL, type=pa.string())
+_PA_NOTE_WORD_POOL = pa.array(_NOTE_WORD_POOL, type=pa.string())
+_PA_CONSTANT_FLAG = pa.array([CONSTANT_FLAG_VALUE], type=pa.string())
+
+
+def _take_pooled_choice(rng: np.random.Generator, pool_size: int, pa_pool: pa.Array, n: int) -> pa.Array:
+    """Equivalent to ``pa.array(rng.choice(pool, size=n), type=pa.string())``
+    for a 1-D ``pool`` of length ``pool_size`` (``pa_pool`` is that same
+    pool, pre-converted to an Arrow string array) - consumes the RNG
+    identically to ``Generator.choice`` and selects the exact same
+    values, but returns an Arrow array directly via ``pc.take`` instead
+    of round-tripping through a numpy fixed-width unicode array, which
+    is materially slower for ``pyarrow.array()`` to convert.
+    """
+
+    indices = rng.integers(0, pool_size, size=n)
+    return pc.take(pa_pool, pa.array(indices, type=pa.int64()))
+
 
 WIDE_SYNTHETIC_SCHEMA = pa.schema(
     [
@@ -344,12 +398,24 @@ def generate_synthetic_csv(
     free-text column), several numeric columns (with an intentional
     IQR outlier fraction in ``discount_pct``), low/mid-cardinality
     categoricals, date/timestamp columns, nullable values on several
-    columns (via pyarrow's ``mask=`` so they land as true SQL NULLs,
-    not NaN), and a near-unique ``record_uuid``. ``row_id``,
-    ``category``, ``amount``, ``is_active``, and ``event_time`` are
-    generated exactly as in the narrow schema so the existing
-    AnalysisPlan-based benchmark ops (which reference ``amount``/
-    ``category``) stay valid against a wide-schema dataset too.
+    columns (via pyarrow's ``mask=``/``pc.if_else`` so they land as
+    true SQL NULLs, not NaN), and a near-unique ``record_uuid``.
+    ``row_id``, ``category``, ``amount``, ``is_active``, and
+    ``event_time`` are generated exactly as in the narrow schema so
+    the existing AnalysisPlan-based benchmark ops (which reference
+    ``amount``/``category``) stay valid against a wide-schema dataset
+    too.
+
+    The wide schema's string columns are RNG-identical to a
+    straightforward ``numpy`` implementation (same
+    ``Generator.integers``/``Generator.choice``-equivalent draws, in
+    the same order, so byte-identical output for a given (num_rows,
+    seed, chunk_size)) but are materialized via
+    ``pyarrow.compute`` (``take``/``binary_join_element_wise``/
+    ``if_else``) directly into Arrow arrays instead of via
+    ``numpy.char``/object-dtype arrays that ``pyarrow.array()`` then
+    has to convert - this is what makes generation at 250M rows
+    materially faster without changing any generated value.
     """
 
     rng = np.random.default_rng(seed)
@@ -383,35 +449,64 @@ def generate_synthetic_csv(
                     schema=SYNTHETIC_SCHEMA,
                 )
             else:
-                row_id_str = row_id.astype(str)
+                # ``row_id_str_pa`` is the Arrow-native equivalent of
+                # ``row_id.astype(str)`` - reused below by every column
+                # that concatenates text onto the row id.
+                row_id_str_pa = pc.cast(pa.array(row_id, type=pa.int64()), pa.string())
 
                 # Near-unique: row_id makes every value distinct, a
                 # random suffix keeps it looking like a real token
                 # rather than a bare integer restated as a string.
-                record_uuid = np.char.add(
-                    np.char.add("rid-", row_id_str),
-                    np.char.add("-", rng.integers(0, 1_000_000, size=n).astype(str)),
+                # Built with ``pyarrow.compute`` (cast + element-wise
+                # join) instead of ``numpy.char.add`` chains over
+                # ``row_id.astype(str)`` - same "rid-<row_id>-<suffix>"
+                # value for every row, materially faster to produce at
+                # scale. The RNG draw itself (``rng.integers(0,
+                # 1_000_000, size=n)``) is unchanged, so the random
+                # stream this consumes is identical either way.
+                suffix_str_pa = pc.cast(
+                    pa.array(rng.integers(0, 1_000_000, size=n), type=pa.int64()),
+                    pa.string(),
+                )
+                record_uuid = pc.binary_join_element_wise(
+                    "rid-", row_id_str_pa, "-", suffix_str_pa, ""
                 )
 
-                status = rng.choice(STATUS_POOL, size=n)
-                region = rng.choice(REGION_POOL, size=n)
-                tier = rng.choice(TIER_POOL, size=n)
-                channel = rng.choice(CHANNEL_POOL, size=n)
-                zip_code = rng.choice(ZIP_POOL, size=n)
-                constant_flag = np.full(n, CONSTANT_FLAG_VALUE, dtype=object)
+                # See ``_take_pooled_choice`` - equivalent to
+                # ``pa.array(rng.choice(POOL, size=n), type=pa.string())``,
+                # same RNG consumption and values, faster Arrow build.
+                status = _take_pooled_choice(rng, len(STATUS_POOL), _PA_STATUS_POOL, n)
+                region = _take_pooled_choice(rng, len(REGION_POOL), _PA_REGION_POOL, n)
+                tier = _take_pooled_choice(rng, len(TIER_POOL), _PA_TIER_POOL, n)
+                channel = _take_pooled_choice(rng, len(CHANNEL_POOL), _PA_CHANNEL_POOL, n)
+                zip_code = _take_pooled_choice(rng, len(ZIP_POOL), _PA_ZIP_POOL, n)
+                # Constant column, built by taking the same (only)
+                # element ``n`` times rather than materializing an
+                # object-dtype numpy array of ``n`` repeated Python
+                # string references first.
+                constant_flag = pc.take(
+                    _PA_CONSTANT_FLAG,
+                    pa.array(np.zeros(n, dtype=np.int64), type=pa.int64()),
+                )
 
                 # High-cardinality strings keyed off row_id (fully
                 # vectorized, no per-row Python loop).
-                customer_name = np.char.add("customer_", row_id_str)
-                email = np.char.add(np.char.add("user", row_id_str), "@example.com")
+                customer_name = pc.binary_join_element_wise(
+                    "customer_", row_id_str_pa, ""
+                )
+                email = pc.binary_join_element_wise(
+                    "user", row_id_str_pa, "@example.com", ""
+                )
 
                 word_indices = rng.integers(0, len(_NOTE_WORD_POOL), size=(n, 5))
-                words = np.array(_NOTE_WORD_POOL)[word_indices]
-                free_text_note = words[:, 0]
-                for col in range(1, words.shape[1]):
-                    free_text_note = np.char.add(
-                        np.char.add(free_text_note, " "), words[:, col]
+                word_columns = [
+                    pc.take(
+                        _PA_NOTE_WORD_POOL,
+                        pa.array(word_indices[:, col], type=pa.int64()),
                     )
+                    for col in range(word_indices.shape[1])
+                ]
+                free_text_note = pc.binary_join_element_wise(*word_columns, " ")
 
                 quantity = rng.integers(1, 500, size=n).astype(np.int64)
                 unit_price = rng.uniform(1, 1_000, size=n)
@@ -450,24 +545,36 @@ def generate_synthetic_csv(
                 null_signup_date = rng.random(n) < 0.04
                 null_last_login = rng.random(n) < 0.10
 
+                # ``customer_name``/``email``/``free_text_note`` are
+                # already Arrow arrays (built via
+                # ``binary_join_element_wise`` above), so their null
+                # pattern is applied with ``pc.if_else`` rather than
+                # ``pa.array(..., mask=...)`` - verified equivalent to
+                # the previous numpy-array-plus-mask construction for
+                # the same boolean mask.
+                _null_string = pa.scalar(None, type=pa.string())
+                customer_name = pc.if_else(
+                    pa.array(null_customer_name), _null_string, customer_name
+                )
+                email = pc.if_else(pa.array(null_email), _null_string, email)
+                free_text_note = pc.if_else(
+                    pa.array(null_free_text), _null_string, free_text_note
+                )
+
                 batch = pa.record_batch(
                     [
                         pa.array(row_id, type=pa.int64()),
-                        pa.array(record_uuid, type=pa.string()),
+                        record_uuid,
                         pa.array(category, type=pa.string()),
-                        pa.array(status, type=pa.string()),
-                        pa.array(region, type=pa.string()),
-                        pa.array(tier, type=pa.string()),
-                        pa.array(channel, type=pa.string()),
-                        pa.array(zip_code, type=pa.string()),
-                        pa.array(constant_flag, type=pa.string()),
-                        pa.array(
-                            customer_name, type=pa.string(), mask=null_customer_name
-                        ),
-                        pa.array(email, type=pa.string(), mask=null_email),
-                        pa.array(
-                            free_text_note, type=pa.string(), mask=null_free_text
-                        ),
+                        status,
+                        region,
+                        tier,
+                        channel,
+                        zip_code,
+                        constant_flag,
+                        customer_name,
+                        email,
+                        free_text_note,
                         pa.array(amount, type=pa.float64()),
                         pa.array(quantity, type=pa.int64(), mask=null_quantity),
                         pa.array(unit_price, type=pa.float64()),
@@ -1344,6 +1451,477 @@ def _disk_has_room(path: str, rows: int, wide: bool = False) -> bool:
     return free > needed
 
 
+# =========================================================
+# STEP 48 - Capacity certification (opt-in, --certify). Pure
+# post-processing of the ``report["results"]`` rows the harness above
+# already produces: no new worker op, query, or production call. Each
+# row is classified VALIDATED/STRESS/FAILED against the configured
+# thresholds, and a per-schema summary of *empirical certification
+# results* is derived from those classifications. Nothing here asserts
+# a supported capacity - it only restates what this run observed on
+# this machine under this configuration.
+# =========================================================
+
+CERT_VALIDATED = "validated"
+CERT_STRESS = "stress"
+CERT_FAILED = "failed"
+
+DEFAULT_CERT_INTERACTIVE_WARN_S = 5.0
+DEFAULT_CERT_HEAVY_WARN_S = 300.0
+DEFAULT_CERT_MAX_RSS_RATIO = 0.75
+
+# Operation name (as recorded in report["results"]) -> class. The
+# class picks which warning-time threshold applies: "interactive" ops
+# use --cert-interactive-warn-s, "heavy"/"diagnostic" ops use
+# --cert-heavy-warn-s, "infrastructure" ops (synthetic data
+# generation - benchmark scaffolding, not a platform operation) get no
+# time threshold, only failure/correctness classification.
+CERT_OPERATION_CLASSES = {
+    "generate_synthetic_csv": "infrastructure",
+    "ingest_to_parquet": "heavy",
+    "duckdb_global_agg": "interactive",
+    "duckdb_grouped_agg": "interactive",
+    "duckdb_filter": "interactive",
+    "duckdb_sort_limit": "interactive",
+    "basic_statistics": "heavy",
+    "quality": "heavy",
+    "duplicate_detection": "heavy",
+    "column_statistics": "heavy",
+    "quality_iqr": "heavy",
+    "column_statistics_batched": "diagnostic",
+    "column_statistics_breakdown": "diagnostic",
+    "quality_iqr_breakdown": "diagnostic",
+    "pandas_global_agg": "diagnostic",
+    "pandas_grouped_agg": "diagnostic",
+    "pandas_filter": "diagnostic",
+    "pandas_sort_limit": "diagnostic",
+    "pandas_basic_statistics": "diagnostic",
+}
+
+# The ops every size runs through the current single-node DuckDB
+# production path - the set "all required operations VALIDATED" is
+# evaluated over. Opt-in diagnostics and the legacy Pandas baseline are
+# recorded and classified but are not required.
+CERT_REQUIRED_OPERATIONS = (
+    "ingest_to_parquet",
+    "duckdb_global_agg",
+    "duckdb_grouped_agg",
+    "duckdb_filter",
+    "duckdb_sort_limit",
+    "basic_statistics",
+    "quality",
+    "duplicate_detection",
+    "column_statistics",
+    "quality_iqr",
+)
+
+# Upper bounds on AnalysisPlan result rows implied by _build_plan and
+# the synthetic generator (20 categories; sort_limit's limit=10).
+_CERT_PLAN_RESULT_ROWS = {
+    "global_agg": (1, 1),
+    "filter": (1, 1),
+    "grouped_agg": (1, len(CATEGORY_POOL)),
+    "sort_limit": (1, 10),
+}
+
+
+def _physical_ram_bytes() -> Optional[int]:
+    """Best-effort total physical RAM of this machine (no psutil)."""
+
+    if sys.platform == "win32":
+        try:
+            import ctypes.wintypes as wintypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", wintypes.DWORD),
+                    ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MemoryStatusEx)]
+            kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except Exception:
+            return None
+        return None
+
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, ValueError, OSError):
+        pass
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5
+            )
+            return int(out.stdout.strip())
+        except Exception:
+            return None
+    return None
+
+
+def _library_version(module_name: str) -> Optional[str]:
+    try:
+        module = __import__(module_name)
+        return str(getattr(module, "__version__", None))
+    except Exception:
+        return None
+
+
+def _environment_metadata(args, physical_ram: Optional[int]) -> dict:
+    import platform
+
+    return {
+        "os": platform.platform(),
+        "os_system": platform.system(),
+        "os_release": platform.release(),
+        "cpu": {
+            "processor": platform.processor() or None,
+            "machine": platform.machine(),
+            "logical_cpu_count": os.cpu_count(),
+        },
+        "physical_ram_bytes": physical_ram,
+        "python_version": sys.version.split()[0],
+        "python_implementation": platform.python_implementation(),
+        "duckdb_version": _library_version("duckdb"),
+        "pyarrow_version": pa.__version__,
+        "pandas_version": _library_version("pandas"),
+        "duckdb_memory_limit": args.duckdb_memory_limit,
+        "duckdb_temp_root": args.duckdb_temp_root,
+        "schema": "wide" if args.wide_schema else "narrow",
+    }
+
+
+def _parse_cert_op_timeouts(raw: Optional[str]) -> dict:
+    """Parse ``name=seconds,name=seconds`` into ``{name: float}``."""
+
+    timeouts: dict[str, float] = {}
+    if not raw:
+        return timeouts
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, value = item.partition("=")
+        name = name.strip()
+        if not sep or name not in CERT_OPERATION_CLASSES:
+            raise ValueError(
+                f"invalid --cert-op-timeouts entry {item!r}; expected "
+                f"name=seconds with name in {sorted(CERT_OPERATION_CLASSES)}"
+            )
+        timeouts[name] = float(value)
+    return timeouts
+
+
+def _classify_failure(error: Optional[str]) -> str:
+    """Map a worker/orchestrator error string to a failure kind.
+
+    Only inspects the error text ``_run_subprocess_op``/``_run_worker``
+    already record - order matters: an OOM that crashes the worker
+    surfaces as "produced no result" with the OOM text in its stderr
+    tail, so OOM/disk are checked before the generic crash case.
+    """
+
+    text = (error or "").lower()
+    if "timed out" in text:
+        return "timeout"
+    if any(
+        marker in text
+        for marker in (
+            "out of memory",
+            "outofmemory",
+            "memoryerror",
+            "cannot allocate",
+            "bad_alloc",
+            "failed to allocate",
+        )
+    ):
+        return "oom"
+    if any(
+        marker in text
+        for marker in (
+            "no space left",
+            "not enough space on the disk",
+            "disk full",
+            "ioexception",
+            "io error",
+        )
+    ):
+        return "disk"
+    if "worker produced no result" in text:
+        return "worker_crash"
+    if text.startswith("not run:"):
+        return "infrastructure"
+    return "operation_error"
+
+
+def _correctness_failures(row: dict, column_count: int) -> list[str]:
+    """Invariant checks over values the harness already records.
+
+    No new query is run: these compare recorded row counts/spy counters
+    against properties guaranteed by the synthetic generator (``row_id``
+    is unique, so the data has no duplicate rows and every row-count
+    result must equal the requested size) and by ``_build_plan``.
+    """
+
+    size = row["size"]
+    op = row["operation"]
+    extra = row.get("extra") or {}
+    result_rows = row.get("result_rows")
+    failures = []
+
+    to_df = extra.get("to_dataframe_calls")
+    if row.get("engine") == "duckdb" and to_df:
+        failures.append(f"storage.to_dataframe() called {to_df} time(s)")
+
+    if op in (
+        "generate_synthetic_csv",
+        "ingest_to_parquet",
+        "basic_statistics",
+        "duplicate_detection",
+        "pandas_basic_statistics",
+    ) and result_rows != size:
+        failures.append(f"row count {result_rows} != requested size {size}")
+
+    if op in ("basic_statistics", "duplicate_detection", "quality"):
+        dupes = extra.get("duplicate_rows")
+        if dupes:
+            failures.append(f"duplicate_rows={dupes} on data with unique row_id")
+
+    if op in ("column_statistics", "column_statistics_batched") and (
+        result_rows != column_count
+    ):
+        failures.append(f"column statistics for {result_rows} != {column_count} columns")
+
+    if op == "column_statistics_batched":
+        row_id_stats = (extra.get("per_column") or {}).get("row_id") or {}
+        if row_id_stats and (
+            row_id_stats.get("non_null_count") != size
+            or row_id_stats.get("distinct_count") != size
+        ):
+            failures.append(f"row_id non-null/distinct counts != {size}: {row_id_stats}")
+
+    for prefix in ("duckdb_", "pandas_"):
+        kind = op[len(prefix):] if op.startswith(prefix) else None
+        if kind in _CERT_PLAN_RESULT_ROWS:
+            low, high = _CERT_PLAN_RESULT_ROWS[kind]
+            if result_rows is None or not (low <= result_rows <= high):
+                failures.append(
+                    f"plan result rows {result_rows} outside expected [{low}, {high}]"
+                )
+
+    return failures
+
+
+def _certify_row(row: dict, thresholds: dict, physical_ram: Optional[int], column_count: int) -> dict:
+    op = row["operation"]
+    op_class = CERT_OPERATION_CLASSES.get(op, "diagnostic")
+    extra = row.get("extra") or {}
+    peak_rss = row.get("peak_rss_bytes")
+    spill_bytes = row.get("spill_bytes")
+    elapsed = row.get("elapsed_s")
+
+    record = {
+        "row_count": row["size"],
+        "operation": op,
+        "operation_class": op_class,
+        "required": op in CERT_REQUIRED_OPERATIONS,
+        "status": None,
+        "elapsed_s": elapsed,
+        "peak_rss_bytes": peak_rss,
+        "peak_rss_ratio": (
+            peak_rss / physical_ram if peak_rss is not None and physical_ram else None
+        ),
+        "spill_bytes": spill_bytes,
+        "spill_file_count": extra.get("spill_file_count"),
+        "timeout_s": thresholds["timeouts_used"].get((row["size"], op)),
+        "failure_kind": None,
+        "failure_reason": None,
+        "stress_reasons": [],
+    }
+
+    if not row.get("ok"):
+        record["status"] = CERT_FAILED
+        record["failure_kind"] = _classify_failure(row.get("error"))
+        record["failure_reason"] = row.get("error")
+        return record
+
+    correctness = _correctness_failures(row, column_count)
+    if correctness:
+        record["status"] = CERT_FAILED
+        record["failure_kind"] = "correctness"
+        record["failure_reason"] = "; ".join(correctness)
+        return record
+
+    stress = record["stress_reasons"]
+    warn_s = {
+        "interactive": thresholds["interactive_warn_s"],
+        "heavy": thresholds["heavy_warn_s"],
+        "diagnostic": thresholds["heavy_warn_s"],
+    }.get(op_class)
+    if warn_s is not None and elapsed is not None and elapsed >= warn_s:
+        stress.append(f"elapsed {elapsed:.2f}s >= {op_class} warning {warn_s:.2f}s")
+    ratio = record["peak_rss_ratio"]
+    if ratio is not None and ratio >= thresholds["max_rss_ratio"]:
+        stress.append(
+            f"peak RSS {ratio:.3f} of physical RAM >= {thresholds['max_rss_ratio']:.3f}"
+        )
+    max_spill = thresholds["max_spill_bytes"]
+    if max_spill is not None and spill_bytes is not None and spill_bytes > max_spill:
+        stress.append(f"spill {spill_bytes} bytes > {max_spill} bytes")
+
+    record["status"] = CERT_STRESS if stress else CERT_VALIDATED
+    return record
+
+
+def _build_capacity_certification(
+    report: dict, args, thresholds: dict, physical_ram: Optional[int]
+) -> dict:
+    schema_name = "wide" if args.wide_schema else "narrow"
+    column_count = len(WIDE_SYNTHETIC_SCHEMA if args.wide_schema else SYNTHETIC_SCHEMA)
+
+    records = [
+        _certify_row(row, thresholds, physical_ram, column_count)
+        for row in report["results"]
+    ]
+
+    # A size whose generation/ingestion failed stops the per-size loop
+    # before the remaining required ops run; record those as FAILED
+    # (infrastructure, blocked upstream) rather than silently absent.
+    # Sizes never started (time budget / disk pre-flight) are listed
+    # separately as untested - they carry no observation either way.
+    tested_sizes = sorted({r["row_count"] for r in records})
+    for size in tested_sizes:
+        present = {r["operation"] for r in records if r["row_count"] == size}
+        upstream = next(
+            (
+                r
+                for r in records
+                if r["row_count"] == size
+                and r["operation"] in ("generate_synthetic_csv", "ingest_to_parquet")
+                and r["status"] == CERT_FAILED
+            ),
+            None,
+        )
+        for op in CERT_REQUIRED_OPERATIONS:
+            if op in present:
+                continue
+            reason = (
+                f"not run: upstream {upstream['operation']} failed"
+                if upstream
+                else "not run: operation missing from results"
+            )
+            records.append(
+                {
+                    "row_count": size,
+                    "operation": op,
+                    "operation_class": CERT_OPERATION_CLASSES[op],
+                    "required": True,
+                    "status": CERT_FAILED,
+                    "elapsed_s": None,
+                    "peak_rss_bytes": None,
+                    "peak_rss_ratio": None,
+                    "spill_bytes": None,
+                    "spill_file_count": None,
+                    "timeout_s": None,
+                    "failure_kind": "infrastructure",
+                    "failure_reason": reason,
+                    "stress_reasons": [],
+                }
+            )
+
+    untested_sizes = [s for s in report["sizes_requested"] if s not in tested_sizes]
+
+    def _statuses(size, required_only):
+        return [
+            r["status"]
+            for r in records
+            if r["row_count"] == size and (r["required"] or not required_only)
+        ]
+
+    all_required_validated = [
+        s for s in tested_sizes if all(x == CERT_VALIDATED for x in _statuses(s, True))
+    ]
+    no_failure = [
+        s for s in tested_sizes if CERT_FAILED not in _statuses(s, False)
+    ]
+    any_failure = [s for s in tested_sizes if CERT_FAILED in _statuses(s, False)]
+
+    per_operation: dict[str, dict] = {}
+    for r in records:
+        entry = per_operation.setdefault(
+            r["operation"],
+            {
+                "required": r["required"],
+                "highest_validated_row_count": None,
+                "first_failed_row_count": None,
+                "first_failure_kind": None,
+                "status_by_row_count": {},
+            },
+        )
+        entry["status_by_row_count"][str(r["row_count"])] = r["status"]
+        if r["status"] == CERT_VALIDATED and (
+            entry["highest_validated_row_count"] is None
+            or r["row_count"] > entry["highest_validated_row_count"]
+        ):
+            entry["highest_validated_row_count"] = r["row_count"]
+        if r["status"] == CERT_FAILED and (
+            entry["first_failed_row_count"] is None
+            or r["row_count"] < entry["first_failed_row_count"]
+        ):
+            entry["first_failed_row_count"] = r["row_count"]
+            entry["first_failure_kind"] = r["failure_kind"]
+
+    records.sort(key=lambda r: (r["row_count"], r["operation"]))
+
+    return {
+        "note": (
+            "Empirical certification results for this machine, configuration, "
+            "and synthetic schema only. They record what was observed in this "
+            "run; they are not a statement of supported capacity."
+        ),
+        "environment": _environment_metadata(args, physical_ram),
+        "thresholds": {
+            "interactive_warn_s": thresholds["interactive_warn_s"],
+            "heavy_warn_s": thresholds["heavy_warn_s"],
+            "max_rss_ratio": thresholds["max_rss_ratio"],
+            "max_spill_bytes": thresholds["max_spill_bytes"],
+            "op_timeout_s": args.op_timeout,
+            "per_operation_timeout_s": thresholds["per_op_timeouts"],
+        },
+        "required_operations": list(CERT_REQUIRED_OPERATIONS),
+        "records": records,
+        "summary_by_schema": {
+            schema_name: {
+                "tested_row_counts": tested_sizes,
+                "untested_row_counts": untested_sizes,
+                "cap_reached": report.get("cap_reached"),
+                "highest_row_count_all_required_validated": (
+                    max(all_required_validated) if all_required_validated else None
+                ),
+                "highest_row_count_no_operation_failed": (
+                    max(no_failure) if no_failure else None
+                ),
+                "first_row_count_any_operation_failed": (
+                    min(any_failure) if any_failure else None
+                ),
+                "per_operation": per_operation,
+            }
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -1430,6 +2008,55 @@ def main() -> int:
         "default: the system temp directory).",
     )
     parser.add_argument(
+        "--certify",
+        action="store_true",
+        help="STEP 48 opt-in: add a 'capacity_certification' section to the "
+        "report classifying every recorded operation as validated/stress/"
+        "failed against the --cert-* thresholds, with machine metadata and a "
+        "per-schema summary of empirical certification results. Omitting this "
+        "flag leaves the run and report unchanged.",
+    )
+    parser.add_argument(
+        "--cert-interactive-warn-s",
+        type=float,
+        default=DEFAULT_CERT_INTERACTIVE_WARN_S,
+        help="(--certify) Elapsed seconds at/above which an interactive "
+        "AnalysisPlan op (duckdb_global_agg/grouped_agg/filter/sort_limit) is "
+        "classified STRESS.",
+    )
+    parser.add_argument(
+        "--cert-heavy-warn-s",
+        type=float,
+        default=DEFAULT_CERT_HEAVY_WARN_S,
+        help="(--certify) Elapsed seconds at/above which a heavy op (ingestion, "
+        "profiling, quality, duplicates, column statistics, IQR, diagnostics) "
+        "is classified STRESS.",
+    )
+    parser.add_argument(
+        "--cert-max-rss-ratio",
+        type=float,
+        default=DEFAULT_CERT_MAX_RSS_RATIO,
+        help="(--certify) Peak worker RSS as a fraction of physical RAM at/above "
+        "which an op is classified STRESS.",
+    )
+    parser.add_argument(
+        "--cert-max-spill-bytes",
+        type=int,
+        default=None,
+        help="(--certify) DuckDB spill bytes above which an op is classified "
+        "STRESS (0 = any spill is STRESS). Default: no spill threshold (spill "
+        "is still recorded).",
+    )
+    parser.add_argument(
+        "--cert-op-timeouts",
+        default=None,
+        help="(--certify) Optional per-operation timeout overrides as "
+        "'name=seconds,...' using report operation names (e.g. "
+        "'quality=1200,duckdb_filter=60'). Includes generate_synthetic_csv, "
+        "e.g. 'generate_synthetic_csv=1800' for large sizes. Unlisted ops use "
+        "--op-timeout; all remain bounded by the remaining --time-budget.",
+    )
+    parser.add_argument(
         "--out",
         default=os.path.join(REPO_ROOT, "scripts", "benchmark_report.json"),
         help="Where to write the JSON report.",
@@ -1439,6 +2066,19 @@ def main() -> int:
     if args.worker:
         _run_worker(args.op, json.loads(args.args), args.result_file)
         return 0
+
+    try:
+        cert_op_timeouts = _parse_cert_op_timeouts(args.cert_op_timeouts) if args.certify else {}
+    except ValueError as exc:
+        parser.error(str(exc))
+    # (size, operation) -> timeout actually passed to that worker, so a
+    # certification record can state the ceiling it was held to.
+    timeouts_used: dict[tuple[int, str], float] = {}
+
+    def _op_timeout(size: int, operation: str, remaining: float) -> float:
+        timeout = min(cert_op_timeouts.get(operation, args.op_timeout), remaining)
+        timeouts_used[(size, operation)] = timeout
+        return timeout
 
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
     workdir = tempfile.mkdtemp(prefix="scale_bench_")
@@ -1471,7 +2111,7 @@ def main() -> int:
             storage_root = os.path.join(size_dir, "storage")
 
             remaining = max(60.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "generate_synthetic_csv", remaining)
 
             gen = _run_subprocess_op(
                 "gen_csv",
@@ -1504,7 +2144,7 @@ def main() -> int:
                 break
 
             remaining = max(60.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "ingest_to_parquet", remaining)
             ing = _run_subprocess_op(
                 "ingest",
                 {
@@ -1541,7 +2181,7 @@ def main() -> int:
 
             for kind in ("global_agg", "grouped_agg", "filter", "sort_limit"):
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(args.op_timeout, remaining)
+                op_timeout = _op_timeout(size, f"duckdb_{kind}", remaining)
                 res = _run_duckdb_op(
                     "duckdb",
                     {"parquet_path": parquet_path, "kind": kind},
@@ -1571,7 +2211,7 @@ def main() -> int:
                 )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "basic_statistics", remaining)
             prof = _run_duckdb_op(
                 "duckdb_profile",
                 {"parquet_path": parquet_path},
@@ -1602,7 +2242,7 @@ def main() -> int:
             )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "quality", remaining)
             qual = _run_duckdb_op(
                 "duckdb_quality",
                 {"parquet_path": parquet_path},
@@ -1637,7 +2277,7 @@ def main() -> int:
             )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "duplicate_detection", remaining)
             dupes = _run_duckdb_op(
                 "duckdb_duplicates",
                 {"parquet_path": parquet_path},
@@ -1668,7 +2308,7 @@ def main() -> int:
             )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "column_statistics", remaining)
             colstats = _run_duckdb_op(
                 "duckdb_column_statistics",
                 {"parquet_path": parquet_path},
@@ -1702,7 +2342,7 @@ def main() -> int:
 
             if args.column_stat_batch_size is not None:
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(args.op_timeout, remaining)
+                op_timeout = _op_timeout(size, "column_statistics_batched", remaining)
                 colbatch = _run_duckdb_op(
                     "duckdb_column_statistics_batched",
                     {
@@ -1744,7 +2384,7 @@ def main() -> int:
                 )
 
             remaining = max(30.0, deadline - time.time())
-            op_timeout = min(args.op_timeout, remaining)
+            op_timeout = _op_timeout(size, "quality_iqr", remaining)
             iqr = _run_duckdb_op(
                 "duckdb_quality_iqr",
                 {"parquet_path": parquet_path},
@@ -1779,7 +2419,7 @@ def main() -> int:
 
             if args.column_breakdown:
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(args.op_timeout, remaining)
+                op_timeout = _op_timeout(size, "column_statistics_breakdown", remaining)
                 colbreak = _run_duckdb_op(
                     "duckdb_column_statistics_breakdown",
                     {"parquet_path": parquet_path},
@@ -1803,7 +2443,7 @@ def main() -> int:
                 )
 
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(args.op_timeout, remaining)
+                op_timeout = _op_timeout(size, "quality_iqr_breakdown", remaining)
                 iqrbreak = _run_duckdb_op(
                     "duckdb_quality_iqr_breakdown",
                     {"parquet_path": parquet_path},
@@ -1829,7 +2469,7 @@ def main() -> int:
             if size <= args.pandas_max_rows:
                 for kind in ("global_agg", "grouped_agg", "filter", "sort_limit"):
                     remaining = max(30.0, deadline - time.time())
-                    op_timeout = min(args.op_timeout, remaining)
+                    op_timeout = _op_timeout(size, f"pandas_{kind}", remaining)
                     res = _run_subprocess_op(
                         "pandas", {"csv_path": csv_path, "kind": kind}, workdir, op_timeout
                     )
@@ -1849,7 +2489,7 @@ def main() -> int:
                     )
 
                 remaining = max(30.0, deadline - time.time())
-                op_timeout = min(args.op_timeout, remaining)
+                op_timeout = _op_timeout(size, "pandas_basic_statistics", remaining)
                 pprof = _run_subprocess_op(
                     "pandas_profile", {"csv_path": csv_path}, workdir, op_timeout
                 )
@@ -1876,6 +2516,21 @@ def main() -> int:
 
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+    if args.certify:
+        report["capacity_certification"] = _build_capacity_certification(
+            report,
+            args,
+            {
+                "interactive_warn_s": args.cert_interactive_warn_s,
+                "heavy_warn_s": args.cert_heavy_warn_s,
+                "max_rss_ratio": args.cert_max_rss_ratio,
+                "max_spill_bytes": args.cert_max_spill_bytes,
+                "per_op_timeouts": cert_op_timeouts,
+                "timeouts_used": timeouts_used,
+            },
+            _physical_ram_bytes(),
+        )
 
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
