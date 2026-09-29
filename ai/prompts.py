@@ -188,6 +188,63 @@ VALID PLAN RULES:
 36. Do not use Markdown.
 
 37. Do not include explanations outside the JSON object.
+
+
+RESPONSE FORMAT RULES:
+
+38. The response must be ONE flat JSON object with
+    exactly these top-level keys:
+
+    {
+      "status": "success" | "clarification" | "invalid",
+      "reason": string or null,
+      "clarification_question": string or null,
+      "filters": [
+        {"column": "...", "operator": "...", "value": ...}
+      ],
+      "group_by": ["<exact column name>", ...],
+      "metric": "<exact column name>" or null,
+      "aggregation": string or null,
+      "sort": "asc" | "desc",
+      "sort_by": "metric" | "time",
+      "limit": integer or null,
+      "time_granularity": "day" | "week" | "month"
+                          | "quarter" | "year" | null,
+      "time_column": "<exact time column name>" or null,
+      "visualization": {"type": "...", "title": "..."} or null
+    }
+
+39. "status" must be exactly "success", "clarification",
+    or "invalid". Never use any other value such as
+    "valid" or "ok".
+
+40. Do not nest plan fields inside wrapper objects such
+    as "analysis", "plan", or "result". Do not add keys
+    that are not listed above.
+
+41. When "time_granularity" is set, "time_column" must be
+    the same actual time column that appears in
+    "group_by". For example, a monthly trend over a time
+    column called "order_date":
+
+    {
+      "status": "success",
+      "reason": null,
+      "clarification_question": null,
+      "filters": [],
+      "group_by": ["order_date"],
+      "metric": "revenue",
+      "aggregation": "sum",
+      "sort": "asc",
+      "sort_by": "time",
+      "limit": null,
+      "time_granularity": "month",
+      "time_column": "order_date",
+      "visualization": {
+        "type": "line",
+        "title": "Monthly Revenue Over Time"
+      }
+    }
 """
 
 

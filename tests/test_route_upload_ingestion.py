@@ -121,7 +121,8 @@ def test_ingestion_failure_registers_nothing_and_raises_http_error(isolated_regi
     response = _upload()
 
     assert response.status_code == 400
-    assert "simulated ingestion failure" in response.json()["detail"]
+    # Step 55: the internal exception message is logged, never echoed.
+    assert "simulated ingestion failure" not in response.json()["detail"]
 
     # No dataset was registered, and nothing became "active".
     assert isolated_registry.list() == []

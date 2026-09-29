@@ -511,26 +511,6 @@ onMounted(() => {
 
                 </div>
 
-                <!-- Analysis Context banner (Comparison / Cross-Dataset) -->
-
-                <div v-else-if="analysisMode !== 'single'"
-                    class="mb-4 flex items-center gap-2.5 rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-indigo-50 px-4 py-3 text-xs font-medium text-violet-700 shadow-sm">
-
-                    <span
-                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-100 font-bold text-violet-600">
-                        ⇄
-                    </span>
-
-                    <span>
-                        <strong class="font-bold">
-                            {{ analysisMode === 'comparison' ? 'Comparison' : 'Cross-Dataset' }} mode
-                        </strong>
-                        active · {{ selectedDatasetNames.length }} datasets:
-                        {{ selectedDatasetNames.join(', ') || 'none selected' }}
-                    </span>
-
-                </div>
-
                 <!-- Metadata loading -->
 
                 <div v-if="metadataLoading"

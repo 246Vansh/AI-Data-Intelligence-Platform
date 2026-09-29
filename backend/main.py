@@ -14,6 +14,7 @@ from backend.routes.dataset import (
     router as dataset_router,
 )
 from backend.routes.analysis import router as analysis_router
+from backend.routes.jobs import router as jobs_router
 from data_engine.dataset import Dataset
 from data_engine.dataset_manifest import (
     LegacyManifestError,
@@ -182,6 +183,7 @@ app.add_middleware(
 
 app.include_router(dataset_router)
 app.include_router(analysis_router)
+app.include_router(jobs_router)
 
 
 @app.get("/")

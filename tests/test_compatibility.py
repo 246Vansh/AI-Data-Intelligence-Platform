@@ -260,8 +260,8 @@ def test_dataset_profile_row_column_counts_and_dtypes_match_source(isolated_app)
     # DuckDB-backed dataset built from the same source must still
     # agree with each other through the /profile route.
     df = _make_dataframe()
-    pandas_dataset = Dataset(storage=PandasStorage(df.copy()), name="pandas.csv")
-    duckdb_dataset = Dataset(storage=DuckDBStorage(df.copy()), name="duckdb.csv")
+    pandas_dataset = Dataset(storage=PandasStorage(df.copy()), name="pandas.csv", owner_id="dev-user")
+    duckdb_dataset = Dataset(storage=DuckDBStorage(df.copy()), name="duckdb.csv", owner_id="dev-user")
 
     isolated_app.register(pandas_dataset)
     isolated_app.register(duckdb_dataset)
@@ -283,8 +283,8 @@ def test_dataset_profile_row_column_counts_and_dtypes_match_source(isolated_app)
 def test_dataset_preview_schema_identical_for_pandas_and_duckdb_backed(isolated_app):
     df = _make_dataframe()
 
-    pandas_dataset = Dataset(storage=PandasStorage(df.copy()), name="pandas.csv")
-    duckdb_dataset = Dataset(storage=DuckDBStorage(df.copy()), name="duckdb.csv")
+    pandas_dataset = Dataset(storage=PandasStorage(df.copy()), name="pandas.csv", owner_id="dev-user")
+    duckdb_dataset = Dataset(storage=DuckDBStorage(df.copy()), name="duckdb.csv", owner_id="dev-user")
 
     isolated_app.register(pandas_dataset)
     isolated_app.register(duckdb_dataset)

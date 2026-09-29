@@ -1,3 +1,4 @@
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +32,9 @@ from data_engine.insight_engine import build_deterministic_insights
 from data_engine.insight_generator import build_insight_response
 
 from ai.insight_validator import validate_insights
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -138,9 +142,10 @@ def analyze_dataset(
         raise
 
     except Exception as exc:
+        logger.exception("Dataset loading failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Dataset loading failed: {exc}",
+            detail="Dataset loading failed.",
         ) from exc
 
     # =====================================================
@@ -159,9 +164,10 @@ def analyze_dataset(
             )
 
     except Exception as exc:
+        logger.exception("Metadata generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Metadata generation failed: {exc}",
+            detail="Metadata generation failed.",
         ) from exc
 
     # =====================================================
@@ -239,9 +245,10 @@ def analyze_dataset(
                     ),
                 ) from exc
 
+            logger.exception("AI planning failed")
             raise HTTPException(
                 status_code=500,
-                detail=f"AI planning failed: {exc}",
+                detail="AI planning failed.",
             ) from exc
 
     # =====================================================
@@ -278,9 +285,10 @@ def analyze_dataset(
         ) from exc
 
     except Exception as exc:
+        logger.exception("Plan validation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Plan validation failed: {exc}",
+            detail="Plan validation failed.",
         ) from exc
 
     # =====================================================
@@ -322,9 +330,10 @@ def analyze_dataset(
         ) from exc
 
     except Exception as exc:
+        logger.exception("Unexpected analysis execution error")
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected analysis execution error: {exc}",
+            detail="Unexpected analysis execution error.",
         ) from exc
 
     # =====================================================
@@ -353,8 +362,9 @@ def analyze_dataset(
         # Do not fail the actual analysis if it cannot
         # be generated.
 
+        logger.warning("Insight context generation failed", exc_info=exc)
         insight_context = {}
-        insight_error = f"Insight context generation failed: {exc}"
+        insight_error = "Insight context generation failed."
 
     else:
         insight_error = None
@@ -380,8 +390,9 @@ def analyze_dataset(
             )
 
     except Exception as exc:
+        logger.warning("Insight generation failed", exc_info=exc)
         if insight_error is None:
-            insight_error = str(exc)
+            insight_error = "Insight generation failed."
 
         # build_insight_response() may have already succeeded before
         # validate_insights() rejected the result. Discard it so a
@@ -428,9 +439,10 @@ def analyze_dataset(
                 )
 
     except Exception as exc:
+        logger.exception("Visualization generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Visualization generation failed: {exc}",
+            detail="Visualization generation failed.",
         ) from exc
 
     # =====================================================

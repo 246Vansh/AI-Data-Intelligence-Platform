@@ -46,6 +46,31 @@ ALLOWED_SORT_BY = {"metric", "time"}
 
 ALLOWED_TIME_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
+# Explicit formats for time values that DuckDB's own TIMESTAMP cast
+# does not handle correctly (it expects ISO-8601, so e.g. '11/1/2022'
+# casts to NULL). Mirrors what the pandas path accepts via
+# pd.to_datetime(format="mixed"): month-first slash/dash dates, with a
+# day-first fallback only when month-first is impossible (e.g.
+# '25/12/2022'). Two-digit-year variants come first because DuckDB's
+# %Y also consumes a 2-digit year literally ('1/5/22' -> year 0022).
+# Applied to every time column alike - never chosen per column name.
+TIME_PARSE_FORMATS = (
+    "%m/%d/%y %H:%M:%S",
+    "%m/%d/%y %H:%M",
+    "%m/%d/%y",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d/%m/%Y",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%m-%d-%Y",
+    "%d-%m-%Y",
+)
+
 # Safety net for the DuckDB analytical execution path only: applied
 # solely when a plan reaches here with no explicit limit (plan.limit
 # is None), so a high-cardinality GROUP BY can't produce an unbounded
@@ -136,10 +161,19 @@ def execute_plan_duckdb(
         time_bucket_column = plan.time_column
         quoted_time_column = _quote_identifier(plan.time_column)
 
-        bucketed_expr = (
-            f"date_trunc('{plan.time_granularity}', "
+        # TIME_PARSE_FORMATS are tried first: TRY_CAST alone misreads
+        # short slash dates as Y/M/D ('3/4/23' -> year 0003) instead of
+        # rejecting them. Native/ISO values match none of those formats
+        # and fall through to TRY_CAST unchanged. Unparseable values
+        # stay NULL and are dropped below. date_trunc('week') is
+        # Monday-based, matching pandas to_period("W").start_time.
+        parse_formats = ", ".join(f"'{fmt}'" for fmt in TIME_PARSE_FORMATS)
+        parsed_expr = (
+            f"COALESCE(TRY_STRPTIME(CAST({quoted_time_column} AS VARCHAR), "
+            f"[{parse_formats}]), "
             f"TRY_CAST({quoted_time_column} AS TIMESTAMP))"
         )
+        bucketed_expr = f"date_trunc('{plan.time_granularity}', {parsed_expr})"
 
         # Rebuild the time column in place as its bucketed value, and
         # drop rows whose value could not be parsed as a timestamp -

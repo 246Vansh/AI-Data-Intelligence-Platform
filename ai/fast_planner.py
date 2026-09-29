@@ -50,6 +50,26 @@ class FastPlanner:
         )
 
         # -------------------------------------------------
+        # 1b. Categorical equality filters
+        # ("revenue in the North region", "sales for India").
+        # An unresolvable filter phrase defers to AI.
+        # -------------------------------------------------
+
+        categorical = self._detect_categorical_filters(
+            working_question,
+            columns,
+        )
+
+        if categorical is None:
+            return None
+
+        categorical_filters, working_question = categorical
+
+        filters = filters + categorical_filters
+
+        filter_columns = {f.column for f in categorical_filters}
+
+        # -------------------------------------------------
         # 2. Check for genuinely complex unsupported logic
         # -------------------------------------------------
 
@@ -112,6 +132,11 @@ class FastPlanner:
         # More than one grouping dimension requires
         # semantic reasoning.
         if len(grouping_columns) > 1:
+            return None
+
+        # Filtering and grouping on the same column
+        # ("by region for North") needs semantic reasoning.
+        if filter_columns.intersection(grouping_columns):
             return None
 
         # -------------------------------------------------
@@ -194,6 +219,7 @@ class FastPlanner:
             column_name
             for column_name, column_info in columns.items()
             if column_name != metric
+            and column_name not in filter_columns
             and column_info.get("role")
             in {
                 "dimension",
@@ -807,6 +833,168 @@ class FastPlanner:
                         break
 
         return filters, cleaned_question
+
+    # =====================================================
+    # CATEGORICAL EQUALITY FILTERS
+    # =====================================================
+
+    _FILTER_PREPOSITION = r"(?:in|for|from|within)"
+
+    # Words that can follow a filter preposition without
+    # being a categorical value ("for each region").
+    _NON_VALUE_WORDS = {
+        "a",
+        "all",
+        "an",
+        "any",
+        "each",
+        "every",
+        "per",
+        "that",
+        "the",
+        "this",
+        "total",
+        "what",
+        "which",
+    }
+
+    def _detect_categorical_filters(
+        self,
+        question: str,
+        columns: dict[str, Any],
+    ) -> tuple[list[FilterCondition], str] | None:
+        """
+        Detect "<in|for|from|within> [the] [column] <value> [column]"
+        where <value> is a real sample value of a dimension column.
+
+        Returns (filters, question_without_filter_phrases), or None
+        when a filter phrase is present but cannot be resolved to
+        exactly one column/value - the AI planner decides then.
+        """
+
+        from data_engine.column_resolver import (
+            normalize_column_name,
+        )
+
+        dimension_columns = [
+            column_name
+            for column_name, column_info in columns.items()
+            if column_info.get("role") in {"dimension", "categorical"}
+        ]
+
+        if not dimension_columns:
+            return [], question
+
+        column_words = {normalize_column_name(name) for name in columns}
+
+        phrase_to_column = {
+            normalize_column_name(name): name for name in dimension_columns
+        }
+
+        column_alternation = "|".join(
+            r"\s+".join(re.escape(word) for word in phrase.split())
+            for phrase in sorted(phrase_to_column, key=len, reverse=True)
+            if phrase
+        )
+
+        # value (lowercase) -> {column: canonical dataset value}
+        value_owners: dict[str, dict[str, str]] = {}
+
+        for column_name in dimension_columns:
+            for value in columns[column_name].get("sample_values") or []:
+                if not isinstance(value, str):
+                    continue
+
+                text = value.strip()
+
+                if not text or normalize_column_name(text) in column_words:
+                    continue
+
+                value_owners.setdefault(text.lower(), {})[column_name] = value
+
+        filters: list[FilterCondition] = []
+        cleaned = question
+
+        for value_lower in sorted(value_owners, key=len, reverse=True):
+            value_pattern = r"\s+".join(
+                re.escape(word) for word in value_lower.split()
+            )
+
+            pattern = (
+                rf"(?<!\w){self._FILTER_PREPOSITION}\s+(?:the\s+)?"
+                rf"(?:({column_alternation})\s+)?"
+                rf"{value_pattern}"
+                rf"(?:\s+({column_alternation}))?(?!\w)"
+            )
+
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+
+            if not match:
+                continue
+
+            owners = value_owners[value_lower]
+            named_phrase = match.group(1) or match.group(2)
+
+            if named_phrase:
+                column_name = phrase_to_column.get(
+                    normalize_column_name(named_phrase)
+                )
+
+                # Named column does not contain this value.
+                if column_name not in owners:
+                    return None
+            elif len(owners) == 1:
+                column_name = next(iter(owners))
+            else:
+                # Value exists in several columns: ambiguous.
+                return None
+
+            # Two values for one column implies OR semantics.
+            if any(f.column == column_name for f in filters):
+                return None
+
+            filters.append(
+                FilterCondition(
+                    column=column_name,
+                    operator="=",
+                    value=owners[column_name],
+                )
+            )
+
+            cleaned = cleaned[: match.start()] + " " + cleaned[match.end() :]
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+        # -------------------------------------------------
+        # Remaining filter phrases that could not be
+        # resolved ("in the Mars region", "for Atlantis").
+        # -------------------------------------------------
+
+        unresolved_with_column = re.finditer(
+            rf"(?<!\w){self._FILTER_PREPOSITION}\s+(?:the\s+)?"
+            rf"([\w\-]+)\s+(?:{column_alternation})(?!\w)",
+            cleaned,
+            re.IGNORECASE,
+        )
+
+        for match in unresolved_with_column:
+            if match.group(1).lower() not in self._NON_VALUE_WORDS:
+                return None
+
+        # A capitalized word after a filter preposition reads as a
+        # proper-noun value the metadata could not confirm.
+        unresolved_proper_noun = re.finditer(
+            rf"(?<!\w)(?i:{self._FILTER_PREPOSITION})\s+"
+            rf"(?:(?i:the)\s+)?([A-Z][\w\-]*)",
+            cleaned,
+        )
+
+        for match in unresolved_proper_noun:
+            word = match.group(1).lower()
+
+            if word not in self._NON_VALUE_WORDS and word not in column_words:
+                return None
+
+        return filters, cleaned
 
     # =====================================================
     # UNSUPPORTED / COMPLEX CONDITIONS

@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 import tempfile
 import uuid
 
@@ -23,6 +25,9 @@ from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata_engine import metadata_for_dataset
 from data_engine.quality import check_quality_for_dataset
 from data_engine.preview import preview_dataset
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -153,6 +158,27 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MB
 PARQUET_STORAGE_ROOT = os.path.join("data", "uploads")
 
 
+# The client-supplied filename is untrusted display metadata only - it
+# is never used to build a filesystem path (storage is keyed by the
+# server-minted dataset_id). It is still normalized so it can't carry
+# directory components, control characters, or unbounded length into
+# the registry, logs, or API responses.
+FILENAME_MAX_LENGTH = 255
+_FILENAME_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_filename(raw: str | None) -> str:
+    name = _FILENAME_CONTROL_CHARS_RE.sub("", raw or "")
+    # Drop any client-side directory part, for both separator styles.
+    name = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+    if len(name) > FILENAME_MAX_LENGTH:
+        stem, suffix = os.path.splitext(name)
+        name = stem[: FILENAME_MAX_LENGTH - len(suffix)] + suffix
+
+    return name
+
+
 @router.post("/upload")
 def upload_dataset(
     file: UploadFile = File(...),
@@ -169,13 +195,15 @@ def upload_dataset(
     directly would run that parse inline on the loop instead.
     """
 
-    if not file.filename:
+    filename = _sanitize_filename(file.filename)
+
+    if not filename:
         raise HTTPException(
             status_code=400,
             detail="No file was provided.",
         )
 
-    if Path(file.filename).suffix.lower() != ".csv":
+    if Path(filename).suffix.lower() != ".csv":
         raise HTTPException(
             status_code=400,
             detail="Only CSV files are currently supported.",
@@ -266,13 +294,13 @@ def upload_dataset(
 
         dataset = dataset_manager.register_ingested_dataset(
             ingestion_result,
-            filename=file.filename,
+            filename=filename,
             owner_id=user.user_id,
         )
 
         return {
             "message": "Dataset uploaded successfully.",
-            "filename": file.filename,
+            "filename": filename,
             "rows": dataset.row_count,
             "columns": dataset.column_count,
             "dataset_id": dataset.dataset_id,
@@ -282,10 +310,11 @@ def upload_dataset(
         raise
 
     except Exception as exc:
+        logger.exception("Dataset upload failed")
         raise HTTPException(
             status_code=400,
-            detail=f"Unable to load dataset: {str(exc)}",
-        )
+            detail="Unable to load dataset. Please check that the file is a valid CSV.",
+        ) from exc
 
     finally:
         # tmp_file may already be closed (the normal path above closes

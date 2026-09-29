@@ -69,8 +69,8 @@ const {
 
 const analysisModeOptions = [
     { value: ANALYSIS_MODES.SINGLE, label: ANALYSIS_MODE_LABELS[ANALYSIS_MODES.SINGLE] },
-    { value: ANALYSIS_MODES.COMPARISON, label: ANALYSIS_MODE_LABELS[ANALYSIS_MODES.COMPARISON] },
-    { value: ANALYSIS_MODES.CROSS_DATASET, label: ANALYSIS_MODE_LABELS[ANALYSIS_MODES.CROSS_DATASET] },
+    // COMPARISON / CROSS_DATASET stay defined in useAnalysisContext but are
+    // not exposed until real multi-dataset execution exists.
 ];
 
 const selectedDataset = computed(() =>
@@ -411,7 +411,7 @@ watch(
                      ANALYSIS MODE SELECTOR
                 ================================================== -->
 
-                <div class="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-slate-100 p-1">
+                <div class="mb-3 grid grid-cols-1 gap-1 rounded-xl bg-slate-100 p-1">
 
                     <button v-for="modeOption in analysisModeOptions" :key="modeOption.value" type="button"
                         @click="setAnalysisMode(modeOption.value)" :title="modeOption.label"
