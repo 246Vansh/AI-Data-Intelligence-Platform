@@ -46,8 +46,35 @@ const loading = ref(false);
 const metadataLoading = ref(false);
 
 const error = ref(null);
+const errorStatus = ref(null);
 const result = ref(null);
 const metadataError = ref(null);
+
+// Incremented on every analyze() call and whenever the question is
+// replaced/cleared, so a response from a superseded request can never
+// write into the current UI state. The HTTP request itself is not
+// cancelled.
+let analysisSeq = 0;
+
+function invalidateAnalysis() {
+    analysisSeq += 1;
+    loading.value = false;
+}
+
+// Classified from HTTP status only. 422 = the question couldn't be
+// turned into a plan (clarification / rephrase). Retrying the same
+// question can only help for network errors (no status) and 5xx other
+// than 503 (503 = AI planner not configured, a permanent condition).
+const isClarificationError = computed(() => errorStatus.value === 422);
+
+const canRetry = computed(() => {
+    const status = errorStatus.value;
+    return !status || (status >= 500 && status !== 503);
+});
+
+const hasRows = computed(
+    () => (result.value?.data?.rows?.length ?? 0) > 0,
+);
 
 const metadata = ref(null);
 
@@ -281,9 +308,11 @@ async function loadMetadata() {
 async function analyze() {
     const trimmedQuestion = question.value.trim();
 
-    if (!trimmedQuestion || loading.value) {
+    if (!trimmedQuestion || loading.value || !props.datasetId) {
         return;
     }
+
+    const seq = ++analysisSeq;
 
     // Captured so a response that resolves after the user has
     // already switched datasets can be detected and ignored below,
@@ -294,6 +323,7 @@ async function analyze() {
     try {
         loading.value = true;
         error.value = null;
+        errorStatus.value = null;
         result.value = null;
 
         // Execution still runs against a single dataset (the primary/
@@ -309,7 +339,7 @@ async function analyze() {
         const response =
             await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext);
 
-        if (requestedDatasetId !== props.datasetId) {
+        if (seq !== analysisSeq || requestedDatasetId !== props.datasetId) {
             return;
         }
 
@@ -324,7 +354,7 @@ async function analyze() {
 
         result.value = response;
     } catch (err) {
-        if (requestedDatasetId !== props.datasetId) {
+        if (seq !== analysisSeq || requestedDatasetId !== props.datasetId) {
             return;
         }
 
@@ -333,11 +363,13 @@ async function analyze() {
             err,
         );
 
+        errorStatus.value = err?.response?.status ?? null;
+
         error.value =
             getApiErrorMessage(err) ||
             "Unable to analyze dataset.";
     } finally {
-        if (requestedDatasetId === props.datasetId) {
+        if (seq === analysisSeq && requestedDatasetId === props.datasetId) {
             loading.value = false;
         }
     }
@@ -354,12 +386,15 @@ function useExample(example) {
 
     question.value = example;
     error.value = null;
+    errorStatus.value = null;
     result.value = null;
 }
 
 function clearAnalysis() {
+    invalidateAnalysis();
     question.value = "";
     error.value = null;
+    errorStatus.value = null;
     result.value = null;
 }
 
@@ -383,8 +418,11 @@ watch(
 
         question.value = newQuestion;
 
-        // Clear previous analysis when a new example is selected
+        // Clear previous analysis when a new example is selected, and
+        // drop any still-running request for the previous question.
+        invalidateAnalysis();
         error.value = null;
+        errorStatus.value = null;
         result.value = null;
 
         await nextTick();
@@ -733,30 +771,44 @@ onMounted(() => {
              ERROR
         ====================================================== -->
 
-        <div v-if="error"
-            class="relative mt-[18px] flex items-start gap-[13px] overflow-hidden rounded-[16px] border border-red-200 bg-gradient-to-r from-red-50 via-white to-orange-50 px-[18px] py-4 shadow-[0_6px_20px_rgba(239,68,68,0.07)]">
+        <div v-if="error" :class="isClarificationError
+            ? 'border-amber-200 from-amber-50 to-yellow-50 shadow-[0_6px_20px_rgba(245,158,11,0.07)]'
+            : 'border-red-200 from-red-50 to-orange-50 shadow-[0_6px_20px_rgba(239,68,68,0.07)]'
+            "
+            class="relative mt-[18px] flex items-start gap-[13px] overflow-hidden rounded-[16px] border bg-gradient-to-r via-white px-[18px] py-4">
 
-            <div class="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-red-500 to-orange-500">
+            <div :class="isClarificationError
+                ? 'from-amber-400 to-yellow-400'
+                : 'from-red-500 to-orange-500'
+                " class="absolute inset-y-0 left-0 w-1 bg-gradient-to-b">
             </div>
 
-            <div
-                class="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-red-100 to-orange-100 font-bold text-red-600">
+            <div :class="isClarificationError
+                ? 'from-amber-100 to-yellow-100 text-amber-600'
+                : 'from-red-100 to-orange-100 text-red-600'
+                "
+                class="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-full bg-gradient-to-br font-bold">
 
-                !
+                {{ isClarificationError ? "?" : "!" }}
 
             </div>
 
             <div class="min-w-0">
 
-                <strong class="mb-[3px] block text-[13px] font-bold text-red-800">
-                    Analysis failed
+                <strong :class="isClarificationError ? 'text-amber-800' : 'text-red-800'"
+                    class="mb-[3px] block text-[13px] font-bold">
+                    {{ isClarificationError ? "Couldn't answer that question" : "Analysis failed" }}
                 </strong>
 
-                <p class="m-0 text-xs leading-5 text-red-700">
+                <p :class="isClarificationError ? 'text-amber-700' : 'text-red-700'" class="m-0 text-xs leading-5">
                     {{ error }}
                 </p>
 
-                <button type="button" @click="analyze" :disabled="loading || !question.trim()"
+                <p v-if="isClarificationError" class="mt-1.5 text-[11px] leading-5 text-amber-600">
+                    Try rephrasing with specific column names, e.g. which metric to measure and what to group it by.
+                </p>
+
+                <button v-if="canRetry" type="button" @click="analyze" :disabled="loading || !question.trim()"
                     class="mt-3 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-[11px] font-bold text-red-700 shadow-sm transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50">
 
                     Try Again
@@ -812,6 +864,11 @@ onMounted(() => {
 
                             </h3>
 
+                            <p v-if="result.question" class="mt-1 truncate text-xs text-slate-500"
+                                :title="result.question">
+                                Results for: {{ result.question }}
+                            </p>
+
                             <p class="mt-1 text-xs text-slate-400">
 
                                 {{
@@ -845,9 +902,15 @@ onMounted(() => {
 
                 <AnalyticsInsights v-if="result.insights?.insights?.length" :result="result" />
 
+                <p v-if="result.insight_status === 'unavailable'" :title="result.insight_error || undefined"
+                    class="mt-4 text-[11px] text-slate-400">
+                    Insights unavailable for this result.
+                </p>
+
                 <!-- Chart -->
 
                 <div v-if="
+                    hasRows &&
                     result.visualization &&
                     result.visualization.type !== 'table'
                 "
@@ -873,7 +936,8 @@ onMounted(() => {
                 <!-- Table -->
 
                 <div v-if="
-                    result.visualization?.type === 'table'
+                    result.visualization?.type === 'table' ||
+                    (result.visualization && !hasRows)
                 "
                     class="mt-4 overflow-hidden rounded-[16px] border border-indigo-100 bg-white shadow-[0_5px_18px_rgba(79,70,229,0.04)]">
 
