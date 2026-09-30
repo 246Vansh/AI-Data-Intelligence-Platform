@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, nextTick, watch } from "vue";
+import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 
 import DatasetOverview from "./DatasetOverview.vue";
 import AnalyticsBuilder from "./AnalyticsBuilder.vue";
@@ -12,6 +12,8 @@ import {
     ANALYSIS_MODES,
     ANALYSIS_MODE_LABELS,
 } from "../composables/useAnalysisContext";
+
+import { listDatasets, onDatasetMissing } from "../services/api";
 
 // =========================================================
 // PROPS
@@ -177,6 +179,69 @@ function handleDatasetUploaded(uploadResponse) {
     // it's added to the active set.
     selectDataset(datasetId);
 }
+
+// Hydrates the sidebar from the backend registry so datasets survive
+// a page reload. Merged by dataset_id: an entry already present (e.g.
+// uploaded while this request was in flight) is kept as-is. Nothing
+// is auto-selected here.
+async function loadDatasets() {
+    try {
+        const response = await listDatasets();
+        const summaries = Array.isArray(response?.datasets) ? response.datasets : [];
+
+        for (const summary of summaries) {
+            if (!summary?.dataset_id) {
+                continue;
+            }
+
+            const alreadyListed = datasets.value.some(
+                (dataset) => dataset.dataset_id === summary.dataset_id,
+            );
+
+            if (!alreadyListed) {
+                datasets.value.push({
+                    dataset_id: summary.dataset_id,
+                    filename: summary.filename || "Uploaded dataset",
+                    rows: summary.rows,
+                    columns: summary.columns,
+                });
+            }
+        }
+    } catch (err) {
+        console.error("Dataset list error:", err);
+    }
+}
+
+// A dataset-scoped request returned 404: the dataset is gone from the
+// backend, so drop it from the list and from the selection. api.js has
+// already evicted its cached responses. Clearing selectedDatasetId
+// triggers the watcher above, which remounts every panel.
+function handleDatasetMissing(datasetId) {
+    datasets.value = datasets.value.filter(
+        (dataset) => dataset.dataset_id !== datasetId,
+    );
+
+    if (selectedDatasetIds.value.includes(datasetId)) {
+        selectedDatasetIds.value = selectedDatasetIds.value.filter(
+            (id) => id !== datasetId,
+        );
+    }
+
+    if (selectedDatasetId.value === datasetId) {
+        selectedDatasetId.value = selectedDatasetIds.value[0] || "";
+    }
+}
+
+let stopDatasetMissing = null;
+
+onMounted(() => {
+    stopDatasetMissing = onDatasetMissing(handleDatasetMissing);
+    loadDatasets();
+});
+
+onBeforeUnmount(() => {
+    stopDatasetMissing?.();
+});
 
 function setActiveSection(section) {
     activeSection.value = section;
