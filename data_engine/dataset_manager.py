@@ -15,7 +15,11 @@ from data_engine.dataset_registry import (
     dataset_registry,
 )
 from data_engine.ingestion import IngestionResult
-from data_engine.storage import PandasStorage, select_storage_for_ingestion
+from data_engine.storage import (
+    PandasStorage,
+    select_storage_for_ingestion,
+    storage_reference_for_ingestion,
+)
 
 
 def _cleanup_parquet(parquet_path: str) -> None:
@@ -169,7 +173,7 @@ class DatasetManager:
                 dataset_id=dataset.dataset_id,
                 name=dataset.name,
                 created_at=dataset.created_at,
-                parquet_path=result.parquet_path,
+                storage=storage_reference_for_ingestion(result),
                 storage_root=os.path.dirname(result.parquet_path),
                 owner_id=dataset.owner_id,
             )

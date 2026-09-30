@@ -5,7 +5,7 @@ import os
 from threading import Lock
 
 from data_engine.dataset import Dataset
-from data_engine.dataset_manifest import delete_manifest, manifest_path_for_parquet
+from data_engine.dataset_manifest import delete_manifest, manifest_path_for_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class DatasetRegistry:
                 )
 
             try:
-                delete_manifest(manifest_path_for_parquet(artifact_path))
+                delete_manifest(manifest_path_for_artifact(artifact_path))
             except OSError:
                 logger.warning(
                     "Failed to delete manifest for dataset_id=%r during deletion.",

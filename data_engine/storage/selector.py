@@ -3,6 +3,7 @@ from __future__ import annotations
 from data_engine.ingestion import IngestionResult
 from data_engine.storage.base import DatasetStorage
 from data_engine.storage.duckdb_storage import DuckDBStorage
+from data_engine.storage.reference import StorageReference
 
 
 def select_storage_for_ingestion(result: IngestionResult) -> DatasetStorage:
@@ -22,3 +23,13 @@ def select_storage_for_ingestion(result: IngestionResult) -> DatasetStorage:
     full dataset is created to get there.
     """
     return DuckDBStorage.from_parquet(result.parquet_path)
+
+
+def storage_reference_for_ingestion(result: IngestionResult) -> StorageReference:
+    """
+    The persistable StorageReference for a freshly ingested dataset -
+    what its manifest records so startup recovery can reopen it via
+    ``data_engine.storage.reference.open_storage``. Kept beside
+    select_storage_for_ingestion so both stay in step.
+    """
+    return StorageReference.parquet(result.parquet_path)

@@ -1,8 +1,13 @@
 """
 Dataset manifest: small JSON sidecar recording a dataset's identity
-(dataset_id, owner_id, name, created_at, parquet_path) next to its Parquet
+(dataset_id, owner_id, name, created_at, storage) next to its storage
 artifact, so that identity survives a process restart even though
 DatasetRegistry itself is in-memory only.
+
+`storage` is a StorageReference ({"type": ..., "location": ...}), not a
+Parquet-specific field. Manifests written before Step 58 carried a bare
+"parquet_path" instead; read_manifest() still accepts those and reads
+them as storage type "parquet" at that location.
 
 Deliberately minimal: no schema, no row counts - those are re-derived
 live from the Parquet file via DuckDBStorage.from_parquet whenever
@@ -15,6 +20,8 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
+
+from data_engine.storage.reference import StorageReference, StorageReferenceError
 
 
 class LegacyManifestError(ValueError):
@@ -36,7 +43,7 @@ class DatasetManifest:
     owner_id: str
     name: str | None
     created_at: datetime
-    parquet_path: str
+    storage: StorageReference
 
 
 def manifest_path_for(dataset_id: str, storage_root: str) -> str:
@@ -44,9 +51,12 @@ def manifest_path_for(dataset_id: str, storage_root: str) -> str:
     return os.path.join(storage_root, f"{dataset_id}.json")
 
 
-def manifest_path_for_parquet(parquet_path: str) -> str:
-    """Derive a manifest's path from its sibling Parquet artifact's path."""
-    root, _ext = os.path.splitext(parquet_path)
+def manifest_path_for_artifact(artifact_path: str) -> str:
+    """
+    Derive a manifest's path from its sibling on-disk artifact's path
+    (e.g. {dataset_id}.parquet -> {dataset_id}.json).
+    """
+    root, _ext = os.path.splitext(artifact_path)
     return f"{root}.json"
 
 
@@ -54,7 +64,7 @@ def write_manifest(
     dataset_id: str,
     name: str | None,
     created_at: datetime,
-    parquet_path: str,
+    storage: StorageReference,
     storage_root: str,
     owner_id: str,
 ) -> str:
@@ -76,7 +86,7 @@ def write_manifest(
         "owner_id": owner_id,
         "name": name,
         "created_at": created_at.isoformat(),
-        "parquet_path": parquet_path,
+        "storage": storage.to_dict(),
     }
 
     with open(path, "w", encoding="utf-8") as fh:
@@ -106,15 +116,13 @@ def read_manifest(path: str) -> DatasetManifest:
     try:
         dataset_id = payload["dataset_id"]
         created_at_raw = payload["created_at"]
-        parquet_path = payload["parquet_path"]
     except KeyError as exc:
         raise ValueError(f"Manifest missing required field {exc}: {path}") from exc
 
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"Manifest has invalid dataset_id: {path}")
 
-    if not isinstance(parquet_path, str) or not parquet_path:
-        raise ValueError(f"Manifest has invalid parquet_path: {path}")
+    storage = _read_storage_reference(payload, path)
 
     try:
         created_at = datetime.fromisoformat(created_at_raw)
@@ -137,8 +145,36 @@ def read_manifest(path: str) -> DatasetManifest:
         owner_id=owner_id,
         name=name,
         created_at=created_at,
-        parquet_path=parquet_path,
+        storage=storage,
     )
+
+
+def _read_storage_reference(payload: dict, path: str) -> StorageReference:
+    """
+    Resolve a manifest's storage reference, accepting both formats:
+      - current: "storage": {"type": ..., "location": ...}
+      - legacy (pre-Step 58): "parquet_path": "..." -> type "parquet"
+
+    A manifest carrying both is rejected as ambiguous rather than
+    silently preferring one - no writer ever produces both.
+    """
+    has_storage = "storage" in payload
+    has_legacy = "parquet_path" in payload
+
+    if has_storage and has_legacy:
+        raise ValueError(f"Manifest has both storage and parquet_path: {path}")
+
+    try:
+        if has_storage:
+            return StorageReference.from_dict(payload["storage"])
+
+        if has_legacy:
+            return StorageReference.parquet(payload["parquet_path"])
+
+    except StorageReferenceError as exc:
+        raise ValueError(f"Manifest has invalid storage reference ({exc}): {path}") from exc
+
+    raise ValueError(f"Manifest missing required field 'storage': {path}")
 
 
 def delete_manifest(path: str) -> None:

@@ -23,6 +23,7 @@ from data_engine.dataset_manager import DatasetManager
 from data_engine.dataset_manifest import manifest_path_for, write_manifest
 from data_engine.dataset_registry import DatasetRegistry
 from data_engine.ingestion import IngestionResult, ingest_to_parquet
+from data_engine.storage import StorageReference
 
 
 def _ingest(tmp_path, dataset_id="ds-1", rows=b"a,b\n1,x\n2,y\n") -> IngestionResult:
@@ -52,7 +53,7 @@ def test_manifest_written_on_dataset_creation(tmp_path):
         payload = json.load(fh)
 
     assert payload["dataset_id"] == dataset.dataset_id
-    assert payload["parquet_path"] == result.parquet_path
+    assert payload["storage"] == {"type": "parquet", "location": result.parquet_path}
 
 
 # R2 --------------------------------------------------------------
@@ -113,7 +114,7 @@ def test_recovery_skips_missing_parquet(tmp_path):
         dataset_id="ds-missing",
         name="d.csv",
         created_at=datetime.now(timezone.utc),
-        parquet_path=str(tmp_path / "ds-missing.parquet"),  # never created
+        storage=StorageReference.parquet(str(tmp_path / "ds-missing.parquet")),  # never created
         storage_root=str(tmp_path),
         owner_id="dev-user",
     )
@@ -135,7 +136,7 @@ def test_recovery_skips_corrupt_parquet(tmp_path):
         dataset_id="ds-corrupt",
         name="d.csv",
         created_at=datetime.now(timezone.utc),
-        parquet_path=str(parquet_path),
+        storage=StorageReference.parquet(str(parquet_path)),
         storage_root=str(tmp_path),
         owner_id="dev-user",
     )

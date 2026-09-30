@@ -34,7 +34,7 @@ from data_engine.dataset_manifest import (
 )
 from data_engine.dataset_registry import DatasetRegistry
 from data_engine.ingestion import ingest_to_parquet
-from data_engine.storage import PandasStorage
+from data_engine.storage import PandasStorage, StorageReference
 
 
 USER_A = "user-a"
@@ -123,7 +123,7 @@ def test_manifest_round_trip_includes_owner_id(tmp_path):
         dataset_id="ds-rt",
         name="d.csv",
         created_at=created_at,
-        parquet_path=str(tmp_path / "ds-rt.parquet"),
+        storage=StorageReference.parquet(str(tmp_path / "ds-rt.parquet")),
         storage_root=str(tmp_path),
         owner_id=USER_A,
     )
@@ -143,7 +143,7 @@ def test_write_manifest_rejects_missing_owner(tmp_path):
             dataset_id="ds-x",
             name=None,
             created_at=datetime.now(timezone.utc),
-            parquet_path=str(tmp_path / "ds-x.parquet"),
+            storage=StorageReference.parquet(str(tmp_path / "ds-x.parquet")),
             storage_root=str(tmp_path),
             owner_id="",
         )

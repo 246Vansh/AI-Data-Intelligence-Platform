@@ -1,5 +1,4 @@
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,7 +21,7 @@ from data_engine.dataset_manifest import (
     read_manifest,
 )
 from data_engine.dataset_registry import DatasetRegistry, dataset_registry
-from data_engine.storage import DuckDBStorage
+from data_engine.storage import UnsupportedStorageTypeError, open_storage
 
 
 logger = logging.getLogger(__name__)
@@ -34,14 +33,19 @@ def _recover_datasets(
 ) -> None:
     """
     Step 4 - restart durability: re-register every dataset whose
-    manifest sidecar and Parquet artifact both still exist on disk, so
+    manifest sidecar and storage artifact both still exist, so
     datasets uploaded by a prior process remain reachable after a
     restart (DatasetRegistry is otherwise in-memory only).
 
     Never raises and never fails startup - a bad manifest, a missing
     Parquet file, an unreadable Parquet file, or a duplicate
     dataset_id is logged and that one dataset is skipped; every other
-    valid dataset is still recovered.
+    valid dataset is still recovered. An unsupported or malformed
+    storage reference (Step 58) is skipped the same way.
+
+    Opening goes through data_engine.storage.open_storage, which
+    dispatches on the manifest's storage type ("parquet" ->
+    DuckDBStorage.from_parquet) - this function never branches on it.
 
     Each recovered Dataset keeps the owner_id recorded in its
     manifest. A legacy manifest written before ownership existed is
@@ -76,22 +80,23 @@ def _recover_datasets(
             )
             continue
 
-        if not os.path.exists(manifest.parquet_path):
-            logger.warning(
-                "Skipping dataset_id=%r: Parquet file missing at %r.",
-                manifest.dataset_id,
-                manifest.parquet_path,
-            )
+        try:
+            storage = open_storage(manifest.storage)
+
+        except UnsupportedStorageTypeError as exc:
+            logger.error("Skipping dataset_id=%r: %s", manifest.dataset_id, exc)
             continue
 
-        try:
-            storage = DuckDBStorage.from_parquet(manifest.parquet_path)
+        except FileNotFoundError as exc:
+            logger.warning("Skipping dataset_id=%r: %s", manifest.dataset_id, exc)
+            continue
 
         except Exception as exc:
             logger.error(
-                "Skipping dataset_id=%r: failed to open Parquet file %r: %s",
+                "Skipping dataset_id=%r: failed to open %s storage %r: %s",
                 manifest.dataset_id,
-                manifest.parquet_path,
+                manifest.storage.type,
+                manifest.storage.location,
                 exc,
             )
             continue
