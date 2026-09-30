@@ -989,7 +989,7 @@ onMounted(() => {
 
                     </div>
 
-                    <div class="w-full overflow-x-auto">
+                    <div class="max-h-[520px] w-full overflow-x-auto overflow-y-auto">
 
                         <table class="min-w-[600px] w-full border-collapse">
 
@@ -998,7 +998,7 @@ onMounted(() => {
                                 <tr>
 
                                     <th v-for="(column, columnIndex) in result.data?.columns || []" :key="column"
-                                        class="whitespace-nowrap border-b border-indigo-100 px-4 py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px]"
+                                        class="sticky top-0 z-10 whitespace-nowrap border-b border-indigo-100 px-4 py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px]"
                                         :class="[
                                             columnIndex % 4 === 0
                                                 ? 'bg-violet-50 text-violet-700'
