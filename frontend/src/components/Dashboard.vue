@@ -13,7 +13,12 @@ import {
     ANALYSIS_MODE_LABELS,
 } from "../composables/useAnalysisContext";
 
-import { listDatasets, onDatasetMissing } from "../services/api";
+import {
+    listDatasets,
+    deleteDataset,
+    getApiErrorMessage,
+    onDatasetMissing,
+} from "../services/api";
 
 // =========================================================
 // PROPS
@@ -47,6 +52,9 @@ const result = ref(null);
 // switching back and forth never loses data).
 
 const datasets = ref([]);
+
+const deletingDatasetId = ref("");
+const deleteError = ref("");
 
 // =========================================================
 // ANALYSIS CONTEXT (mode + selected dataset_ids)
@@ -140,6 +148,7 @@ watch(selectedDatasetId, (newId, oldId) => {
     question.value = "";
     error.value = null;
     result.value = null;
+    deleteError.value = "";
 });
 
 function selectDataset(datasetId) {
@@ -229,6 +238,42 @@ function handleDatasetMissing(datasetId) {
 
     if (selectedDatasetId.value === datasetId) {
         selectedDatasetId.value = selectedDatasetIds.value[0] || "";
+    }
+}
+
+// Deletes a dataset from the backend after confirmation, then reuses
+// handleDatasetMissing() for the local cleanup (list, selection, panel
+// reset). A 404 means it was already deleted elsewhere, so it's treated
+// as success. Any other failure leaves the list and selection as-is.
+async function handleDeleteDataset(dataset) {
+    deleteError.value = "";
+
+    if (deletingDatasetId.value) {
+        return;
+    }
+
+    const confirmed = window.confirm(
+        `Delete "${dataset.filename}"? This cannot be undone.`,
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    deletingDatasetId.value = dataset.dataset_id;
+
+    try {
+        await deleteDataset(dataset.dataset_id);
+        handleDatasetMissing(dataset.dataset_id);
+    } catch (err) {
+        if (err?.response?.status === 404) {
+            handleDatasetMissing(dataset.dataset_id);
+        } else {
+            console.error("Dataset delete error:", err);
+            deleteError.value = getApiErrorMessage(err);
+        }
+    } finally {
+        deletingDatasetId.value = "";
     }
 }
 
@@ -501,12 +546,15 @@ watch(
                         No datasets uploaded yet. Upload a CSV to get started.
                     </p>
 
-                    <button v-for="dataset in datasets" :key="dataset.dataset_id" type="button"
+                    <div v-for="dataset in datasets" :key="dataset.dataset_id"
+                        class="group/row flex items-center gap-1">
+
+                    <button type="button"
                         @click="selectDataset(dataset.dataset_id)" :class="isDatasetSelected(dataset.dataset_id)
                             ? 'border-violet-200 bg-gradient-to-r from-violet-50 to-indigo-50 text-violet-700'
                             : 'border-slate-100 bg-white text-slate-500 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700'
                             "
-                        class="group flex w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-all duration-200">
+                        class="group flex w-full min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-all duration-200">
 
                         <!-- Single mode: dot indicator (unchanged) -->
                         <span v-if="analysisMode === 'single'" :class="isDatasetSelected(dataset.dataset_id)
@@ -544,6 +592,24 @@ watch(
                         </span>
 
                     </button>
+
+                    <!-- Delete (sibling of the select button, never nested) -->
+                    <button type="button" :disabled="deletingDatasetId === dataset.dataset_id"
+                        @click.stop="handleDeleteDataset(dataset)" :title="`Delete ${dataset.filename}`"
+                        :aria-label="`Delete ${dataset.filename}`" :class="deletingDatasetId === dataset.dataset_id
+                            ? 'opacity-100'
+                            : 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100'
+                            "
+                        class="shrink-0 rounded-lg px-1.5 py-1.5 text-[11px] font-semibold text-slate-400 transition hover:bg-red-50 hover:text-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200 disabled:cursor-not-allowed disabled:text-slate-300">
+                        {{ deletingDatasetId === dataset.dataset_id ? '…' : '✕' }}
+                    </button>
+
+                    </div>
+
+                    <p v-if="deleteError"
+                        class="rounded-lg bg-red-50 px-2.5 py-1.5 text-[10px] leading-4 text-red-600">
+                        {{ deleteError }}
+                    </p>
 
                 </div>
 
