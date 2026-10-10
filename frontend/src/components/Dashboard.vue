@@ -18,6 +18,7 @@ import {
     deleteDataset,
     getApiErrorMessage,
     onDatasetMissing,
+    evictDatasetCache,
 } from "../services/api";
 
 // =========================================================
@@ -151,7 +152,12 @@ watch(selectedDatasetId, (newId, oldId) => {
     deleteError.value = "";
 });
 
+// Evicts the dataset's cached GETs before the selection changes, so the
+// remounted panels re-verify it with the server instead of reusing
+// responses cached before it may have been deleted elsewhere.
 function selectDataset(datasetId) {
+    evictDatasetCache(datasetId);
+
     if (analysisMode.value === ANALYSIS_MODES.SINGLE) {
         selectDatasetSingle(datasetId);
     } else {

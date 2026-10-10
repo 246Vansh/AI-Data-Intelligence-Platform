@@ -23,7 +23,7 @@ export function clearDatasetCache() {
 // Drops every cached / in-flight entry scoped to one dataset_id
 // (the `/dataset/{id}/...` URLs), leaving other datasets' entries
 // untouched.
-function evictDatasetCache(datasetId) {
+export function evictDatasetCache(datasetId) {
     const prefix = `/dataset/${datasetId}/`;
 
     for (const store of [cache, inFlight]) {
