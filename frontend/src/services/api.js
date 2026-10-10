@@ -170,9 +170,19 @@ export async function analyzeDataset(question, datasetId, analysisContext) {
         payload.analysis_context = analysisContext;
     }
 
-    const response = await api.post("/analyze", payload);
+    try {
+        const response = await api.post("/analyze", payload);
+        return response.data;
+    } catch (error) {
+        // Same dataset-missing recovery as cachedGet(), keyed on the
+        // dataset_id this request was sent for.
+        if (error?.response?.status === 404) {
+            evictDatasetCache(datasetId);
+            datasetMissingListeners.forEach((listener) => listener(datasetId));
+        }
 
-    return response.data;
+        throw error;
+    }
 }
 
 
