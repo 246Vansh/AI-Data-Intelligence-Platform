@@ -744,6 +744,34 @@ watch(
 
                 </div>
 
+                <!-- Compact dataset switcher: stands in for the sidebar's
+                     dataset list below `lg`, where the sidebar is hidden.
+                     One-way bound + selectDataset() so it follows the same
+                     selection path as the sidebar instead of writing
+                     selectedDatasetId directly. -->
+
+                <div class="px-5 pb-3 sm:px-8 lg:hidden">
+
+                    <label for="mobile-dataset-switcher" class="sr-only">
+                        Active dataset
+                    </label>
+
+                    <select id="mobile-dataset-switcher" :value="selectedDatasetId" :disabled="!datasets.length"
+                        @change="selectDataset($event.target.value)"
+                        class="w-full truncate rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-700 shadow-sm transition focus:border-violet-300 focus:outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400">
+
+                        <option value="" disabled>
+                            {{ datasets.length ? 'Select a dataset' : 'No datasets yet — upload a CSV' }}
+                        </option>
+
+                        <option v-for="dataset in datasets" :key="dataset.dataset_id" :value="dataset.dataset_id">
+                            {{ dataset.filename }}
+                        </option>
+
+                    </select>
+
+                </div>
+
             </header>
 
             <!-- =================================================
