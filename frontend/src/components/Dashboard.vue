@@ -57,6 +57,11 @@ const datasets = ref([]);
 const deletingDatasetId = ref("");
 const deleteError = ref("");
 
+// Dataset-list request state, so a failed load is not mistaken for an
+// empty registry and the empty state doesn't flash while it's pending.
+const datasetsLoading = ref(false);
+const datasetsLoadError = ref("");
+
 // =========================================================
 // ANALYSIS CONTEXT (mode + selected dataset_ids)
 // =========================================================
@@ -198,8 +203,16 @@ function handleDatasetUploaded(uploadResponse) {
 // Hydrates the sidebar from the backend registry so datasets survive
 // a page reload. Merged by dataset_id: an entry already present (e.g.
 // uploaded while this request was in flight) is kept as-is. Nothing
-// is auto-selected here.
+// is auto-selected here. A failure only sets datasetsLoadError - the
+// entries already listed are left untouched.
 async function loadDatasets() {
+    if (datasetsLoading.value) {
+        return;
+    }
+
+    datasetsLoading.value = true;
+    datasetsLoadError.value = "";
+
     try {
         const response = await listDatasets();
         const summaries = Array.isArray(response?.datasets) ? response.datasets : [];
@@ -224,6 +237,10 @@ async function loadDatasets() {
         }
     } catch (err) {
         console.error("Dataset list error:", err);
+        datasetsLoadError.value =
+            getApiErrorMessage(err) || "Unable to load datasets.";
+    } finally {
+        datasetsLoading.value = false;
     }
 }
 
@@ -547,10 +564,24 @@ watch(
 
                 <div class="mb-4 space-y-1.5">
 
-                    <p v-if="!datasets.length"
+                    <p v-if="!datasets.length && datasetsLoading"
+                        class="rounded-xl border border-dashed border-slate-200 px-3 py-3 text-[10px] leading-4 text-slate-400">
+                        Loading datasets…
+                    </p>
+
+                    <p v-else-if="!datasets.length && !datasetsLoadError"
                         class="rounded-xl border border-dashed border-slate-200 px-3 py-3 text-[10px] leading-4 text-slate-400">
                         No datasets uploaded yet. Upload a CSV to get started.
                     </p>
+
+                    <div v-if="datasetsLoadError"
+                        class="flex items-start gap-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-[10px] leading-4 text-red-600">
+                        <span class="min-w-0 flex-1">Couldn't load datasets: {{ datasetsLoadError }}</span>
+                        <button type="button" :disabled="datasetsLoading" @click="loadDatasets"
+                            class="shrink-0 font-bold underline hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-60">
+                            {{ datasetsLoading ? 'Retrying…' : 'Retry' }}
+                        </button>
+                    </div>
 
                     <div v-for="dataset in datasets" :key="dataset.dataset_id"
                         class="group/row flex items-center gap-1">
@@ -767,7 +798,13 @@ watch(
                         class="w-full truncate rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-700 shadow-sm transition focus:border-violet-300 focus:outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400">
 
                         <option value="" disabled>
-                            {{ datasets.length ? 'Select a dataset' : 'No datasets yet — upload a CSV' }}
+                            {{ datasets.length
+                                ? 'Select a dataset'
+                                : datasetsLoading
+                                    ? 'Loading datasets…'
+                                    : datasetsLoadError
+                                        ? 'Couldn\'t load datasets'
+                                        : 'No datasets yet — upload a CSV' }}
                         </option>
 
                         <option v-for="dataset in datasets" :key="dataset.dataset_id" :value="dataset.dataset_id">
@@ -775,6 +812,15 @@ watch(
                         </option>
 
                     </select>
+
+                    <div v-if="datasetsLoadError"
+                        class="mt-2 flex items-start gap-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-[10px] leading-4 text-red-600">
+                        <span class="min-w-0 flex-1">Couldn't load datasets: {{ datasetsLoadError }}</span>
+                        <button type="button" :disabled="datasetsLoading" @click="loadDatasets"
+                            class="shrink-0 font-bold underline hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-60">
+                            {{ datasetsLoading ? 'Retrying…' : 'Retry' }}
+                        </button>
+                    </div>
 
                 </div>
 
