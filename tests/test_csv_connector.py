@@ -267,9 +267,9 @@ def test_upload_ingestion_failure_cleans_up(isolated_registry, monkeypatch):
 
     response = _upload()
 
-    assert response.status_code == 400
+    assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Unable to load dataset. Please check that the file is a valid CSV."
+        "The dataset could not be saved due to a server error. Please try again later."
     )
     assert "internal ingestion detail" not in response.text
     assert isolated_registry.list() == []

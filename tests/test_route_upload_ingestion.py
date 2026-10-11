@@ -120,7 +120,10 @@ def test_ingestion_failure_registers_nothing_and_raises_http_error(isolated_regi
 
     response = _upload()
 
-    assert response.status_code == 400
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "The dataset could not be saved due to a server error. Please try again later."
+    )
     # Step 55: the internal exception message is logged, never echoed.
     assert "simulated ingestion failure" not in response.json()["detail"]
 

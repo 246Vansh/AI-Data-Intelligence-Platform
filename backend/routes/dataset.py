@@ -4,6 +4,7 @@ import re
 import tempfile
 import uuid
 
+import pyarrow as pa
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 
 from backend.dependencies import (
@@ -275,10 +276,25 @@ def upload_dataset(
         # dataset_id yet - that's unchanged in this step.
         dataset_id = str(uuid.uuid4())
 
-        ingestion_result = connector.ingest(
-            dataset_id=dataset_id,
-            storage_root=PARQUET_STORAGE_ROOT,
-        )
+        # pyarrow's CSV reader raises ArrowInvalid for content it can't
+        # parse or convert (ragged rows, invalid UTF-8, a header-only or
+        # blank body, ...) - that is the user's CSV, so it stays a 400.
+        # It is caught only around ingestion: the same exception type
+        # raised later by storage selection would mean a server-side
+        # problem with our own Parquet file, not with the upload.
+        # Filesystem/disk errors (OSError), MemoryError and anything
+        # else fall through to the generic 500 below.
+        try:
+            ingestion_result = connector.ingest(
+                dataset_id=dataset_id,
+                storage_root=PARQUET_STORAGE_ROOT,
+            )
+        except pa.ArrowInvalid as exc:
+            logger.warning("Dataset upload rejected: CSV could not be parsed", exc_info=True)
+            raise HTTPException(
+                status_code=400,
+                detail="Unable to load dataset. Please check that the file is a valid CSV.",
+            ) from exc
 
         dataset = dataset_manager.register_ingested_dataset(
             ingestion_result,
@@ -300,11 +316,15 @@ def upload_dataset(
     except ConnectorValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Anything not classified above is a server-side failure (disk
+    # space, permissions, storage selection, manifest write, ...), not
+    # a problem with the user's file. The full exception is logged; the
+    # response stays generic so no internal message or path leaks.
     except Exception as exc:
         logger.exception("Dataset upload failed")
         raise HTTPException(
-            status_code=400,
-            detail="Unable to load dataset. Please check that the file is a valid CSV.",
+            status_code=500,
+            detail="The dataset could not be saved due to a server error. Please try again later.",
         ) from exc
 
     finally:

@@ -209,7 +209,10 @@ def test_temp_upload_file_removed_after_ingestion_failure(isolated_registry, mon
 
     response = _upload()
 
-    assert response.status_code == 400
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "The dataset could not be saved due to a server error. Please try again later."
+    )
     assert _leftover_tmp_files() == before
 
 
