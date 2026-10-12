@@ -3,9 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from backend.routes.dataset import (
     MAX_UPLOAD_BYTES,
@@ -134,20 +134,64 @@ app = FastAPI(
 MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024
 
 
-class MaxBodySizeMiddleware(BaseHTTPMiddleware):
-    """
-    Reject an oversized request before its body is parsed at all.
+class _RequestBodyTooLarge(Exception):
+    """Raised from the wrapped receive() once the body limit is crossed."""
 
-    The upload route also enforces a size limit itself, but by the
-    time that code runs, Starlette's multipart parser has already
-    buffered the file. Checking Content-Length here up front avoids
-    ever starting that work for a request that declares itself too
-    large. (A client that omits Content-Length or lies about it
-    still falls through to the route's own chunked-read check.)
+
+def _request_body_too_large_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content={"detail": "Request body exceeds the maximum allowed size."},
+    )
+
+
+class MaxBodySizeMiddleware:
+    """
+    Reject an oversized request body while it is being received,
+    before it can be spooled to disk.
+
+    Plain ASGI rather than BaseHTTPMiddleware on purpose: the limit
+    has to be enforced on the ``receive`` channel itself. FastAPI
+    parses a multipart upload (``await request.form()``) to completion
+    before the route runs, and Starlette spools every file part to a
+    temporary file with no size cap of its own - so a check in the
+    route, or one that only looks at Content-Length, cannot stop a
+    chunked request that omits Content-Length from writing its whole
+    body to disk first.
+
+    Two checks, both against ``MAX_REQUEST_BODY_BYTES`` read per
+    request (so tests can override it):
+
+    1. A declared Content-Length over the limit is rejected up front,
+       without reading any of the body.
+    2. Every ``http.request`` message passing through ``receive`` is
+       counted; once the running total exceeds the limit, receive
+       raises and the body is never read further.
+
+    FastAPI converts an error raised while reading the body into its
+    own 400 response, so once the limit is crossed this middleware
+    discards whatever response the inner app produces and sends the
+    413 itself - unless the inner app had already started a response
+    before the limit was crossed, in which case nothing is replaced
+    (no second response start) and the error is left to propagate.
+    Only the middleware's own limit signal is ever suppressed; any
+    other exception from the inner app propagates unchanged.
+
+    The upload route keeps its own per-file size check as the exact
+    file-bytes limit; this is the request-level ceiling around it.
     """
 
-    async def dispatch(self, request: Request, call_next):
-        content_length = request.headers.get("content-length")
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        limit = MAX_REQUEST_BODY_BYTES
+
+        content_length = Headers(scope=scope).get("content-length")
 
         if content_length is not None:
             try:
@@ -156,13 +200,64 @@ class MaxBodySizeMiddleware(BaseHTTPMiddleware):
             except ValueError:
                 declared_size = None
 
-            if declared_size is not None and declared_size > MAX_REQUEST_BODY_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": "Request body exceeds the maximum allowed size."},
-                )
+            if declared_size is not None and declared_size > limit:
+                await _request_body_too_large_response()(scope, receive, send)
+                return
 
-        return await call_next(request)
+        received_bytes = 0
+        exceeded = False
+        response_started = False
+        # Whether the inner app's response was already on the wire
+        # when the limit was crossed - only then is it left alone.
+        started_before_exceeded = False
+
+        async def limited_receive() -> Message:
+            nonlocal received_bytes, exceeded, started_before_exceeded
+
+            if exceeded:
+                raise _RequestBodyTooLarge()
+
+            message = await receive()
+
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+
+                if received_bytes > limit:
+                    exceeded = True
+                    started_before_exceeded = response_started
+                    raise _RequestBodyTooLarge()
+
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal response_started
+
+            if exceeded and not started_before_exceeded:
+                # The inner app is answering a request this middleware
+                # is rejecting (e.g. FastAPI's 400 for an unreadable
+                # body) - drop it; the 413 is sent below instead.
+                return
+
+            if message["type"] == "http.response.start":
+                response_started = True
+
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+
+        except _RequestBodyTooLarge:
+            # Only this middleware's own signal is handled here. Under
+            # FastAPI it never arrives: FastAPI turns it into a 400 that
+            # guarded_send() drops, and the inner app returns normally.
+            # It does arrive from plain ASGI/Starlette code that lets it
+            # propagate. Any other exception - even after the limit was
+            # crossed - is an unrelated failure and propagates as-is.
+            if started_before_exceeded:
+                raise
+
+        if exceeded and not started_before_exceeded:
+            await _request_body_too_large_response()(scope, receive, send)
 
 
 app.add_middleware(MaxBodySizeMiddleware)
