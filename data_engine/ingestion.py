@@ -78,6 +78,15 @@ def ingest_to_parquet(
             schema_info = {name: str(schema.field(name).type) for name in schema.names}
             writer = pq.ParquetWriter(parquet_path, schema)
 
+        # Finalize inside the try: close() writes the Parquet footer, so
+        # a failure there (e.g. disk full) must go through the same
+        # partial-file cleanup below rather than surfacing from
+        # `finally` after that cleanup has already been skipped. The
+        # writer is detached first so the cleanup never re-closes a
+        # writer whose close() just failed.
+        finalizing_writer, writer = writer, None
+        finalizing_writer.close()
+
         return IngestionResult(
             dataset_id=dataset_id,
             parquet_path=parquet_path,

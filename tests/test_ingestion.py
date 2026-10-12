@@ -120,3 +120,82 @@ def test_ingest_cleans_up_on_failure_before_any_batch_written(tmp_path):
             )
 
     assert not os.path.exists(expected_path)
+
+
+# =========================================================
+# Step 80: writer finalization (ParquetWriter.close) failures
+# =========================================================
+
+
+def _writer_class(close_error: Exception | None, calls: list):
+    """
+    Real ParquetWriter whose close() is the only thing altered. It
+    releases the real file handle first (so cleanup can delete the
+    file on every OS), then fails as a footer write would - e.g. on a
+    full disk.
+    """
+
+    class _Writer(pq.ParquetWriter):
+        def close(self):
+            calls.append("close")
+            super().close()
+            if close_error is not None:
+                raise close_error
+
+    return _Writer
+
+
+def test_ingest_removes_output_when_writer_close_fails(tmp_path):
+    calls: list = []
+    expected_path = os.path.join(str(tmp_path), "dataset_close_fail.parquet")
+
+    with patch(
+        "data_engine.ingestion.pq.ParquetWriter",
+        _writer_class(OSError("simulated footer write failure"), calls),
+    ):
+        with pytest.raises(OSError, match="simulated footer write failure"):
+            ingest_to_parquet(
+                source_stream=_csv_stream("id,name\n1,alice\n2,bob\n"),
+                dataset_id="dataset_close_fail",
+                storage_root=str(tmp_path),
+            )
+
+    assert not os.path.exists(expected_path)
+    # The failed writer is not closed a second time during cleanup.
+    assert calls == ["close"]
+
+
+def test_ingest_close_failure_is_not_masked_by_cleanup_failure(tmp_path):
+    calls: list = []
+
+    with patch(
+        "data_engine.ingestion.pq.ParquetWriter",
+        _writer_class(OSError("simulated footer write failure"), calls),
+    ), patch(
+        "data_engine.ingestion.os.remove",
+        side_effect=PermissionError("simulated cleanup failure"),
+    ) as remove:
+        with pytest.raises(OSError, match="simulated footer write failure"):
+            ingest_to_parquet(
+                source_stream=_csv_stream("id,name\n1,alice\n"),
+                dataset_id="dataset_close_and_cleanup_fail",
+                storage_root=str(tmp_path),
+            )
+
+    remove.assert_called_once()
+
+
+def test_ingest_success_finalizes_writer_once_and_keeps_readable_output(tmp_path):
+    calls: list = []
+
+    with patch("data_engine.ingestion.pq.ParquetWriter", _writer_class(None, calls)):
+        result = ingest_to_parquet(
+            source_stream=_csv_stream("id,name\n1,alice\n2,bob\n"),
+            dataset_id="dataset_finalized",
+            storage_root=str(tmp_path),
+        )
+
+    assert calls == ["close"]
+    assert os.path.exists(result.parquet_path)
+    # Footer written: the file is a complete, readable Parquet file.
+    assert pq.read_table(result.parquet_path).num_rows == 2

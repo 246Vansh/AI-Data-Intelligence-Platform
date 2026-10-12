@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 from pathlib import Path
 from threading import Lock
@@ -8,7 +9,11 @@ from threading import Lock
 import pandas as pd
 
 from data_engine.dataset import Dataset
-from data_engine.dataset_manifest import write_manifest
+from data_engine.dataset_manifest import (
+    delete_manifest,
+    manifest_path_for,
+    write_manifest,
+)
 from data_engine.dataset_registry import (
     DatasetNotFoundError,
     DatasetRegistry,
@@ -22,12 +27,47 @@ from data_engine.storage import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _cleanup_parquet(parquet_path: str) -> None:
     if os.path.exists(parquet_path):
         try:
             os.remove(parquet_path)
         except OSError:
-            pass
+            logger.warning(
+                "Failed to remove Parquet file %r during cleanup.",
+                parquet_path,
+                exc_info=True,
+            )
+
+
+def _rollback_unregistered_storage(storage, dataset_id: str) -> None:
+    """
+    Close storage built for a dataset whose registration is being
+    rolled back. Best-effort, like DatasetRegistry.delete(): a close
+    failure is logged, never raised, so it can't replace the error
+    that caused the rollback.
+    """
+
+    try:
+        storage.close()
+    except Exception:
+        logger.exception(
+            "Failed to close storage for dataset_id=%r during registration rollback.",
+            dataset_id,
+        )
+
+
+def _cleanup_manifest(manifest_path: str) -> None:
+    try:
+        delete_manifest(manifest_path)
+    except OSError:
+        logger.warning(
+            "Failed to remove manifest %r during cleanup.",
+            manifest_path,
+            exc_info=True,
+        )
 
 
 def _parse_csv_bytes(contents: bytes) -> pd.DataFrame:
@@ -145,8 +185,10 @@ class DatasetManager:
         fails, or writing its manifest sidecar (Step 4 - restart
         durability) fails, the partially-registered state is never
         left behind: nothing is added to the registry, the active
-        pointer is left untouched, and the orphaned Parquet file
-        itself is removed before the exception is re-raised - the
+        pointer is left untouched, any storage already built is
+        closed, any partially written manifest is removed, and the
+        orphaned Parquet file itself is removed before the exception is
+        re-raised - the
         same deterministic cleanup ``ingest_to_parquet`` applies to
         its own failures.
 
@@ -168,17 +210,28 @@ class DatasetManager:
             owner_id=owner_id,
         )
 
+        storage_root = os.path.dirname(result.parquet_path)
+
         try:
             write_manifest(
                 dataset_id=dataset.dataset_id,
                 name=dataset.name,
                 created_at=dataset.created_at,
                 storage=storage_reference_for_ingestion(result),
-                storage_root=os.path.dirname(result.parquet_path),
+                storage_root=storage_root,
                 owner_id=dataset.owner_id,
             )
 
         except Exception:
+            # Close the storage first: it holds a DuckDB connection and
+            # a private spill directory, and (on Windows) may still have
+            # the Parquet file open, which would block its removal. A
+            # manifest left half-written by the failed write is removed
+            # with its Parquet file - one is useless without the other.
+            # Every step is best-effort, so the original error is what
+            # propagates.
+            _rollback_unregistered_storage(storage, dataset.dataset_id)
+            _cleanup_manifest(manifest_path_for(dataset.dataset_id, storage_root))
             _cleanup_parquet(result.parquet_path)
             raise
 
