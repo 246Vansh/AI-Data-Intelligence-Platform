@@ -1,18 +1,17 @@
-"""Phase 2 / Step 6A: backend/routes/dataset.py's GET
-/{dataset_id}/metadata and backend/routes/analysis.py's POST
-/api/analyze both key their metadata computation off the same
-``dataset.cache["metadata"]`` entry, via ``get_cached_on_dataset(...,
-"metadata", metadata_for_dataset)`` in both routes.
+"""Step 83 (supersedes Phase 2 / Step 6A's shared-entry contract):
+POST /api/analyze plans against ``dataset.cache["planning_metadata"]``
+(``planning_metadata_for_dataset``), while GET
+/api/dataset/{dataset_id}/metadata keeps serving the exact
+``dataset.cache["metadata"]`` entry (``metadata_for_dataset``).
 
 Verifies:
-  - Whichever route runs first computes metadata exactly once, and the
-    other route reuses the cached value - regardless of call order.
-  - This holds for both a DuckDB-backed and a Pandas-backed dataset.
-  - It also holds when the dataset is reached implicitly (GET
-    /api/dataset/metadata, the no-dataset_id "active dataset" route)
-    rather than by explicit dataset_id.
-  - The metadata payload returned by /metadata is exactly the object
-    /api/analyze's planning stage consumed from the shared cache.
+  - /api/analyze never calls the exact metadata builder, and on a
+    DuckDB-backed dataset never runs the exact column_statistics() scan.
+  - Each route computes its own entry exactly once, and repeat calls
+    reuse it - regardless of call order.
+  - /metadata's payload is the exact metadata whichever route ran
+    first, for both DuckDB- and Pandas-backed datasets, and for the
+    implicit active-dataset route.
 
 Each test gets its own DatasetRegistry patched into both route
 modules, so this never touches the process-wide singleton or any
@@ -32,7 +31,10 @@ from backend.main import app
 from data_engine.dataset import Dataset
 from data_engine.dataset_manager import DatasetManager
 from data_engine.dataset_registry import DatasetRegistry
-from data_engine.metadata_engine import metadata_for_dataset
+from data_engine.metadata_engine import (
+    metadata_for_dataset,
+    planning_metadata_for_dataset,
+)
 from data_engine.storage import DuckDBStorage, PandasStorage
 
 client = TestClient(app)
@@ -75,13 +77,25 @@ def _register(registry: DatasetRegistry, storage) -> Dataset:
     return dataset
 
 
-def _spy_metadata_for_dataset(monkeypatch, calls):
-    def _wrapped(dataset_arg):
-        calls.append(dataset_arg)
+def _spy_builders(monkeypatch):
+    """Record every exact and planning metadata computation."""
+    calls = {"exact": [], "planning": []}
+
+    def _exact(dataset_arg):
+        calls["exact"].append(dataset_arg)
         return metadata_for_dataset(dataset_arg)
 
-    monkeypatch.setattr(dataset_route, "metadata_for_dataset", _wrapped)
-    monkeypatch.setattr(analysis_route, "metadata_for_dataset", _wrapped)
+    def _planning(dataset_arg):
+        calls["planning"].append(dataset_arg)
+        return planning_metadata_for_dataset(dataset_arg)
+
+    monkeypatch.setattr(dataset_route, "metadata_for_dataset", _exact)
+    monkeypatch.setattr(analysis_route, "planning_metadata_for_dataset", _planning)
+
+    # /api/analyze must not reach the exact builder under either name.
+    assert not hasattr(analysis_route, "metadata_for_dataset")
+
+    return calls
 
 
 def _ask(dataset_id: str):
@@ -92,27 +106,47 @@ def _ask(dataset_id: str):
 
 
 # =========================================================
+# /api/analyze NEVER RUNS THE EXACT COLUMN-STATISTICS SCAN
+# =========================================================
+
+
+def test_analyze_never_runs_exact_column_statistics(isolated, monkeypatch):
+    registry, _ = isolated
+    dataset = _register(registry, DuckDBStorage(_make_dataframe()))
+
+    def _forbidden(self):
+        raise AssertionError("exact column_statistics() ran on the /analyze path")
+
+    monkeypatch.setattr(DuckDBStorage, "_compute_column_statistics", _forbidden)
+
+    response = _ask(dataset.dataset_id)
+
+    assert response.status_code == 200
+    assert "planning_metadata" in dataset.cache
+    assert "metadata" not in dataset.cache
+    assert dataset.storage._column_statistics is None
+
+
+# =========================================================
 # /metadata FIRST, THEN /api/analyze
 # =========================================================
 
 
 @pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
-def test_metadata_route_then_analyze_share_one_computation(isolated, monkeypatch, storage_cls):
+def test_metadata_route_then_analyze_use_separate_entries(isolated, monkeypatch, storage_cls):
     registry, _ = isolated
     dataset = _register(registry, storage_cls(_make_dataframe()))
-
-    calls = []
-    _spy_metadata_for_dataset(monkeypatch, calls)
+    calls = _spy_builders(monkeypatch)
 
     metadata_response = client.get(f"/api/dataset/{dataset.dataset_id}/metadata")
     assert metadata_response.status_code == 200
-    assert len(calls) == 1
+    assert (len(calls["exact"]), len(calls["planning"])) == (1, 0)
 
-    analyze_response = _ask(dataset.dataset_id)
-    assert analyze_response.status_code == 200
+    assert _ask(dataset.dataset_id).status_code == 200
+    assert _ask(dataset.dataset_id).status_code == 200
 
-    # No new computation - /api/analyze reused dataset.cache["metadata"].
-    assert len(calls) == 1
+    # Planning metadata computed once and reused; exact never recomputed.
+    assert (len(calls["exact"]), len(calls["planning"])) == (1, 1)
     assert dataset.cache["metadata"] == metadata_response.json()
 
 
@@ -122,46 +156,42 @@ def test_metadata_route_then_analyze_share_one_computation(isolated, monkeypatch
 
 
 @pytest.mark.parametrize("storage_cls", [PandasStorage, DuckDBStorage])
-def test_analyze_then_metadata_route_share_one_computation(isolated, monkeypatch, storage_cls):
+def test_analyze_then_metadata_route_use_separate_entries(isolated, monkeypatch, storage_cls):
     registry, _ = isolated
     dataset = _register(registry, storage_cls(_make_dataframe()))
+    calls = _spy_builders(monkeypatch)
 
-    calls = []
-    _spy_metadata_for_dataset(monkeypatch, calls)
-
-    analyze_response = _ask(dataset.dataset_id)
-    assert analyze_response.status_code == 200
-    assert len(calls) == 1
+    assert _ask(dataset.dataset_id).status_code == 200
+    assert (len(calls["exact"]), len(calls["planning"])) == (0, 1)
+    assert "metadata" not in dataset.cache
 
     metadata_response = client.get(f"/api/dataset/{dataset.dataset_id}/metadata")
     assert metadata_response.status_code == 200
+    assert (len(calls["exact"]), len(calls["planning"])) == (1, 1)
 
-    # No new computation - /metadata reused dataset.cache["metadata"].
-    assert len(calls) == 1
+    # /metadata serves the exact computation, not the planning entry.
     assert metadata_response.json() == dataset.cache["metadata"]
+    assert metadata_response.json() == metadata_for_dataset(dataset)
 
 
 # =========================================================
-# ACTIVE-DATASET /metadata (NO dataset_id) SHARES THE SAME CACHE
+# ACTIVE-DATASET /metadata (NO dataset_id) STAYS EXACT
 # =========================================================
 
 
-def test_active_metadata_route_shares_cache_with_analyze(isolated, monkeypatch):
+def test_active_metadata_route_stays_exact_and_separate(isolated, monkeypatch):
     registry, manager = isolated
     dataset = _register(registry, PandasStorage(_make_dataframe()))
 
     with manager._lock:
         manager._active_id = dataset.dataset_id
 
-    calls = []
-    _spy_metadata_for_dataset(monkeypatch, calls)
+    calls = _spy_builders(monkeypatch)
 
     active_metadata_response = client.get("/api/dataset/metadata")
     assert active_metadata_response.status_code == 200
-    assert len(calls) == 1
 
-    analyze_response = _ask(dataset.dataset_id)
-    assert analyze_response.status_code == 200
+    assert _ask(dataset.dataset_id).status_code == 200
 
-    assert len(calls) == 1
+    assert (len(calls["exact"]), len(calls["planning"])) == (1, 1)
     assert dataset.cache["metadata"] == active_metadata_response.json()

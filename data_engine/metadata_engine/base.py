@@ -38,3 +38,16 @@ class MetadataEngine(ABC):
         exactly.
         """
         raise NotImplementedError
+
+    def get_planning_metadata(self, dataset: Dataset) -> dict[str, Any]:
+        """
+        Compute the metadata /api/analyze plans against - the same keys
+        and value types as get_metadata(), but an engine may trade
+        exactness of ``unique_values`` for a bounded-memory estimate
+        here, since planning only needs column names, types, roles,
+        and allowed operations (Step 83).
+
+        Defaults to get_metadata() itself, so an engine without a
+        cheaper path (e.g. PandasMetadataEngine) stays exact.
+        """
+        return self.get_metadata(dataset)

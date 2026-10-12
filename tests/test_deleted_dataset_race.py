@@ -156,8 +156,8 @@ def test_analysis_returns_404_when_deleted_before_metadata(
     dataset = _register(registry)
     monkeypatch.setattr(
         analysis_route,
-        "metadata_for_dataset",
-        _delete_then(registry, dataset, analysis_route.metadata_for_dataset),
+        "planning_metadata_for_dataset",
+        _delete_then(registry, dataset, analysis_route.planning_metadata_for_dataset),
     )
 
     response = client.post(
@@ -173,7 +173,7 @@ def test_analysis_returns_404_when_deleted_before_execution(
     registry, client, monkeypatch
 ):
     dataset = _register(registry)
-    dataset.cache["metadata"] = get_metadata(_dataframe())
+    dataset.cache["planning_metadata"] = get_metadata(_dataframe())
     monkeypatch.setattr(
         analysis_route,
         "execute_plan_for_dataset",
@@ -193,8 +193,8 @@ def test_analysis_404_matches_missing_dataset_404(registry, client, monkeypatch)
     dataset = _register(registry)
     monkeypatch.setattr(
         analysis_route,
-        "metadata_for_dataset",
-        _delete_then(registry, dataset, analysis_route.metadata_for_dataset),
+        "planning_metadata_for_dataset",
+        _delete_then(registry, dataset, analysis_route.planning_metadata_for_dataset),
     )
 
     raced = client.post(
@@ -211,7 +211,7 @@ def test_analysis_404_matches_missing_dataset_404(registry, client, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "attribute", ["metadata_for_dataset", "execute_plan_for_dataset"]
+    "attribute", ["planning_metadata_for_dataset", "execute_plan_for_dataset"]
 )
 def test_analysis_unrelated_runtime_error_stays_500(
     registry, client, monkeypatch, attribute
@@ -219,7 +219,7 @@ def test_analysis_unrelated_runtime_error_stays_500(
     dataset = _register(registry)
     if attribute == "execute_plan_for_dataset":
         # Pre-seed metadata so the request reaches execution.
-        dataset.cache["metadata"] = get_metadata(_dataframe())
+        dataset.cache["planning_metadata"] = get_metadata(_dataframe())
     monkeypatch.setattr(analysis_route, attribute, _raise(RuntimeError(SECRET)))
 
     response = client.post(
@@ -381,8 +381,8 @@ def test_job_reports_404_when_dataset_deleted_mid_run(registry, monkeypatch):
     dataset = _register(registry)
     monkeypatch.setattr(
         analysis_route,
-        "metadata_for_dataset",
-        _delete_then(registry, dataset, analysis_route.metadata_for_dataset),
+        "planning_metadata_for_dataset",
+        _delete_then(registry, dataset, analysis_route.planning_metadata_for_dataset),
     )
 
     job = _run_job_synchronously(dataset)
@@ -399,7 +399,7 @@ def test_job_unrelated_runtime_error_is_not_reported_as_missing(
 ):
     dataset = _register(registry)
     monkeypatch.setattr(
-        analysis_route, "metadata_for_dataset", _raise(RuntimeError(SECRET))
+        analysis_route, "planning_metadata_for_dataset", _raise(RuntimeError(SECRET))
     )
 
     job = _run_job_synchronously(dataset)
@@ -415,8 +415,8 @@ def test_run_analysis_translates_closed_storage_404_into_job_error(
     dataset = _register(registry)
     monkeypatch.setattr(
         analysis_route,
-        "metadata_for_dataset",
-        _delete_then(registry, dataset, analysis_route.metadata_for_dataset),
+        "planning_metadata_for_dataset",
+        _delete_then(registry, dataset, analysis_route.planning_metadata_for_dataset),
     )
     request = analysis_route.AnalysisRequest(
         dataset_id=dataset.dataset_id, question=QUESTION

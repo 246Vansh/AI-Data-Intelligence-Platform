@@ -15,7 +15,7 @@ from backend.dependencies import (
 )
 from data_engine.dataset_manager import get_cached_on_dataset
 from data_engine.dataset_registry import dataset_registry
-from data_engine.metadata_engine import metadata_for_dataset
+from data_engine.metadata_engine import planning_metadata_for_dataset
 from data_engine.storage import StorageClosedError
 
 from data_engine.plan_validator import validate_plan
@@ -154,6 +154,12 @@ def analyze_dataset(
     # 3. GENERATE / LOAD METADATA
     # =====================================================
 
+    # Step 83: planning metadata, cached separately from the exact
+    # "metadata" entry /api/dataset/.../metadata serves - it never
+    # triggers the exact per-column distinct-count scan. It still
+    # shares dataset.cache_lock and the storage lock with every other
+    # cached computation on this dataset, so it can wait behind an
+    # exact scan another route already started.
     try:
         with measure(
             "metadata_generation",
@@ -161,8 +167,8 @@ def analyze_dataset(
         ):
             metadata = get_cached_on_dataset(
                 dataset,
-                "metadata",
-                metadata_for_dataset,
+                "planning_metadata",
+                planning_metadata_for_dataset,
             )
 
     except StorageClosedError as exc:

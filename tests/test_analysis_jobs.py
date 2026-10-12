@@ -62,7 +62,7 @@ def _register(registry: DatasetRegistry, owner_id: str = "dev-user") -> Dataset:
         }
     )
     dataset = Dataset(storage=PandasStorage(df), owner_id=owner_id)
-    dataset.cache["metadata"] = get_metadata(df)
+    dataset.cache["planning_metadata"] = get_metadata(df)
     registry.register(dataset)
     return dataset
 

@@ -95,7 +95,7 @@ def _register(registry: DatasetRegistry, storage, *, precomputed_metadata=None) 
     # actually touches, rather than double-counting the pre-existing
     # metadata materialization.
     if precomputed_metadata is not None:
-        dataset.cache["metadata"] = precomputed_metadata
+        dataset.cache["planning_metadata"] = precomputed_metadata
 
     registry.register(dataset)
     return dataset

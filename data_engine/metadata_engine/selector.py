@@ -41,3 +41,13 @@ def metadata_for_dataset(dataset: Dataset) -> dict[str, Any]:
     concurrently without cross-dataset crosstalk.
     """
     return select_metadata_engine_for(dataset).get_metadata(dataset)
+
+
+def planning_metadata_for_dataset(dataset: Dataset) -> dict[str, Any]:
+    """
+    Compute the lightweight planning metadata /api/analyze uses (see
+    MetadataEngine.get_planning_metadata()), dispatched the same way
+    as metadata_for_dataset(). Same response shape; ``unique_values``
+    may be approximate on DuckDB-backed datasets.
+    """
+    return select_metadata_engine_for(dataset).get_planning_metadata(dataset)

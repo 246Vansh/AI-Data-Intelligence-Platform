@@ -52,7 +52,7 @@ def analysis_dataset(monkeypatch):
         }
     )
     dataset = Dataset(storage=PandasStorage(df), owner_id="dev-user")
-    dataset.cache["metadata"] = get_metadata(df)
+    dataset.cache["planning_metadata"] = get_metadata(df)
     registry.register(dataset)
     return dataset
 
