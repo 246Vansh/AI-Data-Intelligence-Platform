@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import duckdb
 import pandas as pd
 
-from data_engine.storage.base import DatasetStorage
+from data_engine.storage.base import DatasetStorage, StorageClosedError
 
 # Step 30: every DuckDBStorage connection gets an explicit memory_limit
 # and a private, per-instance temp_directory, so a heavy full-table
@@ -331,7 +331,7 @@ class DuckDBStorage(DatasetStorage):
 
     def _raise_if_closed(self) -> None:
         if self._closed:
-            raise RuntimeError(
+            raise StorageClosedError(
                 "This DuckDBStorage instance has already been closed."
             )
 

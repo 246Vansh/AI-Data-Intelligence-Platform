@@ -1,4 +1,4 @@
-from data_engine.storage.base import DatasetStorage
+from data_engine.storage.base import DatasetStorage, StorageClosedError
 from data_engine.storage.pandas_storage import PandasStorage
 from data_engine.storage.duckdb_storage import DuckDBStorage
 from data_engine.storage.reference import (
@@ -14,6 +14,7 @@ from data_engine.storage.selector import (
 
 __all__ = [
     "DatasetStorage",
+    "StorageClosedError",
     "PandasStorage",
     "DuckDBStorage",
     "select_storage_for_ingestion",

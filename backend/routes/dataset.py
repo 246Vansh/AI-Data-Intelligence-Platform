@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import uuid
+from contextlib import contextmanager
 
 import pyarrow as pa
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from backend.dependencies import (
     AuthenticatedUser,
     authorize_dataset,
+    dataset_not_found,
     get_current_user,
     get_current_dataset,
     has_dataset_loaded,
@@ -25,6 +27,7 @@ from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata_engine import metadata_for_dataset
 from data_engine.quality import check_quality_for_dataset
 from data_engine.preview import preview_dataset
+from data_engine.storage import StorageClosedError
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,28 @@ def resolve_active_dataset(
 
     except (RuntimeError, HTTPException) as exc:
         raise no_dataset from exc
+
+
+def _no_active_dataset() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail="No dataset has been uploaded yet.",
+    )
+
+
+@contextmanager
+def _missing_if_closed(not_found: HTTPException):
+    """
+    Turn a dataset deleted mid-request (its storage closed after the
+    route resolved it) into the same 404 the route's resolver would
+    have returned had the delete landed first. Only StorageClosedError
+    is translated - every other failure propagates unchanged.
+    """
+
+    try:
+        yield
+    except StorageClosedError as exc:
+        raise not_found from exc
 
 
 # =========================================================
@@ -403,11 +428,12 @@ def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
     # resolve_active_dataset() only resolves the Dataset object and
     # checks the caller owns it.
 
-    stats = get_cached_on_dataset(
-        dataset,
-        "basic_statistics",
-        basic_statistics_for_dataset,
-    )
+    with _missing_if_closed(_no_active_dataset()):
+        stats = get_cached_on_dataset(
+            dataset,
+            "basic_statistics",
+            basic_statistics_for_dataset,
+        )
 
     return {
         **_legacy_profile_from_stats(stats),
@@ -423,11 +449,12 @@ def get_dataset_profile_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
 
 
-    stats = get_cached_on_dataset(
-        dataset,
-        "basic_statistics",
-        basic_statistics_for_dataset,
-    )
+    with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
+        stats = get_cached_on_dataset(
+            dataset,
+            "basic_statistics",
+            basic_statistics_for_dataset,
+        )
 
     return {
         **_legacy_profile_from_stats(stats),
@@ -445,9 +472,12 @@ def get_dataset_preview(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): see get_dataset_profile() above.
 
+    with _missing_if_closed(_no_active_dataset()):
+        preview = preview_dataset(dataset)
+
     return {
         "filename": dataset.name,
-        **preview_dataset(dataset),
+        **preview,
     }
 
 
@@ -459,9 +489,12 @@ def get_dataset_preview_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
 
 
+    with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
+        preview = preview_dataset(dataset)
+
     return {
         "filename": dataset.name,
-        **preview_dataset(dataset),
+        **preview,
     }
 
 
@@ -475,11 +508,12 @@ def get_dataset_quality(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): see get_dataset_profile() above.
 
-    return get_cached_on_dataset(
-        dataset,
-        "quality",
-        check_quality_for_dataset,
-    )
+    with _missing_if_closed(_no_active_dataset()):
+        return get_cached_on_dataset(
+            dataset,
+            "quality",
+            check_quality_for_dataset,
+        )
 
 
 @router.get("/{dataset_id}/quality")
@@ -490,11 +524,12 @@ def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
 
 
-    return get_cached_on_dataset(
-        dataset,
-        "quality",
-        check_quality_for_dataset,
-    )
+    with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
+        return get_cached_on_dataset(
+            dataset,
+            "quality",
+            check_quality_for_dataset,
+        )
 
 
 # =========================================================
@@ -507,11 +542,12 @@ def get_dataset_metadata(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): see get_dataset_profile() above.
 
-    return get_cached_on_dataset(
-        dataset,
-        "metadata",
-        metadata_for_dataset,
-    )
+    with _missing_if_closed(_no_active_dataset()):
+        return get_cached_on_dataset(
+            dataset,
+            "metadata",
+            metadata_for_dataset,
+        )
 
 
 @router.get("/{dataset_id}/metadata")
@@ -522,11 +558,12 @@ def get_dataset_metadata_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
 
 
-    return get_cached_on_dataset(
-        dataset,
-        "metadata",
-        metadata_for_dataset,
-    )
+    with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
+        return get_cached_on_dataset(
+            dataset,
+            "metadata",
+            metadata_for_dataset,
+        )
 
 
 # =========================================================
@@ -562,13 +599,21 @@ def list_datasets(user: AuthenticatedUser = Depends(get_current_user)):
     independent of the active dataset.
     """
 
-    return {
-        "datasets": [
-            _dataset_summary(dataset)
-            for dataset in dataset_registry.list()
-            if dataset.owner_id and dataset.owner_id == user.user_id
-        ]
-    }
+    summaries = []
+
+    for dataset in dataset_registry.list():
+        if not dataset.owner_id or dataset.owner_id != user.user_id:
+            continue
+
+        # The registry snapshot can include a dataset deleted before
+        # its row count is read; a deleted dataset is simply not
+        # listed, exactly as if the delete had landed first.
+        try:
+            summaries.append(_dataset_summary(dataset))
+        except StorageClosedError:
+            continue
+
+    return {"datasets": summaries}
 
 
 @router.get("/{dataset_id}")
@@ -579,7 +624,8 @@ def get_dataset_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
 
 
-    return _dataset_summary(dataset)
+    with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
+        return _dataset_summary(dataset)
 
 
 @router.delete("/{dataset_id}")

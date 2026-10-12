@@ -10,11 +10,13 @@ from data_engine.json_safety import sanitize_json, sanitize_records
 from backend.dependencies import (
     AuthenticatedUser,
     authorize_dataset,
+    dataset_not_found,
     get_current_user,
 )
 from data_engine.dataset_manager import get_cached_on_dataset
 from data_engine.dataset_registry import dataset_registry
 from data_engine.metadata_engine import metadata_for_dataset
+from data_engine.storage import StorageClosedError
 
 from data_engine.plan_validator import validate_plan
 
@@ -162,6 +164,10 @@ def analyze_dataset(
                 "metadata",
                 metadata_for_dataset,
             )
+
+    except StorageClosedError as exc:
+        # Deleted after authorization, while this request was running.
+        raise dataset_not_found(request.dataset_id) from exc
 
     except Exception as exc:
         logger.exception("Metadata generation failed")
@@ -328,6 +334,9 @@ def analyze_dataset(
             status_code=400,
             detail=f"Analysis execution failed: {exc}",
         ) from exc
+
+    except StorageClosedError as exc:
+        raise dataset_not_found(request.dataset_id) from exc
 
     except Exception as exc:
         logger.exception("Unexpected analysis execution error")

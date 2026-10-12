@@ -72,6 +72,21 @@ def get_current_user() -> AuthenticatedUser:
 # =========================================================
 
 
+def dataset_not_found(dataset_id: str) -> HTTPException:
+    """
+    The one 404 every dataset-scoped route returns for a dataset_id the
+    caller can't use - missing, someone else's, or deleted mid-request
+    (its storage closed underneath the request; see
+    data_engine.storage.StorageClosedError). Built in one place so all
+    of those cases stay byte-for-byte indistinguishable.
+    """
+
+    return HTTPException(
+        status_code=404,
+        detail=f"No dataset found for dataset_id: {dataset_id!r}",
+    )
+
+
 def authorize_dataset(
     registry: DatasetRegistry,
     dataset_id: str,
@@ -91,10 +106,7 @@ def authorize_dataset(
     never probe for other users' dataset_ids.
     """
 
-    not_found = HTTPException(
-        status_code=404,
-        detail=f"No dataset found for dataset_id: {dataset_id!r}",
-    )
+    not_found = dataset_not_found(dataset_id)
 
     try:
         dataset = registry.get(dataset_id)

@@ -5,6 +5,20 @@ from abc import ABC, abstractmethod
 import pandas as pd
 
 
+class StorageClosedError(RuntimeError):
+    """
+    Raised when an operation reaches a storage instance whose close()
+    has already run - in practice, a dataset deleted while a request
+    was still working on it.
+
+    A dedicated type (rather than a bare RuntimeError) so route layers
+    can map exactly this condition to the same 404 a missing dataset
+    gets, without also swallowing unrelated RuntimeErrors, DuckDB
+    errors, or disk failures. Subclasses RuntimeError so existing
+    callers that already catch RuntimeError keep working.
+    """
+
+
 class DatasetStorage(ABC):
     """
     Abstract storage contract for a dataset.
