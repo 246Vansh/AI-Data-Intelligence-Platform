@@ -316,10 +316,16 @@ function setActiveSection(section) {
 }
 
 
-function handleQuestionSelected(newQuestion) {
+async function handleQuestionSelected(newQuestion) {
     if (!newQuestion) {
         return;
     }
+
+    // Reset first so re-selecting the same suggestion (e.g. after the
+    // user cleared or edited it in AnalyticsBuilder) still changes the
+    // prop and re-fills the question there. AnalyticsBuilder ignores "".
+    selectedQuestion.value = "";
+    await nextTick();
 
     selectedQuestion.value = newQuestion;
     question.value = newQuestion;
