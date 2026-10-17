@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -137,6 +137,20 @@ class JobManager:
 
         self._executor.submit(self._run, job, work)
         return snapshot
+
+    def run(self, work: Callable[[], Any]) -> Future:
+        """
+        Step 84: run `work` on the same bounded pool as tracked jobs,
+        without creating a Job record, and return its Future.
+
+        Used by the synchronous /api/analyze route so both analysis
+        entry points share one ANALYSIS_JOB_WORKERS budget instead of
+        the sync route drawing on the web server's general threadpool.
+        Exceptions raised by `work` propagate unchanged through the
+        Future; cancelling it before a worker picks it up drops the work.
+        """
+
+        return self._executor.submit(work)
 
     def get(self, job_id: str, owner_id: str) -> dict | None:
         """

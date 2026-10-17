@@ -310,6 +310,43 @@ def test_sync_analyze_still_returns_full_result(registry, manager):
     assert body["data"]["row_count"] == 3
 
 
+def test_sync_analyze_shares_bounded_analysis_pool(registry, manager, monkeypatch):
+    dataset = _register(registry)
+    gate = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(
+        analysis_route, "analyze_dataset", _blocking_analyze(gate, started)
+    )
+
+    # A job occupies the only analysis worker.
+    job_id = _create_job(dataset.dataset_id).json()["job_id"]
+    assert started.wait(timeout=10)
+    started.clear()
+
+    responses = []
+    caller = threading.Thread(
+        target=lambda: responses.append(
+            client.post(
+                "/api/analyze",
+                json={"dataset_id": dataset.dataset_id, "question": QUESTION},
+            )
+        )
+    )
+    caller.start()
+
+    # The sync request waits for the same pool instead of running
+    # alongside the job, and other routes stay responsive meanwhile.
+    assert not started.wait(timeout=0.5)
+    assert _get_job(job_id).json()["status"] == "running"
+
+    gate.set()
+    caller.join(timeout=10)
+
+    assert responses and responses[0].status_code == 200
+    assert responses[0].json()["success"] is True
+    assert _wait_for_status(job_id, ("completed", "failed"))["status"] == "completed"
+
+
 def test_sync_analyze_other_users_dataset_still_404(registry, manager, monkeypatch):
     dataset = _register(registry, owner_id="alice")
     monkeypatch.setenv(DEV_USER_ID_ENV_VAR, "mallory")

@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
+
+import backend.jobs as jobs
 
 from data_engine.performance import measure
 from data_engine.json_safety import sanitize_json, sanitize_records
@@ -103,6 +106,35 @@ class AnalysisRequest(BaseModel):
 
 
 @router.post("")
+async def analyze_dataset_endpoint(
+    request: AnalysisRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Step 84: run the synchronous pipeline below on the JobManager's
+    bounded analysis pool rather than the web server's shared
+    threadpool.
+
+    As a plain `def` route this pipeline used to occupy one of the
+    server's general worker threads for its whole duration - including
+    time spent blocked on the dataset's storage lock behind another
+    query - so a burst of slow analyses could exhaust the threadpool
+    every other sync route (preview, profile, job polling, delete)
+    depends on, and analyses on different datasets each ran against
+    their own DUCKDB_MEMORY_LIMIT with no shared bound. Awaiting the
+    bounded pool keeps waiting requests off any thread and caps
+    concurrent analysis execution - sync and job paths together - at
+    ANALYSIS_JOB_WORKERS. The request/response contract is unchanged.
+
+    `jobs.job_manager` and `analyze_dataset` are resolved at call time
+    so tests can substitute either.
+    """
+
+    return await asyncio.wrap_future(
+        jobs.job_manager.run(lambda: analyze_dataset(request, user))
+    )
+
+
 def analyze_dataset(
     request: AnalysisRequest,
     user: AuthenticatedUser = Depends(get_current_user),
