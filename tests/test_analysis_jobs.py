@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 import backend.jobs as jobs
 import backend.routes.analysis as analysis_route
+import backend.routes.dataset as dataset_route
 from backend.dependencies import DEV_USER_ID_ENV_VAR
 from backend.main import app
 from data_engine.dataset import Dataset
@@ -345,6 +346,100 @@ def test_sync_analyze_shares_bounded_analysis_pool(registry, manager, monkeypatc
     assert responses and responses[0].status_code == 200
     assert responses[0].json()["success"] is True
     assert _wait_for_status(job_id, ("completed", "failed"))["status"] == "completed"
+
+
+def test_list_and_preview_respond_while_analysis_pool_is_full(
+    registry, manager, monkeypatch
+):
+    monkeypatch.setattr(dataset_route, "dataset_registry", registry)
+    dataset = _register(registry)
+
+    gate = threading.Event()
+    first_started = threading.Event()
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+    started_count = 0
+    real = analysis_route.analyze_dataset
+
+    def _tracked_analyze(request, user):
+        nonlocal running, peak, started_count
+        with lock:
+            running += 1
+            started_count += 1
+            peak = max(peak, running)
+        first_started.set()
+        try:
+            assert gate.wait(timeout=10)
+            return real(request, user)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(analysis_route, "analyze_dataset", _tracked_analyze)
+
+    # Signal once the second request has handed its work to the
+    # executor. The endpoint resolves jobs.job_manager.run at call
+    # time, so wrapping it on this test's manager observes submission
+    # without touching production code.
+    second_submitted = threading.Event()
+    submissions = 0
+    real_run = manager.run
+
+    def _observed_run(work):
+        nonlocal submissions
+        future = real_run(work)
+        with lock:
+            submissions += 1
+            if submissions == 2:
+                second_submitted.set()
+        return future
+
+    monkeypatch.setattr(manager, "run", _observed_run)
+
+    responses = []
+
+    def _post_analyze():
+        responses.append(
+            client.post(
+                "/api/analyze",
+                json={"dataset_id": dataset.dataset_id, "question": QUESTION},
+            )
+        )
+
+    callers = [threading.Thread(target=_post_analyze) for _ in range(2)]
+
+    try:
+        callers[0].start()
+        assert first_started.wait(timeout=10)
+        callers[1].start()
+
+        # The second analysis is queued on the executor, but cannot
+        # start while the gated first one holds the single worker.
+        assert second_submitted.wait(timeout=10)
+        with lock:
+            assert started_count == 1
+
+        # Listing and preview are still served while the pool is full.
+        listing = client.get("/api/dataset")
+        assert listing.status_code == 200
+        assert [d["dataset_id"] for d in listing.json()["datasets"]] == [
+            dataset.dataset_id
+        ]
+
+        preview = client.get(f"/api/dataset/{dataset.dataset_id}/preview")
+        assert preview.status_code == 200
+
+    finally:
+        gate.set()
+        for caller in callers:
+            if caller.ident is not None:
+                caller.join(timeout=10)
+
+    assert not any(caller.is_alive() for caller in callers)
+    assert [r.status_code for r in responses] == [200, 200]
+    assert started_count == 2
+    assert peak == 1
 
 
 def test_sync_analyze_other_users_dataset_still_404(registry, manager, monkeypatch):
