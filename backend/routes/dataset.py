@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ from contextlib import contextmanager
 import pyarrow as pa
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 
+import backend.jobs as jobs
 from backend.dependencies import (
     AuthenticatedUser,
     authorize_dataset,
@@ -134,6 +136,35 @@ def _missing_if_closed(not_found: HTTPException):
         yield
     except StorageClosedError as exc:
         raise not_found from exc
+
+
+async def _cached_on_analysis_pool(dataset: Dataset, key: str, builder):
+    """
+    Step 90: get_cached_on_dataset(), but a cache miss runs on the
+    JobManager's bounded analysis pool - the same ANALYSIS_JOB_WORKERS
+    budget /api/analyze and analysis jobs share (Step 84) - instead of
+    the web server's general threadpool, where every dataset's
+    first-time profile/quality/metadata scan could otherwise run at
+    once against its own DUCKDB_MEMORY_LIMIT.
+
+    A cache hit returns here on the event loop without taking a worker
+    slot - the same unlocked lookup get_cached_on_dataset() itself does
+    first. A miss hands the whole get_cached_on_dataset() call to the
+    pool, so its cache_lock double-check and the storage's own lock
+    still apply unchanged. Builders never submit to the pool
+    themselves, so a worker never waits on work queued behind it.
+
+    `jobs.job_manager` is resolved at call time so tests can substitute
+    it; exceptions (e.g. StorageClosedError) propagate unchanged
+    through the Future to the caller's _missing_if_closed().
+    """
+
+    if key in dataset.cache:
+        return dataset.cache[key]
+
+    return await asyncio.wrap_future(
+        jobs.job_manager.run(lambda: get_cached_on_dataset(dataset, key, builder))
+    )
 
 
 # =========================================================
@@ -419,7 +450,7 @@ def _legacy_profile_from_stats(stats: dict) -> dict:
 
 
 @router.get("/profile")
-def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
+async def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): that helper's return value
     # (get_current_dataset()) unconditionally materializes the active
@@ -429,7 +460,7 @@ def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
     # checks the caller owns it.
 
     with _missing_if_closed(_no_active_dataset()):
-        stats = get_cached_on_dataset(
+        stats = await _cached_on_analysis_pool(
             dataset,
             "basic_statistics",
             basic_statistics_for_dataset,
@@ -442,7 +473,7 @@ def get_dataset_profile(dataset: Dataset = Depends(resolve_active_dataset)):
 
 
 @router.get("/{dataset_id}/profile")
-def get_dataset_profile_by_id(dataset: Dataset = Depends(resolve_dataset)):
+async def get_dataset_profile_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /profile, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
@@ -450,7 +481,7 @@ def get_dataset_profile_by_id(dataset: Dataset = Depends(resolve_dataset)):
 
 
     with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
-        stats = get_cached_on_dataset(
+        stats = await _cached_on_analysis_pool(
             dataset,
             "basic_statistics",
             basic_statistics_for_dataset,
@@ -504,12 +535,12 @@ def get_dataset_preview_by_id(dataset: Dataset = Depends(resolve_dataset)):
 
 
 @router.get("/quality")
-def get_dataset_quality(dataset: Dataset = Depends(resolve_active_dataset)):
+async def get_dataset_quality(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): see get_dataset_profile() above.
 
     with _missing_if_closed(_no_active_dataset()):
-        return get_cached_on_dataset(
+        return await _cached_on_analysis_pool(
             dataset,
             "quality",
             check_quality_for_dataset,
@@ -517,7 +548,7 @@ def get_dataset_quality(dataset: Dataset = Depends(resolve_active_dataset)):
 
 
 @router.get("/{dataset_id}/quality")
-def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
+async def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /quality, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
@@ -525,7 +556,7 @@ def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
 
 
     with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
-        return get_cached_on_dataset(
+        return await _cached_on_analysis_pool(
             dataset,
             "quality",
             check_quality_for_dataset,
@@ -538,12 +569,12 @@ def get_dataset_quality_by_id(dataset: Dataset = Depends(resolve_dataset)):
 
 
 @router.get("/metadata")
-def get_dataset_metadata(dataset: Dataset = Depends(resolve_active_dataset)):
+async def get_dataset_metadata(dataset: Dataset = Depends(resolve_active_dataset)):
 
     # Not require_dataset(): see get_dataset_profile() above.
 
     with _missing_if_closed(_no_active_dataset()):
-        return get_cached_on_dataset(
+        return await _cached_on_analysis_pool(
             dataset,
             "metadata",
             metadata_for_dataset,
@@ -551,7 +582,7 @@ def get_dataset_metadata(dataset: Dataset = Depends(resolve_active_dataset)):
 
 
 @router.get("/{dataset_id}/metadata")
-def get_dataset_metadata_by_id(dataset: Dataset = Depends(resolve_dataset)):
+async def get_dataset_metadata_by_id(dataset: Dataset = Depends(resolve_dataset)):
     """
     Same response shape as GET /metadata, but scoped to an explicit
     dataset_id instead of implicitly targeting "the active dataset".
@@ -559,7 +590,7 @@ def get_dataset_metadata_by_id(dataset: Dataset = Depends(resolve_dataset)):
 
 
     with _missing_if_closed(dataset_not_found(dataset.dataset_id)):
-        return get_cached_on_dataset(
+        return await _cached_on_analysis_pool(
             dataset,
             "metadata",
             metadata_for_dataset,

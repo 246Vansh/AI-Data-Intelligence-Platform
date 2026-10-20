@@ -455,6 +455,142 @@ def test_sync_analyze_other_users_dataset_still_404(registry, manager, monkeypat
 
 
 # =========================================================
+# Step 90: profile/quality/metadata cache misses share the pool
+# =========================================================
+
+# (route suffix, dataset.cache key, builder name in backend.routes.dataset)
+EXPENSIVE_ROUTES = [
+    ("profile", "basic_statistics", "basic_statistics_for_dataset"),
+    ("quality", "quality", "check_quality_for_dataset"),
+    ("metadata", "metadata", "metadata_for_dataset"),
+]
+
+
+def _occupy_pool(manager) -> tuple[threading.Event, threading.Event]:
+    """Fill the (single-worker) pool with a gated task."""
+    gate = threading.Event()
+    started = threading.Event()
+
+    def _hold():
+        started.set()
+        assert gate.wait(timeout=10)
+
+    manager.run(_hold)
+    assert started.wait(timeout=10)
+    return gate, started
+
+
+def _count_runs(manager, monkeypatch) -> tuple[list, threading.Event]:
+    """Wrap manager.run to record each submission."""
+    submitted: list = []
+    submitted_event = threading.Event()
+    real_run = manager.run
+
+    def _observed_run(work):
+        future = real_run(work)
+        submitted.append(work)
+        submitted_event.set()
+        return future
+
+    monkeypatch.setattr(manager, "run", _observed_run)
+    return submitted, submitted_event
+
+
+@pytest.mark.parametrize("suffix,key,builder_name", EXPENSIVE_ROUTES)
+def test_cache_miss_runs_on_bounded_pool_and_waits_while_full(
+    registry, manager, monkeypatch, suffix, key, builder_name
+):
+    monkeypatch.setattr(dataset_route, "dataset_registry", registry)
+    dataset = _register(registry)
+
+    real_builder = getattr(dataset_route, builder_name)
+    builder_threads: list[str] = []
+
+    def _spy_builder(ds):
+        builder_threads.append(threading.current_thread().name)
+        return real_builder(ds)
+
+    monkeypatch.setattr(dataset_route, builder_name, _spy_builder)
+
+    gate, _ = _occupy_pool(manager)
+    submitted, submitted_event = _count_runs(manager, monkeypatch)
+
+    responses = []
+    caller = threading.Thread(
+        target=lambda: responses.append(
+            client.get(f"/api/dataset/{dataset.dataset_id}/{suffix}")
+        )
+    )
+
+    try:
+        caller.start()
+
+        # The miss is queued on the pool, not run on the server's
+        # general threadpool, so the builder cannot start yet.
+        assert submitted_event.wait(timeout=10)
+        assert builder_threads == []
+
+        # Lightweight routes stay outside the pool and still respond.
+        assert client.get("/api/dataset").status_code == 200
+        assert client.get(f"/api/dataset/{dataset.dataset_id}/preview").status_code == 200
+    finally:
+        gate.set()
+        caller.join(timeout=10)
+
+    assert not caller.is_alive()
+    assert responses and responses[0].status_code == 200
+    assert len(submitted) == 1
+    assert len(builder_threads) == 1
+    assert builder_threads[0].startswith("analysis-job")
+    assert key in dataset.cache
+
+
+@pytest.mark.parametrize("suffix,key,builder_name", EXPENSIVE_ROUTES)
+def test_cache_hit_skips_pool_even_while_full(
+    registry, manager, monkeypatch, suffix, key, builder_name
+):
+    monkeypatch.setattr(dataset_route, "dataset_registry", registry)
+    dataset = _register(registry)
+
+    # First request populates the cache through the pool.
+    assert client.get(f"/api/dataset/{dataset.dataset_id}/{suffix}").status_code == 200
+    first = client.get(f"/api/dataset/{dataset.dataset_id}/{suffix}").json()
+
+    def _must_not_run(ds):
+        raise AssertionError("builder ran on a cache hit")
+
+    monkeypatch.setattr(dataset_route, builder_name, _must_not_run)
+
+    gate, _ = _occupy_pool(manager)
+    submitted, _ = _count_runs(manager, monkeypatch)
+
+    try:
+        response = client.get(f"/api/dataset/{dataset.dataset_id}/{suffix}")
+    finally:
+        gate.set()
+
+    assert response.status_code == 200
+    assert response.json() == first
+    assert submitted == []
+
+
+@pytest.mark.parametrize("suffix,key,builder_name", EXPENSIVE_ROUTES)
+def test_pooled_route_other_users_dataset_still_404(
+    registry, manager, monkeypatch, suffix, key, builder_name
+):
+    monkeypatch.setattr(dataset_route, "dataset_registry", registry)
+    dataset = _register(registry, owner_id="alice")
+    monkeypatch.setenv(DEV_USER_ID_ENV_VAR, "mallory")
+    submitted, _ = _count_runs(manager, monkeypatch)
+
+    response = client.get(f"/api/dataset/{dataset.dataset_id}/{suffix}")
+
+    assert response.status_code == 404
+    assert submitted == []
+    assert key not in dataset.cache
+
+
+# =========================================================
 # JobManager retention
 # =========================================================
 
