@@ -45,6 +45,16 @@ export function buildFollowUpContext(response, datasetId) {
     };
 }
 
+// Whether a failed analysis should leave the previous successful result
+// and its context in place. Only a request actually SENT as a follow-up
+// that the backend rejected with 422 (follow-up not applicable /
+// clarification) does: the user can rephrase the follow-up against the
+// same result. Every other failure - including 422 on an independent
+// question and 400 for an invalid context - clears them.
+export function keepsPreviousAfterError(submittedAsFollowUp, status) {
+    return submittedAsFollowUp === true && status === 422;
+}
+
 // The context to attach to a request for `datasetId`, or null: only
 // when the user wants a follow-up and the context is for that dataset.
 export function selectFollowUpContext(context, datasetId, enabled) {

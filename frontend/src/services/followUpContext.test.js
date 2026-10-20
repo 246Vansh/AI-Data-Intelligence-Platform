@@ -3,7 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildFollowUpContext, selectFollowUpContext } from "./followUpContext.js";
+import {
+    buildFollowUpContext,
+    keepsPreviousAfterError,
+    selectFollowUpContext,
+} from "./followUpContext.js";
 
 const DATASET_A = "aaaaaaaa-0000-0000-0000-000000000000";
 const DATASET_B = "bbbbbbbb-0000-0000-0000-000000000000";
@@ -85,4 +89,25 @@ test("the latest successful response replaces the previous context", () => {
     assert.notDeepEqual(first, second);
     assert.deepEqual(second.previous_plan.group_by, ["product", "region"]);
     assert.equal(second.previous_plan.limit, null);
+});
+
+test("a rejected follow-up (422) keeps the previous result and context", () => {
+    assert.equal(keepsPreviousAfterError(true, 422), true);
+});
+
+test("a 422 on an independent question does not keep an unrelated old result", () => {
+    assert.equal(keepsPreviousAfterError(false, 422), false);
+});
+
+test("a follow-up with an invalid context (400) follows the clearing policy", () => {
+    assert.equal(keepsPreviousAfterError(true, 400), false);
+});
+
+test("other follow-up failures keep the existing clearing behavior", () => {
+    for (const status of [404, 500, 503, null, undefined]) {
+        assert.equal(keepsPreviousAfterError(true, status), false, `status ${status}`);
+    }
+    // Only a real boolean "sent as a follow-up" counts.
+    assert.equal(keepsPreviousAfterError("yes", 422), false);
+    assert.equal(keepsPreviousAfterError(undefined, 422), false);
 });

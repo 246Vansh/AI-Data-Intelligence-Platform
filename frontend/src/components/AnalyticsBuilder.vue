@@ -12,6 +12,7 @@ import {
 } from "../services/api";
 import {
     buildFollowUpContext,
+    keepsPreviousAfterError,
     selectFollowUpContext,
 } from "../services/followUpContext";
 
@@ -95,6 +96,10 @@ const tableRows = computed(() =>
 const followUpContext = ref(null);
 const followUpEnabled = ref(true);
 const followUpPending = ref(false);
+
+// True while the error shown is a rejected follow-up and the previous
+// successful result below it is still the one being displayed.
+const keptPreviousResult = ref(false);
 
 const canFollowUp = computed(
     () => !!selectFollowUpContext(followUpContext.value, props.datasetId, true),
@@ -390,13 +395,18 @@ async function analyze() {
     // dataset with an answer computed against the old one.
     const requestedDatasetId = props.datasetId;
 
+    // Fixed before the request is sent, so toggling the checkbox while it
+    // runs cannot change how its failure is handled.
+    let submittedAsFollowUp = false;
+
     try {
         // The current result stays visible until this request succeeds
-        // (replaced) or fails (cleared), so the follow-up context always
-        // matches the result on screen.
+        // (replaced) or fails (cleared - except a rejected follow-up), so
+        // the follow-up context always matches the result on screen.
         loading.value = true;
         error.value = null;
         errorStatus.value = null;
+        keptPreviousResult.value = false;
 
         const analysisContext = selectFollowUpContext(
             followUpContext.value,
@@ -404,7 +414,8 @@ async function analyze() {
             followUpEnabled.value,
         );
 
-        followUpPending.value = !!analysisContext;
+        submittedAsFollowUp = !!analysisContext;
+        followUpPending.value = submittedAsFollowUp;
 
         const response =
             await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext, {
@@ -451,9 +462,17 @@ async function analyze() {
             getApiErrorMessage(err) ||
             "Unable to analyze dataset.";
 
-        // A failed analysis never becomes the next follow-up's context.
-        result.value = null;
-        followUpContext.value = null;
+        // A failed analysis never becomes the next follow-up's context. A
+        // rejected follow-up (422) leaves the previous successful result
+        // and its context untouched - never restores anything - so the
+        // user can rephrase; reached only for the current, non-cancelled
+        // request on the same dataset (guards above).
+        if (keepsPreviousAfterError(submittedAsFollowUp, errorStatus.value)) {
+            keptPreviousResult.value = !!result.value;
+        } else {
+            result.value = null;
+            followUpContext.value = null;
+        }
     } finally {
         if (analysisController === controller) {
             analysisController = null;
@@ -906,6 +925,10 @@ onMounted(() => {
 
                 <p :class="isClarificationError ? 'text-amber-700' : 'text-red-700'" class="m-0 text-xs leading-5">
                     {{ error }}
+                </p>
+
+                <p v-if="keptPreviousResult && result" class="mt-1.5 text-[11px] font-semibold leading-5 text-amber-700">
+                    The previous result below is unchanged - edit your follow-up and try again.
                 </p>
 
                 <p v-if="isClarificationError" class="mt-1.5 text-[11px] leading-5 text-amber-600">
