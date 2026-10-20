@@ -173,15 +173,17 @@ def test_none_vs_zero_does_not_match():
     assert _optimized_row_exists({"a": None}, [{"a": 0}]) is False
 
 
-def test_nan_vs_nan_does_not_match_existing_quirk_preserved():
-    # Step 25 finding: math.isclose(nan, nan) is False, so two NaN
-    # values never match. This step intentionally preserves that
-    # behavior rather than fixing it.
+def test_nan_vs_nan_matches():
+    # Step 25 preserved math.isclose(nan, nan) == False here, which
+    # rejected every insight whose evidence row carried a NULL (NaN)
+    # group key or metric. Step 93 fixes it: NaN matches only NaN.
     nan_row = {"a": float("nan")}
 
-    assert _rows_match(nan_row, dict(nan_row)) is False
-    assert _reference_row_exists(nan_row, [dict(nan_row)]) is False
-    assert _optimized_row_exists(nan_row, [dict(nan_row)]) is False
+    assert _rows_match(nan_row, dict(nan_row)) is True
+    assert _reference_row_exists(nan_row, [dict(nan_row)]) is True
+    assert _optimized_row_exists(nan_row, [dict(nan_row)]) is True
+    assert _rows_match(nan_row, {"a": 0.0}) is False
+    assert _optimized_row_exists(nan_row, [{"a": 0.0}]) is False
 
 
 def test_pandas_na_vs_pandas_na_matches():

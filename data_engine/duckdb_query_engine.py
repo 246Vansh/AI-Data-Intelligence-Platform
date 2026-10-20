@@ -245,7 +245,12 @@ def execute_plan_duckdb(
 
     order_clause = ""
     if sort_by == "metric":
-        order_clause = f"ORDER BY {_quote_identifier(metric_column)} {direction}"
+        # Group columns break ties, so which tied group survives a
+        # LIMIT (and is reported as highest/lowest) is deterministic.
+        order_clause = (
+            f"ORDER BY {_quote_identifier(metric_column)} {direction}, "
+            f"{select_columns}"
+        )
 
     elif sort_by == "time":
         if time_bucket_column is None or time_bucket_column not in group_by:

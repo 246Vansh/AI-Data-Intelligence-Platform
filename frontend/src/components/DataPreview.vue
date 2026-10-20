@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { getDatasetPreview } from "../services/api";
+import { getDatasetPreview, getApiErrorMessage } from "../services/api";
 
 const PREVIEW_ROW_LIMIT = 10;
 
@@ -43,7 +43,7 @@ async function loadPreview(options = {}) {
 
         error.value = null;
 
-        const response = await getDatasetPreview(requestedDatasetId);
+        const response = await getDatasetPreview(requestedDatasetId, { force: isRefresh });
 
         if (requestedDatasetId !== props.datasetId) {
             return;
@@ -58,8 +58,7 @@ async function loadPreview(options = {}) {
         console.error("Dataset preview error:", err);
 
         error.value =
-            err?.response?.data?.detail ||
-            err?.response?.data?.message ||
+            getApiErrorMessage(err) ||
             "Unable to load the dataset preview.";
     } finally {
         if (requestedDatasetId === props.datasetId) {
@@ -93,6 +92,9 @@ const filteredRows = computed(() => {
         .slice(0, PREVIEW_ROW_LIMIT);
 });
 
+// Size of the preview sample the backend returned - not the dataset's
+// row count, which the preview payload does not carry. Search filters
+// this sample only.
 const totalRowCount = computed(() => sourceRows.value.length);
 
 const visibleRowCount = computed(() => filteredRows.value.length);
@@ -378,7 +380,7 @@ onMounted(() => {
                                     {{ totalRowCount }}
                                 </strong>
 
-                                records
+                                preview records
 
                                 <span v-if="isSearchActive" class="font-bold text-fuchsia-500">
                                     · filtered
@@ -407,8 +409,8 @@ onMounted(() => {
                             appearance-none + [&::-webkit-search-cancel-button]:hidden
                             removes the browser's native search X.
                         -->
-                        <input v-model="searchQuery" type="search" placeholder="Search records..."
-                            aria-label="Search dataset records"
+                        <input v-model="searchQuery" type="search" placeholder="Search preview rows..."
+                            aria-label="Search the preview rows"
                             class="h-9 w-full appearance-none rounded-lg border border-violet-200 bg-white/95 pl-9 pr-9 text-[10px] text-slate-700 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden [&::-ms-clear]:hidden" />
 
 
@@ -472,7 +474,7 @@ onMounted(() => {
                 </div>
 
                 <h3 class="mt-4 text-sm font-bold text-slate-800">
-                    No matching records
+                    No matching preview rows
                 </h3>
 
                 <p class="mt-1.5 text-[10px] text-slate-400">

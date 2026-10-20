@@ -1,5 +1,7 @@
 from __future__ import annotations
+import math
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 import pandas as pd
 
@@ -26,6 +28,9 @@ def build_insight_response(
 
     insights: list[Insight] = []
 
+    # Labels time buckets at the plan's own granularity.
+    granularity = context.get("time_granularity")
+
     # =====================================================
     # 1. HIGHEST
     # =====================================================
@@ -44,11 +49,13 @@ def build_insight_response(
                     title=_build_highest_title(
                         row=row,
                         metric_column=metric_column,
+                        granularity=granularity,
                     ),
                     description=_build_highest_description(
                         row=row,
                         value=value,
                         metric_column=metric_column,
+                        granularity=granularity,
                     ),
                     evidence=InsightEvidence(
                         column=metric_column,
@@ -76,11 +83,13 @@ def build_insight_response(
                     title=_build_lowest_title(
                         row=row,
                         metric_column=metric_column,
+                        granularity=granularity,
                     ),
                     description=_build_lowest_description(
                         row=row,
                         value=value,
                         metric_column=metric_column,
+                        granularity=granularity,
                     ),
                     evidence=InsightEvidence(
                         column=metric_column,
@@ -147,9 +156,10 @@ def build_insight_response(
 def _build_highest_title(
     row: dict[str, Any],
     metric_column: str,
+    granularity: str | None = None,
 ) -> str:
 
-    date_value = _get_display_dimension(row)
+    date_value = _get_display_dimension(row, granularity)
 
     if date_value:
         return f"{date_value} records peak {_humanize_metric(metric_column)}"
@@ -161,9 +171,10 @@ def _build_highest_description(
     row: dict[str, Any],
     value: int | float,
     metric_column: str,
+    granularity: str | None = None,
 ) -> str:
 
-    date_value = _get_display_dimension(row)
+    date_value = _get_display_dimension(row, granularity)
 
     metric_name = _humanize_metric(metric_column)
 
@@ -186,9 +197,10 @@ def _build_highest_description(
 def _build_lowest_title(
     row: dict[str, Any],
     metric_column: str,
+    granularity: str | None = None,
 ) -> str:
 
-    date_value = _get_display_dimension(row)
+    date_value = _get_display_dimension(row, granularity)
 
     if date_value:
         return f"{date_value} records lowest {_humanize_metric(metric_column)}"
@@ -200,9 +212,10 @@ def _build_lowest_description(
     row: dict[str, Any],
     value: int | float,
     metric_column: str,
+    granularity: str | None = None,
 ) -> str:
 
-    date_value = _get_display_dimension(row)
+    date_value = _get_display_dimension(row, granularity)
 
     metric_name = _humanize_metric(metric_column)
 
@@ -245,10 +258,16 @@ def _build_trend_insight(
     # Determine supported trend rows
     # -----------------------------------------------------
 
+    # Chronological rows from InsightEngine._add_trend when present;
+    # NaN is not None, so it has to be filtered explicitly.
+    source_rows = trend.get("rows")
+    if not isinstance(source_rows, list):
+        source_rows = result_rows
+
     rows = [
         row
-        for row in result_rows
-        if isinstance(row, dict) and row.get(metric_column) is not None
+        for row in source_rows
+        if isinstance(row, dict) and pd.notna(row.get(metric_column))
     ]
 
     if len(rows) < 2:
@@ -369,8 +388,8 @@ def _build_difference_insight(
 
     formatted_difference = _format_number(difference)
 
-    highest_date = _get_display_dimension(highest_row)
-    lowest_date = _get_display_dimension(lowest_row)
+    highest_date = _get_display_dimension(highest_row, context.get("time_granularity"))
+    lowest_date = _get_display_dimension(lowest_row, context.get("time_granularity"))
 
     if highest_date and lowest_date:
         description = (
@@ -388,7 +407,8 @@ def _build_difference_insight(
 
     return Insight(
         type="difference",
-        title="Large gap between highest and lowest values",
+        # Neutral: no threshold is computed that would justify "large".
+        title="Gap between highest and lowest values",
         description=description,
         evidence=MultiRowEvidence(
             rows=[
@@ -460,6 +480,7 @@ def _build_coverage_insight(
 
 def _get_display_dimension(
     row: dict[str, Any],
+    granularity: str | None = None,
 ) -> str | None:
 
     value = None
@@ -483,10 +504,21 @@ def _get_display_dimension(
     try:
         parsed = pd.to_datetime(value)
 
-        return parsed.strftime("%B %Y")
-
     except (TypeError, ValueError):
         return str(value)
+
+    # Month-only labels would make two daily buckets in the same
+    # month indistinguishable ("March 2024" peak and lowest).
+    if granularity == "day":
+        return parsed.strftime("%d %B %Y")
+    if granularity == "week":
+        return f"Week of {parsed.strftime('%d %B %Y')}"
+    if granularity == "quarter":
+        return f"Q{parsed.quarter} {parsed.year}"
+    if granularity == "year":
+        return str(parsed.year)
+
+    return parsed.strftime("%B %Y")
 
 
 def _humanize_metric(
@@ -506,11 +538,30 @@ def _humanize_metric(
 def _format_number(
     value: int | float,
 ) -> str:
+    """
+    Display text only - evidence keeps the exact computed value.
 
-    if isinstance(value, float) and value.is_integer():
-        return f"{int(value):,}"
+    Non-integers are shown with at most two decimals (trailing zeros
+    dropped), which also hides binary float noise such as
+    38507381.92000001. Magnitudes below 0.01 would round to 0 at two
+    decimals, so they keep two significant digits instead, still in
+    plain decimal notation.
+    """
 
-    return f"{value:,}"
+    number = float(value)
+
+    if not math.isfinite(number):
+        return str(value)
+
+    if number.is_integer():
+        return f"{int(number):,}"
+
+    if abs(number) < 0.01:
+        # Round to 2 significant digits, then print in fixed-point
+        # notation: "{:.2g}" alone gives "1e-07" for 0.0000001.
+        return format(Decimal(f"{number:.2g}"), "f")
+
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
 
 
 def _has_meaningful_range(
@@ -520,13 +571,21 @@ def _has_meaningful_range(
     highest = context.get("highest")
     lowest = context.get("lowest")
 
-    if not highest or not lowest:
+    if highest and lowest:
+        highest_value = highest.get("value")
+        lowest_value = lowest.get("value")
+
+        if highest_value is None or lowest_value is None:
+            return False
+
+        return abs(float(highest_value) - float(lowest_value)) > 1e-6
+
+    # A limited result keeps only one extreme (see InsightEngine.
+    # _add_extremes); the spread of the returned rows still decides
+    # whether that extreme is worth stating.
+    value_range = context.get("value_range")
+
+    if value_range is None or not (highest or lowest):
         return False
 
-    highest_value = highest.get("value")
-    lowest_value = lowest.get("value")
-
-    if highest_value is None or lowest_value is None:
-        return False
-
-    return abs(float(highest_value) - float(lowest_value)) > 1e-6
+    return abs(float(value_range)) > 1e-6

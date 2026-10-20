@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { getDatasetMetadata } from "../services/api";
+import { getDatasetMetadata, getApiErrorMessage } from "../services/api";
 
 const emit = defineEmits(["question-selected"]);
 
@@ -44,7 +44,7 @@ async function loadMetadata(options = {}) {
 
         error.value = null;
 
-        const response = await getDatasetMetadata(requestedDatasetId);
+        const response = await getDatasetMetadata(requestedDatasetId, { force: isRefresh });
 
         if (requestedDatasetId !== props.datasetId) {
             return;
@@ -59,8 +59,7 @@ async function loadMetadata(options = {}) {
         console.error("Dataset metadata error:", err);
 
         error.value =
-            err?.response?.data?.detail ||
-            err?.response?.data?.message ||
+            getApiErrorMessage(err) ||
             "Unable to load dataset metadata.";
     } finally {
         if (requestedDatasetId === props.datasetId) {

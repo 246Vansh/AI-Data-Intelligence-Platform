@@ -47,7 +47,13 @@ export function onDatasetMissing(listener) {
 
 // `datasetId` is passed only for `/dataset/{id}/...` requests, so a
 // 404 from any other endpoint is never treated as a deleted dataset.
-async function cachedGet(url, datasetId) {
+// `force` skips the cached copy (a user-requested refresh); an
+// identical request already in flight is still shared.
+async function cachedGet(url, datasetId, { force = false } = {}) {
+    if (force) {
+        cache.delete(url);
+    }
+
     if (cache.has(url)) {
         return cache.get(url);
     }
@@ -118,29 +124,33 @@ export async function deleteDataset(datasetId) {
     return response.data;
 }
 
-export async function getDatasetProfile(datasetId) {
-    return cachedGet(
-        datasetId ? `/dataset/${datasetId}/profile` : "/dataset/profile",
-        datasetId,
-    );
+// Dataset-scoped reads always name their dataset: the un-scoped
+// `/dataset/profile`-style routes resolve the server's global "active
+// dataset", which can differ from the one this UI has selected.
+function requireDatasetId(datasetId) {
+    if (!datasetId) {
+        throw new Error("No dataset selected.");
+    }
 }
 
-export async function getDatasetPreview(datasetId) {
-    return cachedGet(
-        datasetId ? `/dataset/${datasetId}/preview` : "/dataset/preview",
-        datasetId,
-    );
+export async function getDatasetProfile(datasetId, options) {
+    requireDatasetId(datasetId);
+    return cachedGet(`/dataset/${datasetId}/profile`, datasetId, options);
 }
 
-export async function getDatasetMetadata(datasetId) {
-    return cachedGet(
-        datasetId ? `/dataset/${datasetId}/metadata` : "/dataset/metadata",
-        datasetId,
-    );
+export async function getDatasetPreview(datasetId, options) {
+    requireDatasetId(datasetId);
+    return cachedGet(`/dataset/${datasetId}/preview`, datasetId, options);
 }
 
-export async function getDatasetQuality() {
-    return cachedGet("/dataset/quality");
+export async function getDatasetMetadata(datasetId, options) {
+    requireDatasetId(datasetId);
+    return cachedGet(`/dataset/${datasetId}/metadata`, datasetId, options);
+}
+
+export async function getDatasetQuality(datasetId, options) {
+    requireDatasetId(datasetId);
+    return cachedGet(`/dataset/${datasetId}/quality`, datasetId, options);
 }
 
 
@@ -149,7 +159,10 @@ export async function getDatasetQuality() {
 // ANALYSIS
 // =========================================================
 
-export async function analyzeDataset(question, datasetId, analysisContext) {
+// `signal` (AbortController) lets the caller abandon a superseded
+// request client-side. The server is not told to stop: work already
+// queued on its analysis pool still runs.
+export async function analyzeDataset(question, datasetId, analysisContext, { signal } = {}) {
     if (!question || !question.trim()) {
         throw new Error("Analysis question cannot be empty.");
     }
@@ -171,7 +184,7 @@ export async function analyzeDataset(question, datasetId, analysisContext) {
     }
 
     try {
-        const response = await api.post("/analyze", payload);
+        const response = await api.post("/analyze", payload, { signal });
         return response.data;
     } catch (error) {
         // Same dataset-missing recovery as cachedGet(), keyed on the
@@ -189,6 +202,10 @@ export async function analyzeDataset(question, datasetId, analysisContext) {
 // =========================================================
 // ERROR HANDLING
 // =========================================================
+
+export function isRequestCancelled(error) {
+    return axios.isCancel(error);
+}
 
 export function getApiErrorMessage(error) {
     if (error.response) {

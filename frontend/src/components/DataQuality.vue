@@ -2,6 +2,16 @@
 import { ref, computed, onMounted } from "vue";
 import { getDatasetQuality, getApiErrorMessage } from "../services/api";
 
+// Scoped to an explicit dataset like the other panels - the
+// un-scoped /dataset/quality route reads the server's global
+// "active dataset" instead.
+const props = defineProps({
+    datasetId: {
+        type: String,
+        default: null,
+    },
+});
+
 const loading = ref(true);
 const error = ref(null);
 const qualityData = ref(null);
@@ -59,7 +69,7 @@ async function fetchQuality() {
     error.value = null;
 
     try {
-        const data = await getDatasetQuality();
+        const data = await getDatasetQuality(props.datasetId);
         qualityData.value = data;
     } catch (err) {
         error.value = getApiErrorMessage(err);

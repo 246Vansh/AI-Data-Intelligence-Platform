@@ -34,6 +34,27 @@ const hasInsights = computed(
     () => insightCount.value > 0,
 );
 
+// The backend reports where the insight text came from. Deterministic
+// insights are computed from the result rows, not written by a model,
+// and should not be presented as AI output.
+const isComputed = computed(
+    () => props.result?.insight_source === "deterministic",
+);
+
+const allEvidenceBacked = computed(
+    () =>
+        hasInsights.value &&
+        insights.value.every(
+            (insight) =>
+                insight.evidence &&
+                typeof insight.evidence === "object",
+        ),
+);
+
+const rowLimitReached = computed(
+    () => props.result?.data?.row_limit_reached === true,
+);
+
 // =========================================================
 // INSIGHT METADATA
 // =========================================================
@@ -124,7 +145,7 @@ function getInsightMeta(type) {
             label: "Insight",
             icon: "✦",
             description:
-                "AI-generated observation",
+                "Observation",
             classes: {
                 wrapper:
                     "border-slate-100 bg-gradient-to-br from-slate-50/70 to-white",
@@ -155,7 +176,7 @@ function formatValue(value) {
         return String(value);
     }
 
-    return value.toLocaleString("en-IN", {
+    return value.toLocaleString("en-US", {
         maximumFractionDigits: 2,
     });
 }
@@ -459,18 +480,26 @@ function getEvidenceColumn(
                     <div class="min-w-0">
                         <div class="flex items-center gap-2">
                             <h4 class="m-0 truncate text-[17px] font-bold tracking-[-0.2px] text-[#172033]">
-                                AI Insights
+                                {{ isComputed ? "Insights" : "AI Insights" }}
                             </h4>
 
-                            <span
+                            <span v-if="allEvidenceBacked"
                                 class="hidden rounded-full bg-[#f3efff] px-2 py-1 text-[9px] font-bold uppercase tracking-[0.4px] text-[#6d28d9] sm:inline-flex">
                                 Evidence-backed
                             </span>
                         </div>
 
                         <p class="mt-1 mb-0 text-[11px] leading-5 text-[#98a2b3]">
-                            Key observations generated
-                            from your analysis
+                            {{
+                                isComputed
+                                    ? "Calculated directly from the rows in this result"
+                                    : "Key observations generated from your analysis"
+                            }}
+                        </p>
+
+                        <p v-if="rowLimitReached" class="mt-1 mb-0 text-[11px] leading-5 text-amber-700">
+                            Result hit its row limit - only facts that hold for
+                            the full grouping are shown.
                         </p>
                     </div>
                 </div>

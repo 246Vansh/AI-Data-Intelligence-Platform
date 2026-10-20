@@ -1,4 +1,4 @@
-from math import isclose
+from math import isclose, isnan
 
 from ai.insight_models import (
     InsightResponse,
@@ -912,6 +912,10 @@ def _numbers_equal(
         return False
 
 
+def _is_nan(value) -> bool:
+    return isinstance(value, float) and isnan(value)
+
+
 def _rows_match(
     actual: dict,
     expected: dict,
@@ -923,6 +927,13 @@ def _rows_match(
     for key in actual:
         actual_value = actual[key]
         expected_value = expected[key]
+
+        # A NULL group key or metric reaches here as NaN on both sides
+        # (the evidence row is a copy of the result row), and NaN never
+        # compares equal - so without this every insight for a result
+        # containing a NULL was rejected.
+        if _is_nan(actual_value) and _is_nan(expected_value):
+            continue
 
         if isinstance(
             actual_value,

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { getDatasetProfile } from "../services/api";
+import { getDatasetProfile, getApiErrorMessage } from "../services/api";
 
 const props = defineProps({
     datasetId: {
@@ -44,7 +44,7 @@ async function loadProfile(options = {}) {
 
         error.value = null;
 
-        const response = await getDatasetProfile(requestedDatasetId);
+        const response = await getDatasetProfile(requestedDatasetId, { force: isRefresh });
 
         if (requestedDatasetId !== props.datasetId) {
             return;
@@ -61,8 +61,7 @@ async function loadProfile(options = {}) {
         profile.value = null;
 
         error.value =
-            err?.response?.data?.detail ||
-            err?.response?.data?.message ||
+            getApiErrorMessage(err) ||
             "Unable to load dataset statistics.";
     } finally {
         if (requestedDatasetId === props.datasetId) {

@@ -178,6 +178,40 @@ const validNumericValues = computed(() => {
 // METRIC SUMMARY
 // =========================================================
 
+// Each value is already one group's aggregate. Adding them up is only
+// a dataset total for additive aggregations, and only when no groups
+// were cut off by the row limit; for mean/median/min/max a "Total" of
+// group values has no meaning.
+const aggregation = computed(
+    () => props.result?.plan?.aggregation || null,
+);
+
+const rowLimitReached = computed(
+    () => props.result?.data?.row_limit_reached === true,
+);
+
+const isAdditive = computed(() =>
+    ["sum", "count"].includes(aggregation.value),
+);
+
+const totalLabel = computed(() => {
+    if (!isAdditive.value) {
+        return null;
+    }
+
+    return rowLimitReached.value ? "Total (shown)" : "Total";
+});
+
+const metricLabel = computed(() => {
+    const metric = props.result?.plan?.metric;
+
+    if (aggregation.value && metric) {
+        return `${aggregation.value} of ${metric}`;
+    }
+
+    return yColumn.value;
+});
+
 const totalValue = computed(() => {
     return validNumericValues.value.reduce(
         (sum, value) => sum + value,
@@ -428,16 +462,13 @@ const chartOption = computed(() => {
                         },
                     },
 
-                    data: rows.value.map((row) => ({
-                        name:
-                            row?.[xColumn.value] ??
-                            "Unknown",
-
-                        value:
-                            Number(
-                                row?.[yColumn.value]
-                            ) || 0,
-                    })),
+                    // A missing aggregate is not a zero slice.
+                    data: categories.value
+                        .map((name, index) => ({
+                            name,
+                            value: numericValues.value[index],
+                        }))
+                        .filter((item) => item.value !== null),
                 },
             ],
         };
@@ -450,9 +481,6 @@ const chartOption = computed(() => {
     const isBar = type === "bar";
     const isLine = type === "line";
     const isScatter = type === "scatter";
-
-    const chartCategories =
-        categories.value.map(formatCategory);
 
     const shouldEnableZoom =
         categories.value.length > 10;
@@ -499,7 +527,7 @@ const chartOption = computed(() => {
                     : item.value;
 
                 const safeCategory = escapeHtml(category);
-                const safeYColumn = escapeHtml(yColumn.value);
+                const safeYColumn = escapeHtml(metricLabel.value);
 
                 return `
                     <div style="font-weight:600;margin-bottom:5px;">
@@ -533,7 +561,7 @@ const chartOption = computed(() => {
         xAxis: {
             type: "category",
 
-            data: chartCategories,
+            data: categories.value,
 
             boundaryGap: isBar,
 
@@ -712,14 +740,15 @@ const chartOption = computed(() => {
                 </h3>
 
                 <p v-if="hasChartData" class="mt-1 text-[11px] text-[#98a2b3]">
-                    {{ yColumn }} measured across
+                    {{ metricLabel }} by
                     {{ xColumn }}
                 </p>
             </div>
 
             <div class="flex shrink-0 items-center gap-2">
-                <span class="rounded-lg bg-[#f5f3ff] px-2.5 py-1.5 text-[10px] font-bold text-[#6d28d9]">
-                    {{ rowCount }} results
+                <span class="rounded-lg bg-[#f5f3ff] px-2.5 py-1.5 text-[10px] font-bold text-[#6d28d9]"
+                    :title="rowLimitReached ? 'Row limit reached - more groups may exist' : undefined">
+                    {{ rowCount }} results{{ rowLimitReached ? " (limit)" : "" }}
                 </span>
             </div>
         </div>
@@ -733,21 +762,30 @@ const chartOption = computed(() => {
             visualizationType !== 'pie' &&
             validNumericValues.length
         " class="grid grid-cols-4 border-b border-[#edf0f5] max-[700px]:grid-cols-2">
-            <!-- Total -->
+            <!-- Total (additive aggregations) / group count otherwise -->
             <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b">
                 <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    Total
+                    {{ totalLabel || "Groups" }}
                 </p>
 
-                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(totalValue)">
+                <p v-if="totalLabel" class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
+                    :title="formatNumber(totalValue)">
                     {{ formatCompactNumber(totalValue) }}
+                </p>
+
+                <!-- Every returned group, including ones whose aggregate is NULL. -->
+                <p v-else class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
+                    :title="validNumericValues.length < rows.length
+                        ? `${formatNumber(validNumericValues.length)} with a value`
+                        : undefined">
+                    {{ formatNumber(rows.length) }}
                 </p>
             </div>
 
             <!-- Average -->
             <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b max-[700px]:border-r-0">
                 <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    Average
+                    Avg per group
                 </p>
 
                 <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(averageValue)">

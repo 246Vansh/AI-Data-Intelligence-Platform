@@ -32,6 +32,7 @@ from ai.adapter import AnalysisClarificationError
 
 from ai.fast_planner import FastPlanner
 
+from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.insight_engine import build_deterministic_insights
 
 from data_engine.insight_generator import build_insight_response
@@ -392,6 +393,21 @@ def analyze_dataset(
     if plan.metric is not None and plan.aggregation is not None:
         metric_column = f"{plan.aggregation}_{plan.metric}"
 
+    # Both execution engines cap a grouped result at plan.limit, or
+    # DEFAULT_MAX_RESULT_ROWS when the plan sets none. Hitting that cap
+    # means rows may be missing, so insights must not describe the
+    # result as the whole dataset (see InsightEngine), and the client
+    # is told the table/chart may be partial.
+    row_limit = None
+    row_limit_reached = False
+
+    if plan.group_by:
+        row_limit = plan.limit if plan.limit is not None else DEFAULT_MAX_RESULT_ROWS
+        row_limit_reached = execution_result.row_count >= row_limit
+
+    analysis_result["row_limit"] = row_limit
+    analysis_result["row_limit_reached"] = row_limit_reached
+
     try:
         with measure(
             "deterministic_insight_context",
@@ -401,6 +417,10 @@ def analyze_dataset(
                 result=result,
                 metric_column=metric_column,
                 group_by=plan.group_by,
+                row_limit_reached=row_limit_reached,
+                sort=plan.sort,
+                sort_by=plan.sort_by,
+                time_granularity=plan.time_granularity,
             )
 
     except Exception as exc:

@@ -5,12 +5,28 @@ from typing import Any
 import pandas as pd
 
 
+# AnalysisPlan.time_granularity -> pandas Period frequency. A plan with
+# no granularity keeps the original month-level coverage.
+_PERIOD_FREQUENCIES = {
+    "day": "D",
+    "week": "W",
+    "month": "M",
+    "quarter": "Q",
+    "year": "Y",
+}
+
+
 class InsightEngine:
     """
     Deterministic analytics engine.
 
     This class calculates analytical facts from an already
     executed analysis result. It does not use an LLM.
+
+    ``row_limit_reached`` marks a result that may have been cut off by
+    the plan's LIMIT (or the DEFAULT_MAX_RESULT_ROWS safety cap): only
+    facts that still hold for the whole grouped result are computed
+    from it - see _add_extremes/_add_trend/_add_date_coverage.
     """
 
     def __init__(
@@ -18,11 +34,19 @@ class InsightEngine:
         result: pd.DataFrame,
         metric_column: str,
         group_by: list[str],
+        row_limit_reached: bool = False,
+        sort: str | None = "desc",
+        sort_by: str | None = "metric",
+        time_granularity: str | None = None,
     ):
 
         self.result = result
         self.metric_column = metric_column
         self.group_by = group_by
+        self.row_limit_reached = row_limit_reached
+        self.sort = str(sort or "desc").lower()
+        self.sort_by = sort_by or "metric"
+        self.time_granularity = time_granularity
 
     # =====================================================
     # Public API
@@ -34,6 +58,8 @@ class InsightEngine:
             "row_count": len(self.result),
             "metric_column": self.metric_column,
             "group_by": self.group_by,
+            "row_limit_reached": self.row_limit_reached,
+            "time_granularity": self.time_granularity,
         }
 
         if self.result.empty:
@@ -45,8 +71,11 @@ class InsightEngine:
         self._add_result_rows(context)
         self._add_extremes(context)
         self._add_difference(context)
-        self._add_trend(context)
-        self._add_date_coverage(context)
+
+        date_column, dates = self._find_date_column()
+
+        self._add_trend(context, date_column, dates)
+        self._add_date_coverage(context, date_column, dates)
 
         return context
 
@@ -97,15 +126,32 @@ class InsightEngine:
             ]
         )
 
-        context["highest"] = {
-            "value": highest_value,
-            "row": self.result.loc[max_index].to_dict(),
-        }
+        # Spread across the returned rows only - used to decide whether
+        # an extreme is worth reporting at all, never as a claim.
+        context["value_range"] = highest_value - lowest_value
 
-        context["lowest"] = {
-            "value": lowest_value,
-            "row": self.result.loc[min_index].to_dict(),
-        }
+        # A limited result sorted by the metric still contains the
+        # global extreme at its sorted end (DuckDB orders NULLs last
+        # either way), but not the opposite one; any other ordering
+        # guarantees neither.
+        keep_highest = not self.row_limit_reached or (
+            self.sort_by == "metric" and self.sort == "desc"
+        )
+        keep_lowest = not self.row_limit_reached or (
+            self.sort_by == "metric" and self.sort == "asc"
+        )
+
+        if keep_highest:
+            context["highest"] = {
+                "value": highest_value,
+                "row": self.result.loc[max_index].to_dict(),
+            }
+
+        if keep_lowest:
+            context["lowest"] = {
+                "value": lowest_value,
+                "row": self.result.loc[min_index].to_dict(),
+            }
 
     # =====================================================
     # Difference
@@ -131,7 +177,21 @@ class InsightEngine:
     def _add_trend(
         self,
         context: dict[str, Any],
+        date_column: str | None,
+        dates: pd.Series | None,
     ) -> None:
+
+        # A trend is only meaningful along time. Row order alone is
+        # not time order (results default to metric-descending), a
+        # categorical grouping has no "periods", several group_by
+        # columns interleave separate series, and a limited result may
+        # be missing periods in between - none of those gets a trend.
+        if (
+            date_column is None
+            or len(self.group_by) != 1
+            or self.row_limit_reached
+        ):
+            return
 
         if len(self.result) < 2:
             context["trend"] = {
@@ -140,8 +200,10 @@ class InsightEngine:
             }
             return
 
+        ordered = self.result.loc[dates.sort_values(kind="stable").index]
+
         metric = pd.to_numeric(
-            self.result[self.metric_column],
+            ordered[self.metric_column],
             errors="coerce",
         )
 
@@ -187,22 +249,29 @@ class InsightEngine:
                 else "mixed"
             ),
             "direction": direction,
+            "date_column": date_column,
             "first_value": float(values[0]),
             "last_value": float(values[-1]),
             "change": float(values[-1] - values[0]),
+            # Evidence rows in chronological order, metric present.
+            "rows": ordered.loc[valid.index].to_dict(orient="records"),
         }
 
     # =====================================================
     # Date coverage
     # =====================================================
 
-    def _add_date_coverage(
-        self,
-        context: dict[str, Any],
-    ) -> None:
+    def _find_date_column(self) -> tuple[str | None, pd.Series | None]:
+        """
+        The first group_by column whose every value parses as a date,
+        with its parsed values - shared by _add_trend and
+        _add_date_coverage. Numeric/boolean columns are never treated
+        as dates: pandas would otherwise read integers such as years
+        or IDs as nanosecond epoch timestamps.
+        """
 
         if not self.group_by:
-            return
+            return None, None
 
         # Bounded prefix size used to cheaply reject an obviously
         # non-date column (e.g. thousands of categorical strings)
@@ -210,8 +279,6 @@ class InsightEngine:
         # short-circuit below for why this stays exact, not a
         # heuristic.
         SAMPLE_SIZE = 20
-
-        date_column = None
 
         for column in self.group_by:
             if column not in self.result.columns:
@@ -232,6 +299,11 @@ class InsightEngine:
 
             if pd.api.types.is_datetime64_any_dtype(series):
                 parsed = series
+
+            elif pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(
+                series
+            ):
+                continue
 
             else:
                 # -----------------------------------------
@@ -268,11 +340,20 @@ class InsightEngine:
                 )
 
             if parsed.notna().all():
-                date_column = column
-                dates = parsed
-                break
+                return column, parsed
 
-        if date_column is None:
+        return None, None
+
+    def _add_date_coverage(
+        self,
+        context: dict[str, Any],
+        date_column: str | None,
+        dates: pd.Series | None,
+    ) -> None:
+
+        # Missing periods in a limited result are usually just rows
+        # past the LIMIT, not gaps in the data.
+        if date_column is None or self.row_limit_reached:
             return
 
         if dates.isna().any():
@@ -280,20 +361,27 @@ class InsightEngine:
 
         dates = dates.sort_values()
 
-        if len(dates) == 1:
+        frequency_name = (
+            self.time_granularity
+            if self.time_granularity in _PERIOD_FREQUENCIES
+            else "month"
+        )
+        period_freq = _PERIOD_FREQUENCIES[frequency_name]
+
+        unique_periods = (
+            dates.dt.to_period(period_freq).drop_duplicates().sort_values()
+        )
+
+        if len(unique_periods) == 1:
             frequency = "unknown"
             expected_periods = 1
             missing_periods = []
 
         else:
-            month_periods = dates.dt.to_period("M")
-
-            unique_periods = month_periods.drop_duplicates().sort_values()
-
             expected_range = pd.period_range(
                 start=unique_periods.min(),
                 end=unique_periods.max(),
-                freq="M",
+                freq=period_freq,
             )
 
             expected_periods = len(expected_range)
@@ -306,14 +394,16 @@ class InsightEngine:
                 if period not in observed_periods
             ]
 
-            frequency = "month"
+            frequency = frequency_name
 
         context["date_coverage"] = {
             "date_column": date_column,
             "frequency": frequency,
             "min_date": dates.min().isoformat(),
             "max_date": dates.max().isoformat(),
-            "observed_periods": len(dates),
+            # Distinct periods, not rows: a date x category grouping
+            # repeats each period once per category.
+            "observed_periods": len(unique_periods),
             "expected_periods": expected_periods,
             "missing_periods": missing_periods,
             "is_continuous": (
@@ -326,12 +416,20 @@ def build_deterministic_insights(
     result: pd.DataFrame,
     metric_column: str,
     group_by: list[str],
+    row_limit_reached: bool = False,
+    sort: str | None = "desc",
+    sort_by: str | None = "metric",
+    time_granularity: str | None = None,
 ) -> dict[str, Any]:
 
     engine = InsightEngine(
         result=result,
         metric_column=metric_column,
         group_by=group_by,
+        row_limit_reached=row_limit_reached,
+        sort=sort,
+        sort_by=sort_by,
+        time_granularity=time_granularity,
     )
 
     return engine.generate()

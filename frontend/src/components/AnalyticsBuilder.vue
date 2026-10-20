@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch, nextTick } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 
 import AnalyticsInsights from "./AnalyticsInsights.vue";
 import AnalyticsChart from "./AnalyticsChart.vue";
@@ -8,6 +8,7 @@ import {
     analyzeDataset,
     getDatasetMetadata,
     getApiErrorMessage,
+    isRequestCancelled,
 } from "../services/api";
 
 // =========================================================
@@ -52,14 +53,32 @@ const metadataError = ref(null);
 
 // Incremented on every analyze() call and whenever the question is
 // replaced/cleared, so a response from a superseded request can never
-// write into the current UI state. The HTTP request itself is not
-// cancelled.
+// write into the current UI state. The superseded HTTP request is also
+// aborted to free the browser connection; the server does not cancel
+// work on disconnect, so an already-queued analysis may still run.
 let analysisSeq = 0;
+let analysisController = null;
 
 function invalidateAnalysis() {
     analysisSeq += 1;
     loading.value = false;
+    analysisController?.abort();
+    analysisController = null;
 }
+
+onBeforeUnmount(invalidateAnalysis);
+
+// Rendering every returned row (up to the backend's 10,000-row cap)
+// would build a very large table DOM; the chart still uses all rows.
+const MAX_TABLE_ROWS = 500;
+
+const tableRows = computed(() =>
+    (result.value?.data?.rows || []).slice(0, MAX_TABLE_ROWS),
+);
+
+const tableRowsHidden = computed(
+    () => (result.value?.data?.rows?.length ?? 0) > MAX_TABLE_ROWS,
+);
 
 // Classified from HTTP status only. 422 = the question couldn't be
 // turned into a plan (clarification / rephrase). Retrying the same
@@ -239,10 +258,10 @@ function formatCell(value) {
 
     if (typeof value === "number") {
         if (Number.isInteger(value)) {
-            return value.toLocaleString("en-IN");
+            return value.toLocaleString("en-US");
         }
 
-        return value.toLocaleString("en-IN", {
+        return value.toLocaleString("en-US", {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         });
@@ -313,6 +332,9 @@ async function analyze() {
     }
 
     const seq = ++analysisSeq;
+    analysisController?.abort();
+    const controller = new AbortController();
+    analysisController = controller;
 
     // Captured so a response that resolves after the user has
     // already switched datasets can be detected and ignored below,
@@ -337,16 +359,20 @@ async function analyze() {
         };
 
         const response =
-            await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext);
+            await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext, {
+                signal: controller.signal,
+            });
 
         if (seq !== analysisSeq || requestedDatasetId !== props.datasetId) {
             return;
         }
 
         if (!response?.success) {
+            const responseError = response?.error;
+
             error.value =
-                response?.error?.message ||
-                response?.error ||
+                responseError?.message ||
+                (typeof responseError === "string" ? responseError : null) ||
                 "Unable to analyze the dataset.";
 
             return;
@@ -354,7 +380,11 @@ async function analyze() {
 
         result.value = response;
     } catch (err) {
-        if (seq !== analysisSeq || requestedDatasetId !== props.datasetId) {
+        if (
+            seq !== analysisSeq ||
+            requestedDatasetId !== props.datasetId ||
+            isRequestCancelled(err)
+        ) {
             return;
         }
 
@@ -369,6 +399,10 @@ async function analyze() {
             getApiErrorMessage(err) ||
             "Unable to analyze dataset.";
     } finally {
+        if (analysisController === controller) {
+            analysisController = null;
+        }
+
         if (seq === analysisSeq && requestedDatasetId === props.datasetId) {
             loading.value = false;
         }
@@ -881,6 +915,13 @@ onMounted(() => {
 
                             </p>
 
+                            <p v-if="result.data?.row_limit_reached"
+                                class="mt-1 text-xs font-medium text-amber-700">
+                                Row limit of {{ result.data.row_limit }} reached - any
+                                groups beyond it are not shown, and insights only state
+                                what the returned rows can support.
+                            </p>
+
                         </div>
 
                     </div>
@@ -901,6 +942,12 @@ onMounted(() => {
                 <!-- AI Insights -->
 
                 <AnalyticsInsights v-if="result.insights?.insights?.length" :result="result" />
+
+                <!-- `result` is only set after a successful response, so
+                     this never shows while loading or after a failure. -->
+                <p v-else-if="result.insight_status === 'success'" class="mt-4 text-[11px] text-slate-400">
+                    No insights are supported by this result.
+                </p>
 
                 <p v-if="result.insight_status === 'unavailable'" :title="result.insight_error || undefined"
                     class="mt-4 text-[11px] text-slate-400">
@@ -1024,7 +1071,7 @@ onMounted(() => {
 
                             <tbody>
 
-                                <tr v-for="(row, index) in result.data?.rows || []" :key="index"
+                                <tr v-for="(row, index) in tableRows" :key="index"
                                     class="transition-colors duration-150 hover:bg-violet-50/50">
 
                                     <td v-for="(column, columnIndex) in result.data?.columns || []" :key="column"
@@ -1066,6 +1113,12 @@ onMounted(() => {
                         </table>
 
                     </div>
+
+                    <p v-if="tableRowsHidden"
+                        class="m-0 border-t border-slate-100 px-4 py-2.5 text-[11px] text-slate-500">
+                        Showing the first {{ tableRows.length }} of
+                        {{ result.data?.rows?.length }} returned rows.
+                    </p>
 
                 </div>
 
