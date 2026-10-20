@@ -401,9 +401,11 @@ def analyze_dataset(
                 detail=(
                     "This looks like a follow-up to the previous analysis, but it "
                     "could not be applied safely. Supported follow-ups change the "
-                    'ranking ("bottom 10 instead") or the grouping ("break that '
-                    'down by region", "by city instead"). Otherwise, ask a '
-                    "complete question."
+                    'ranking ("bottom 10 instead"), the grouping ("break that '
+                    'down by region", "by city instead"), or add a filter that '
+                    'names its column ("only include the North region", "only '
+                    'include quantity greater than 10", "use South instead of '
+                    'North"). Otherwise, ask a complete question.'
                 ),
             )
 
