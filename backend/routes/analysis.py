@@ -34,6 +34,7 @@ from ai.fast_planner import FastPlanner
 
 from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.insight_engine import build_deterministic_insights
+from data_engine.plan_explanation import explain_plan
 
 from data_engine.insight_generator import build_insight_response
 
@@ -408,6 +409,19 @@ def analyze_dataset(
     analysis_result["row_limit"] = row_limit
     analysis_result["row_limit_reached"] = row_limit_reached
 
+    # Supplementary, like insights: a plan the explainer cannot describe
+    # yields null rather than failing an otherwise successful analysis.
+    try:
+        plan_explanation = explain_plan(
+            plan,
+            planner_type=planner_type,
+            row_limit=row_limit,
+            row_limit_reached=row_limit_reached,
+        )
+    except Exception as exc:
+        logger.warning("Plan explanation failed", exc_info=exc)
+        plan_explanation = None
+
     try:
         with measure(
             "deterministic_insight_context",
@@ -585,6 +599,10 @@ def analyze_dataset(
             "time_column": plan.time_column,
             "time_granularity": (plan.time_granularity),
         },
+        # -------------------------------------------------
+        # Plain-language description of the plan above
+        # -------------------------------------------------
+        "plan_explanation": plan_explanation,
         # -------------------------------------------------
         # Performance
         # -------------------------------------------------

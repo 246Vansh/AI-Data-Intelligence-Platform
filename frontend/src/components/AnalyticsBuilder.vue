@@ -76,6 +76,26 @@ const tableRows = computed(() =>
     (result.value?.data?.rows || []).slice(0, MAX_TABLE_ROWS),
 );
 
+// Normalized view of result.plan_explanation; null when the backend
+// sent none (older server, or explanation generation failed).
+const planExplanation = computed(() => {
+    const explanation = result.value?.plan_explanation;
+
+    if (!explanation || !Array.isArray(explanation.steps) || !explanation.steps.length) {
+        return null;
+    }
+
+    const labels = { "rule-based": "rule-based interpretation", ai: "AI interpretation" };
+
+    return {
+        interpretedBy: labels[explanation.interpreted_by] || "interpretation",
+        steps: explanation.steps.map(String),
+        limitations: Array.isArray(explanation.limitations)
+            ? explanation.limitations.map(String)
+            : [],
+    };
+});
+
 const tableRowsHidden = computed(
     () => (result.value?.data?.rows?.length ?? 0) > MAX_TABLE_ROWS,
 );
@@ -938,6 +958,35 @@ onMounted(() => {
                     </div>
 
                 </div>
+
+                <!-- How this was calculated: built from the executed plan.
+                     Text interpolation (never v-html) keeps column names and
+                     filter values as text. Absent/null explanation renders nothing. -->
+
+                <details v-if="planExplanation" open
+                    class="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
+                    <summary class="cursor-pointer select-none text-xs font-bold text-slate-700">
+                        How this was calculated
+                        <span class="ml-1 font-normal text-slate-400">
+                            ({{ planExplanation.interpretedBy }})
+                        </span>
+                    </summary>
+
+                    <ul class="m-0 mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-slate-600">
+                        <li v-for="(step, index) in planExplanation.steps" :key="`step-${index}`"
+                            class="break-words">
+                            {{ step }}
+                        </li>
+                    </ul>
+
+                    <ul v-if="planExplanation.limitations.length"
+                        class="m-0 mt-2 list-none space-y-1 pl-0 text-xs leading-5 text-amber-700">
+                        <li v-for="(limitation, index) in planExplanation.limitations"
+                            :key="`limitation-${index}`" class="break-words">
+                            ⚠ {{ limitation }}
+                        </li>
+                    </ul>
+                </details>
 
                 <!-- AI Insights -->
 
