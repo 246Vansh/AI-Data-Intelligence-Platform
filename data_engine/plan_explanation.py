@@ -58,6 +58,7 @@ _GRANULARITY_PHRASES = {
 _PLANNER_LABELS = {
     "fast": "rule-based",
     "ai": "ai",
+    "follow_up": "follow-up",
 }
 
 
@@ -67,6 +68,7 @@ def explain_plan(
     planner_type: str | None,
     row_limit: int | None,
     row_limit_reached: bool,
+    follow_up_change: str | None = None,
 ) -> dict[str, Any]:
     """
     Return ``{"interpreted_by", "steps", "limitations"}`` for an
@@ -97,6 +99,11 @@ def explain_plan(
 
     steps: list[str] = []
     limitations: list[str] = []
+
+    # The one edit ai.follow_up applied to the previous plan; every
+    # step below still describes the full plan that actually ran.
+    if follow_up_change:
+        steps.append(f"Follow-up to the previous analysis: {follow_up_change}.")
 
     # -----------------------------------------
     # What was calculated, per what

@@ -176,9 +176,9 @@ export async function analyzeDataset(question, datasetId, analysisContext, { sig
         dataset_id: datasetId,
     };
 
-    // `analysis_context` (mode + full dataset_ids[] + primary_dataset_id)
-    // is additive - existing SINGLE-mode callers that omit it keep
-    // working against the current dataset_id-only contract untouched.
+    // Optional follow-up context: `{dataset_id, previous_plan}` for the
+    // latest successful analysis of THIS dataset (the backend rejects a
+    // mismatched dataset_id). Omitted for a standalone question.
     if (analysisContext) {
         payload.analysis_context = analysisContext;
     }

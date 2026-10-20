@@ -3,7 +3,19 @@ import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from typing import Annotated, Literal, Union
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    field_validator,
+)
 
 import backend.jobs as jobs
 
@@ -31,6 +43,9 @@ from ai.planner import create_analysis_plan
 from ai.adapter import AnalysisClarificationError
 
 from ai.fast_planner import FastPlanner
+from ai.follow_up import references_previous, resolve_follow_up
+
+from data_engine.analysis_plan import AnalysisPlan, FilterCondition
 
 from data_engine.duckdb_query_engine import DEFAULT_MAX_RESULT_ROWS
 from data_engine.insight_engine import build_deterministic_insights
@@ -84,6 +99,75 @@ QUESTION_MAX_LENGTH = 500
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+# =========================================================
+# FOLLOW-UP CONTEXT (Step 96)
+#
+# The previous successful analysis, echoed back by the client so a
+# follow-up ("break that down by region") can be applied to it. Only the
+# canonical plan - never result rows or a transcript - and bounded in
+# every dimension. Untrusted: the route re-validates it against the
+# requested dataset before use.
+# =========================================================
+
+_IDENTIFIER = Annotated[StrictStr, StringConstraints(min_length=1, max_length=200)]
+_FilterValue = Union[
+    StrictBool,
+    StrictInt,
+    StrictFloat,
+    Annotated[StrictStr, StringConstraints(max_length=500)],
+]
+
+
+class PreviousPlanFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    column: _IDENTIFIER
+    operator: Literal["=", "!=", ">", ">=", "<", "<="]
+    value: _FilterValue
+
+
+class PreviousPlan(BaseModel):
+    """Same keys as the response's canonical "plan" object."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filters: list[PreviousPlanFilter] = Field(default_factory=list, max_length=20)
+    group_by: list[_IDENTIFIER] = Field(default_factory=list, max_length=10)
+    metric: _IDENTIFIER
+    aggregation: Annotated[StrictStr, StringConstraints(max_length=20)]
+    sort: Annotated[StrictStr, StringConstraints(max_length=10)] = "desc"
+    sort_by: Annotated[StrictStr, StringConstraints(max_length=10)] = "metric"
+    limit: StrictInt | None = Field(default=None, ge=1, le=1_000_000)
+    visualization: Annotated[StrictStr, StringConstraints(max_length=20)] | None = None
+    time_column: _IDENTIFIER | None = None
+    time_granularity: Annotated[StrictStr, StringConstraints(max_length=10)] | None = None
+
+    def to_analysis_plan(self) -> AnalysisPlan:
+        return AnalysisPlan(
+            filters=[
+                FilterCondition(f.column, f.operator, f.value) for f in self.filters
+            ],
+            group_by=list(self.group_by),
+            metric=self.metric,
+            aggregation=self.aggregation,
+            sort=self.sort,
+            sort_by=self.sort_by,
+            limit=self.limit,
+            visualization=self.visualization,
+            time_column=self.time_column,
+            time_granularity=self.time_granularity,
+        )
+
+
+class AnalysisContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Must equal the request's dataset_id - context is never carried
+    # across datasets.
+    dataset_id: Annotated[StrictStr, StringConstraints(min_length=1, max_length=100)]
+    previous_plan: PreviousPlan
+
+
 class AnalysisRequest(BaseModel):
     dataset_id: str = Field(
         ...,
@@ -94,6 +178,11 @@ class AnalysisRequest(BaseModel):
         ...,
         max_length=QUESTION_MAX_LENGTH,
         description="Natural-language question about the specified dataset.",
+    )
+
+    analysis_context: AnalysisContext | None = Field(
+        default=None,
+        description="Optional: the most recent successful plan, for a follow-up question.",
     )
 
     @field_validator("question")
@@ -184,6 +273,20 @@ def analyze_dataset(
             detail="Dataset loading failed.",
         ) from exc
 
+    # Follow-up context is only ever applied to the dataset it came
+    # from; checked after authorization so an unknown or foreign
+    # dataset still gets the same 404 as without context.
+    context = request.analysis_context
+
+    if context is not None and context.dataset_id != request.dataset_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "analysis_context belongs to a different dataset than "
+                "dataset_id. Ask the question again without the previous context."
+            ),
+        )
+
     # =====================================================
     # 3. GENERATE / LOAD METADATA
     # =====================================================
@@ -216,6 +319,26 @@ def analyze_dataset(
             detail="Metadata generation failed.",
         ) from exc
 
+    # The client-supplied previous plan is untrusted: it must pass the
+    # same validator as any new plan, against THIS dataset's columns,
+    # before a follow-up may build on it.
+    previous_plan = None
+
+    if context is not None:
+        previous_plan = context.previous_plan.to_analysis_plan()
+
+        try:
+            validate_plan(
+                _ColumnsView(dataset.column_names),
+                previous_plan,
+                metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid analysis_context: {exc}",
+            ) from exc
+
     # =====================================================
     # 4. FAST PLANNER
     # =====================================================
@@ -244,10 +367,55 @@ def analyze_dataset(
         plan = None
 
     # =====================================================
+    # 4b. FOLLOW-UP TO THE PREVIOUS PLAN (Step 96)
+    #
+    # A recognized edit of the previous plan wins when the question
+    # cannot stand alone, or when it explicitly refers back. A complete
+    # standalone question keeps its fresh plan. A clear reference that
+    # cannot be applied is refused here: handing it to the AI planner
+    # without context would answer a different question.
+    # =====================================================
+
+    follow_up_change = None
+
+    if previous_plan is not None:
+        with measure(
+            "follow_up_planning",
+            timings,
+        ):
+            try:
+                follow_up = resolve_follow_up(question, previous_plan, metadata)
+            except Exception:
+                logger.warning("Follow-up resolution failed", exc_info=True)
+                follow_up = None
+
+            refers_back = references_previous(question)
+
+        if follow_up is not None and (plan is None or refers_back):
+            plan = follow_up.plan
+            follow_up_change = follow_up.change
+
+        elif plan is None and refers_back:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This looks like a follow-up to the previous analysis, but it "
+                    "could not be applied safely. Supported follow-ups change the "
+                    'ranking ("bottom 10 instead") or the grouping ("break that '
+                    'down by region", "by city instead"). Otherwise, ask a '
+                    "complete question."
+                ),
+            )
+
+    # =====================================================
     # 5. AI PLANNER FALLBACK
     # =====================================================
 
-    if plan is not None:
+    if follow_up_change is not None:
+        planner_type = "follow_up"
+        planner_fallback = False
+
+    elif plan is not None:
         planner_type = "fast"
         planner_fallback = False
 
@@ -417,6 +585,7 @@ def analyze_dataset(
             planner_type=planner_type,
             row_limit=row_limit,
             row_limit_reached=row_limit_reached,
+            follow_up_change=follow_up_change,
         )
     except Exception as exc:
         logger.warning("Plan explanation failed", exc_info=exc)

@@ -10,6 +10,10 @@ import {
     getApiErrorMessage,
     isRequestCancelled,
 } from "../services/api";
+import {
+    buildFollowUpContext,
+    selectFollowUpContext,
+} from "../services/followUpContext";
 
 // =========================================================
 // STATE
@@ -64,6 +68,7 @@ function invalidateAnalysis() {
     loading.value = false;
     analysisController?.abort();
     analysisController = null;
+    followUpPending.value = false;
 }
 
 onBeforeUnmount(invalidateAnalysis);
@@ -76,6 +81,25 @@ const tableRows = computed(() =>
     (result.value?.data?.rows || []).slice(0, MAX_TABLE_ROWS),
 );
 
+// =========================================================
+// FOLLOW-UP CONTEXT
+//
+// The canonical plan of the latest SUCCESSFUL analysis, sent back as
+// analysis_context so a follow-up ("break that down by region") can be
+// applied to it. Only that one plan - no rows, no transcript. Cleared on
+// any failure, Clear, or new example, and never sent for another dataset
+// (this component is also remounted whenever the selected dataset
+// changes, which drops it entirely).
+// =========================================================
+
+const followUpContext = ref(null);
+const followUpEnabled = ref(true);
+const followUpPending = ref(false);
+
+const canFollowUp = computed(
+    () => !!selectFollowUpContext(followUpContext.value, props.datasetId, true),
+);
+
 // Normalized view of result.plan_explanation; null when the backend
 // sent none (older server, or explanation generation failed).
 const planExplanation = computed(() => {
@@ -85,7 +109,11 @@ const planExplanation = computed(() => {
         return null;
     }
 
-    const labels = { "rule-based": "rule-based interpretation", ai: "AI interpretation" };
+    const labels = {
+        "rule-based": "rule-based interpretation",
+        ai: "AI interpretation",
+        "follow-up": "follow-up to the previous result",
+    };
 
     return {
         interpretedBy: labels[explanation.interpreted_by] || "interpretation",
@@ -363,20 +391,20 @@ async function analyze() {
     const requestedDatasetId = props.datasetId;
 
     try {
+        // The current result stays visible until this request succeeds
+        // (replaced) or fails (cleared), so the follow-up context always
+        // matches the result on screen.
         loading.value = true;
         error.value = null;
         errorStatus.value = null;
-        result.value = null;
 
-        // Execution still runs against a single dataset (the primary/
-        // anchor one) - actual multi-dataset joins/query execution
-        // are a future step. analysis_context is carried along so
-        // the backend can start branching on it once that lands.
-        const analysisContext = {
-            mode: props.analysisMode,
-            dataset_ids: props.selectedDatasetIds,
-            primary_dataset_id: requestedDatasetId || null,
-        };
+        const analysisContext = selectFollowUpContext(
+            followUpContext.value,
+            requestedDatasetId,
+            followUpEnabled.value,
+        );
+
+        followUpPending.value = !!analysisContext;
 
         const response =
             await analyzeDataset(trimmedQuestion, requestedDatasetId, analysisContext, {
@@ -395,10 +423,14 @@ async function analyze() {
                 (typeof responseError === "string" ? responseError : null) ||
                 "Unable to analyze the dataset.";
 
+            result.value = null;
+            followUpContext.value = null;
             return;
         }
 
         result.value = response;
+        followUpContext.value = buildFollowUpContext(response, requestedDatasetId);
+        followUpEnabled.value = true;
     } catch (err) {
         if (
             seq !== analysisSeq ||
@@ -418,6 +450,10 @@ async function analyze() {
         error.value =
             getApiErrorMessage(err) ||
             "Unable to analyze dataset.";
+
+        // A failed analysis never becomes the next follow-up's context.
+        result.value = null;
+        followUpContext.value = null;
     } finally {
         if (analysisController === controller) {
             analysisController = null;
@@ -425,6 +461,7 @@ async function analyze() {
 
         if (seq === analysisSeq && requestedDatasetId === props.datasetId) {
             loading.value = false;
+            followUpPending.value = false;
         }
     }
 }
@@ -442,6 +479,7 @@ function useExample(example) {
     error.value = null;
     errorStatus.value = null;
     result.value = null;
+    followUpContext.value = null;
 }
 
 function clearAnalysis() {
@@ -450,6 +488,7 @@ function clearAnalysis() {
     error.value = null;
     errorStatus.value = null;
     result.value = null;
+    followUpContext.value = null;
 }
 
 function handleKeydown(event) {
@@ -478,6 +517,7 @@ watch(
         error.value = null;
         errorStatus.value = null;
         result.value = null;
+        followUpContext.value = null;
 
         await nextTick();
     },
@@ -730,7 +770,17 @@ onMounted(() => {
 
                         </span>
 
-                        <div class="flex items-center gap-2 max-[700px]:w-full">
+                        <div class="flex items-center gap-2 max-[700px]:w-full max-[700px]:flex-wrap">
+
+                            <!-- Follow-up toggle: only offered for a successful
+                                 result on the currently selected dataset. -->
+
+                            <label v-if="canFollowUp"
+                                class="flex cursor-pointer select-none items-center gap-1.5 text-[11px] font-semibold text-slate-600">
+                                <input v-model="followUpEnabled" type="checkbox" :disabled="loading"
+                                    class="h-3.5 w-3.5 accent-violet-600" />
+                                Follow up on this result
+                            </label>
 
                             <!-- Clear -->
 
@@ -807,7 +857,7 @@ onMounted(() => {
                 <div>
 
                     <strong class="block text-[13px] font-bold text-violet-900">
-                        Analyzing your question
+                        {{ followUpPending ? "Applying your follow-up" : "Analyzing your question" }}
                     </strong>
 
                     <p class="mt-0.5 text-[11px] text-slate-500">
