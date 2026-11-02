@@ -3,3 +3,8 @@
 __pycache__/
 data/uploads/
 .venv/
+# Auth database (Step 3) and its SQLite sidecar files
+data/auth.db
+data/auth.db-journal
+data/auth.db-wal
+data/auth.db-shm

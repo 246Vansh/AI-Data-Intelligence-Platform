@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,6 +8,8 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from backend.auth.config import load_auth_settings
+from backend.dependencies import get_session_service
 from backend.routes.dataset import (
     MAX_UPLOAD_BYTES,
     PARQUET_STORAGE_ROOT,
@@ -113,9 +116,38 @@ def _recover_datasets(
         seen_ids.add(manifest.dataset_id)
 
 
+def _cleanup_expired_sessions() -> None:
+    """
+    Auth Step 3: one bounded pass removing expired/orphaned sessions at
+    startup. A single DELETE (SQLite busy timeout 10s) with the same
+    expiry rules validation enforces, so a live session is never
+    removed. Skipped when no auth database exists yet - startup never
+    creates one. Never raises and never fails startup.
+    """
+
+    try:
+        settings = load_auth_settings()
+
+        if settings.dev_mode:
+            logger.warning(
+                "AUTH_DEV_MODE is active: API authentication is bypassed."
+            )
+
+        if not os.path.exists(settings.db_path):
+            return
+
+        removed = get_session_service(settings).cleanup_expired_sessions()
+        if removed:
+            logger.info("Removed %d expired session(s) at startup.", removed)
+
+    except Exception as exc:  # noqa: BLE001 - must not block startup
+        logger.warning("Startup session cleanup skipped: %s", type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _recover_datasets()
+    _cleanup_expired_sessions()
     yield
 
 
