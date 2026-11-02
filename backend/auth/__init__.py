@@ -13,6 +13,16 @@ from backend.auth.passwords import (
     validate_password_policy,
     verify_password,
 )
+from backend.auth.sessions import (
+    DEFAULT_ABSOLUTE_LIFETIME,
+    DEFAULT_IDLE_TIMEOUT,
+    NewSession,
+    SessionError,
+    SessionInfo,
+    SessionService,
+    SessionStoreError,
+    UnknownUserError,
+)
 from backend.auth.store import (
     AUTH_DB_PATH_ENV_VAR,
     DEFAULT_AUTH_DB_PATH,
@@ -25,7 +35,15 @@ from backend.auth.store import (
 
 __all__ = [
     "AUTH_DB_PATH_ENV_VAR",
+    "DEFAULT_ABSOLUTE_LIFETIME",
     "DEFAULT_AUTH_DB_PATH",
+    "DEFAULT_IDLE_TIMEOUT",
+    "NewSession",
+    "SessionError",
+    "SessionInfo",
+    "SessionService",
+    "SessionStoreError",
+    "UnknownUserError",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",
     "CredentialStore",
