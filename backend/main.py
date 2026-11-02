@@ -9,6 +9,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from backend.auth.config import load_auth_settings
+from backend.auth.routes import router as auth_router
+from backend.cors import ALLOWED_ORIGINS
 from backend.dependencies import get_session_service
 from backend.routes.dataset import (
     MAX_UPLOAD_BYTES,
@@ -297,16 +299,7 @@ app.add_middleware(MaxBodySizeMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:5175",
-        "http://127.0.0.1:5175",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -316,6 +309,7 @@ app.add_middleware(
 app.include_router(dataset_router)
 app.include_router(analysis_router)
 app.include_router(jobs_router)
+app.include_router(auth_router)
 
 
 @app.get("/")

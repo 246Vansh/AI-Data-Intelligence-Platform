@@ -13,6 +13,7 @@ Environment variables (all optional):
   AUTH_COOKIE_SAMESITE    "strict" or "lax"              default "strict"
   AUTH_DEV_MODE           explicit dev identity bypass   default OFF
   DEV_USER_ID             identity used in dev mode      default "dev-user"
+  AUTH_ALLOW_REGISTRATION open self-registration         default OFF
   AUTH_DB_PATH            see backend.auth.store
   AUTH_SESSION_*_SECONDS  see backend.auth.sessions
 
@@ -49,6 +50,7 @@ AUTH_COOKIE_SECURE_ENV_VAR = "AUTH_COOKIE_SECURE"
 AUTH_COOKIE_SAMESITE_ENV_VAR = "AUTH_COOKIE_SAMESITE"
 AUTH_DEV_MODE_ENV_VAR = "AUTH_DEV_MODE"
 DEV_USER_ID_ENV_VAR = "DEV_USER_ID"
+AUTH_ALLOW_REGISTRATION_ENV_VAR = "AUTH_ALLOW_REGISTRATION"
 
 DEFAULT_COOKIE_NAME = "aidi_session"
 DEFAULT_COOKIE_SAMESITE = "strict"
@@ -74,6 +76,7 @@ class AuthSettings:
     cookie_samesite: str
     dev_mode: bool
     dev_user_id: str
+    allow_registration: bool
     db_path: str
     idle_timeout: timedelta
     absolute_lifetime: timedelta
@@ -134,6 +137,7 @@ def load_auth_settings() -> AuthSettings:
         cookie_samesite=samesite,
         dev_mode=dev_mode,
         dev_user_id=os.environ.get(DEV_USER_ID_ENV_VAR, "").strip() or DEFAULT_DEV_USER_ID,
+        allow_registration=_read_flag(AUTH_ALLOW_REGISTRATION_ENV_VAR, default=False),
         db_path=_read_auth_db_path(),
         idle_timeout=_read_positive_seconds_env(
             SESSION_IDLE_TIMEOUT_ENV_VAR, DEFAULT_IDLE_TIMEOUT
