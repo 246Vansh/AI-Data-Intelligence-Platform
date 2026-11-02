@@ -30,7 +30,19 @@ const props = defineProps({
         type: String,
         default: "",
     },
+    // Signed-in user's public profile ({id, email}); null hides the
+    // account controls.
+    user: {
+        type: Object,
+        default: null,
+    },
+    signingOut: {
+        type: Boolean,
+        default: false,
+    },
 });
+
+const emit = defineEmits(["logout"]);
 
 // =========================================================
 // STATE
@@ -781,6 +793,20 @@ watch(
                         <div
                             class="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-slate-800 to-slate-950 text-[10px] font-bold text-white shadow-sm">
                             AI
+                        </div>
+
+                        <div v-if="user" class="flex items-center gap-2">
+
+                            <span class="hidden max-w-[180px] truncate text-[11px] font-semibold text-slate-500 md:inline"
+                                :title="user.email || user.id">
+                                {{ user.email || user.id }}
+                            </span>
+
+                            <button type="button" :disabled="signingOut" @click="emit('logout')"
+                                class="h-9 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-semibold text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200 disabled:cursor-not-allowed disabled:opacity-60">
+                                {{ signingOut ? 'Signing out…' : 'Sign out' }}
+                            </button>
+
                         </div>
 
                     </div>

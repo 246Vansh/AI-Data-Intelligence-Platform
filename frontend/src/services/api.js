@@ -1,11 +1,55 @@
 import axios from "axios";
 
-const api = axios.create({
+// Authentication is an HttpOnly session cookie set and cleared by the
+// backend only - this client never reads, stores or sends a token
+// itself. Through the Vite proxy the API is same-origin, so the browser
+// attaches the cookie automatically; `withCredentials` additionally
+// covers a cross-origin VITE_API_BASE_URL (which the backend's explicit
+// CORS allow-list must then include).
+export const api = axios.create({
     baseURL: import.meta.env?.VITE_API_BASE_URL || "/api",
+    withCredentials: true,
     headers: {
         "Content-Type": "application/json",
     },
 });
+
+
+// =========================================================
+// AUTHENTICATION LOSS (central 401 handling)
+// =========================================================
+
+// Listeners notified when a non-auth API call comes back 401, i.e. the
+// session expired or was revoked mid-use. /auth/* responses are
+// excluded: a 401 from /auth/me just means "not signed in" and one
+// from /auth/login means "wrong credentials" - both handled by the
+// auth store itself. The interceptor never retries a request, so it
+// cannot loop.
+const authLostListeners = new Set();
+
+export function onAuthLost(listener) {
+    authLostListeners.add(listener);
+    return () => authLostListeners.delete(listener);
+}
+
+function isAuthEndpoint(url = "") {
+    return /^\/?auth\//.test(url);
+}
+
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (
+            error?.response?.status === 401 &&
+            !isAuthEndpoint(error.config?.url)
+        ) {
+            clearDatasetCache();
+            authLostListeners.forEach((listener) => listener());
+        }
+
+        return Promise.reject(error);
+    },
+);
 
 
 // =========================================================
@@ -151,6 +195,36 @@ export async function getDatasetMetadata(datasetId, options) {
 export async function getDatasetQuality(datasetId, options) {
     requireDatasetId(datasetId);
     return cachedGet(`/dataset/${datasetId}/quality`, datasetId, options);
+}
+
+
+
+// =========================================================
+// AUTH
+// =========================================================
+
+// Each returns the backend's safe `user` profile
+// ({id, email, created_at}); passwords are sent only in the request
+// body and never kept here.
+
+export async function fetchCurrentUser() {
+    const response = await api.get("/auth/me");
+    return response.data;
+}
+
+export async function loginRequest(email, password) {
+    const response = await api.post("/auth/login", { email, password });
+    return response.data.user;
+}
+
+export async function registerRequest(email, password) {
+    const response = await api.post("/auth/register", { email, password });
+    return response.data.user;
+}
+
+export async function logoutRequest() {
+    const response = await api.post("/auth/logout");
+    return response.data;
 }
 
 
