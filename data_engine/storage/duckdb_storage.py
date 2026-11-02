@@ -27,7 +27,14 @@ from data_engine.storage.base import DatasetStorage, StorageClosedError
 # environment variables, matching the plain-env-var pattern already
 # used for MAX_UPLOAD_BYTES (backend/routes/dataset.py) - this project
 # has no other configuration mechanism yet.
-_DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
+#
+# Step 91: lowered from 4GB. This is a per-instance limit and every
+# registered dataset owns its own instance, so with ANALYSIS_JOB_WORKERS
+# (default 2) bounding concurrent heavy scans, 2 x 4GB alone already
+# exceeded the 7.9GB development host. 1GB keeps that pooled share at
+# ~2GB nominal and relies on spill (verified for column_statistics in
+# Steps 87-88) beyond it. Not a cap on total process memory.
+_DEFAULT_DUCKDB_MEMORY_LIMIT = "1GB"
 
 
 def _read_duckdb_memory_limit() -> str:
@@ -48,10 +55,12 @@ def _read_duckdb_temp_root() -> str:
 # partition independently, one partition's worth of rows at a time,
 # rather than needing the whole table's working set live at once.
 #
-# 16 is a conservative default for the current 4GB memory_limit: with
+# 16 was sized against the original 4GB memory_limit (not re-validated
+# for Step 91's 1GB default, where the spill safety net below matters
+# more): with
 # a roughly uniform hash distribution each partition holds on the
 # order of 1/16th of the dataset, so even a dataset large enough that
-# a single full-table `SELECT DISTINCT *` would exhaust the 4GB budget
+# a single full-table `SELECT DISTINCT *` would exhaust the budget
 # shrinks, per partition, to a slice DuckDB can dedupe comfortably
 # inside that same budget - with the existing memory_limit/
 # temp_directory governance (Step 30) still standing behind each

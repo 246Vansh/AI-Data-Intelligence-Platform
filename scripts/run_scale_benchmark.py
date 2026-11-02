@@ -313,6 +313,68 @@ WIDE_BYTES_PER_ROW_ESTIMATE = 420
 # =========================================================
 
 
+def current_rss_bytes() -> Optional[int]:
+    """
+    STEP 87 - best-effort OS-reported *current* resident memory of this
+    process (Windows ``WorkingSetSize``; Linux ``/proc/self/statm``).
+
+    Unlike ``peak_rss_bytes()`` - a process-lifetime high-water mark
+    that already includes everything the worker did before the timed
+    window (parquet open, pre-warm queries) - this is a point-in-time
+    reading, so before/after pairs bracket a single operation.
+    """
+    if sys.platform == "win32":
+        counters = _win_process_memory_counters()
+        return int(counters.WorkingSetSize) if counters is not None else None
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as fh:
+            resident_pages = int(fh.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except Exception:
+        return None
+
+
+def _win_process_memory_counters():
+    """``GetProcessMemoryInfo`` for this process, or ``None`` on failure."""
+    try:
+        import ctypes.wintypes as wintypes
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        # See peak_rss_bytes() for why explicit argtypes/restype matter.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcess.argtypes = []
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+        ok = psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        )
+        return counters if ok else None
+    except Exception:
+        return None
+
+
 def peak_rss_bytes() -> Optional[int]:
     """Best-effort OS-reported peak resident memory of *this* process."""
 
@@ -710,27 +772,121 @@ class _DuckDBMemorySampler:
     overhead.
     """
 
-    def __init__(self, connection, interval: float = 0.05):
+    def __init__(
+        self,
+        connection,
+        interval: float = 0.05,
+        spill_dir: Optional[str] = None,
+        extended: bool = False,
+    ):
         self._cursor = connection.cursor()
         self._interval = interval
         self._peak: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, daemon=True)
+        # STEP 87 - opt-in extra sampling (``extended=True``), so every
+        # pre-existing op's sampling cost/behavior is unchanged.
+        self._extended = extended
+        self._spill_dir = spill_dir
+        self._samples = 0
+        self._sample_errors = 0
+        self._last_error: Optional[str] = None
+        self._temp_peak_by_tag: dict[str, int] = {}
+        self._managed_total_peak = 0
+        self._temp_storage_total_peak = 0
+        self._temp_files_peak_count = 0
+        self._temp_files_peak_bytes = 0
+        self._temp_files_samples_nonzero = 0
+        self._fs_spill_peak_count = 0
+        self._fs_spill_peak_bytes = 0
+        self._rss_peak_in_window = 0
 
     def _poll(self) -> None:
         while not self._stop.is_set():
             try:
-                for tag, value in self._cursor.execute(
-                    "SELECT tag, memory_usage_bytes FROM duckdb_memory()"
-                ).fetchall():
-                    if value and value > self._peak.get(tag, 0):
-                        self._peak[tag] = int(value)
-            except Exception:
+                if self._extended:
+                    self._poll_extended()
+                else:
+                    for tag, value in self._cursor.execute(
+                        "SELECT tag, memory_usage_bytes FROM duckdb_memory()"
+                    ).fetchall():
+                        if value and value > self._peak.get(tag, 0):
+                            self._peak[tag] = int(value)
+            except Exception as exc:
                 # Best-effort only - a failed sample (e.g. the
                 # connection closing mid-poll) must never fail the
                 # timed operation it is only observing.
-                pass
+                self._sample_errors += 1
+                self._last_error = f"{type(exc).__name__}: {exc}"
             self._stop.wait(self._interval)
+
+    def _poll_extended(self) -> None:
+        self._samples += 1
+        rss = current_rss_bytes()
+        if rss is not None:
+            self._rss_peak_in_window = max(self._rss_peak_in_window, rss)
+
+        managed_total = 0
+        temp_total = 0
+        for tag, mem, temp in self._cursor.execute(
+            "SELECT tag, memory_usage_bytes, temporary_storage_bytes FROM duckdb_memory()"
+        ).fetchall():
+            mem, temp = int(mem or 0), int(temp or 0)
+            managed_total += mem
+            temp_total += temp
+            if mem > self._peak.get(tag, 0):
+                self._peak[tag] = mem
+            if temp > self._temp_peak_by_tag.get(tag, 0):
+                self._temp_peak_by_tag[tag] = temp
+        # Sum of per-tag values within a single sample - a true
+        # simultaneous total, unlike summing per-tag peaks.
+        self._managed_total_peak = max(self._managed_total_peak, managed_total)
+        self._temp_storage_total_peak = max(self._temp_storage_total_peak, temp_total)
+
+        files = self._cursor.execute(
+            "SELECT count(*), coalesce(sum(size), 0) FROM duckdb_temporary_files()"
+        ).fetchone()
+        count, size = int(files[0] or 0), int(files[1] or 0)
+        if count:
+            self._temp_files_samples_nonzero += 1
+        self._temp_files_peak_count = max(self._temp_files_peak_count, count)
+        self._temp_files_peak_bytes = max(self._temp_files_peak_bytes, size)
+
+        # Independent filesystem view of the private spill directory,
+        # in case DuckDB's own table function under-reports.
+        if self._spill_dir and os.path.isdir(self._spill_dir):
+            fs_count = 0
+            fs_bytes = 0
+            for root, _dirs, names in os.walk(self._spill_dir):
+                for name in names:
+                    try:
+                        fs_bytes += os.path.getsize(os.path.join(root, name))
+                        fs_count += 1
+                    except OSError:
+                        pass
+            self._fs_spill_peak_count = max(self._fs_spill_peak_count, fs_count)
+            self._fs_spill_peak_bytes = max(self._fs_spill_peak_bytes, fs_bytes)
+
+    def extended_summary(self) -> dict:
+        """STEP 87 - everything ``extended=True`` sampling observed."""
+        return {
+            "sample_interval_s": self._interval,
+            "samples": self._samples,
+            "sample_errors": self._sample_errors,
+            "last_sample_error": self._last_error,
+            "managed_memory_peak_by_tag": self.peak_by_tag(),
+            "managed_memory_peak_total_single_sample": self._managed_total_peak,
+            "temporary_storage_peak_by_tag": {
+                t: b for t, b in self._temp_peak_by_tag.items() if b > 0
+            },
+            "temporary_storage_peak_total_single_sample": self._temp_storage_total_peak,
+            "duckdb_temporary_files_peak_count": self._temp_files_peak_count,
+            "duckdb_temporary_files_peak_bytes": self._temp_files_peak_bytes,
+            "duckdb_temporary_files_nonzero_samples": self._temp_files_samples_nonzero,
+            "spill_dir_fs_peak_count": self._fs_spill_peak_count,
+            "spill_dir_fs_peak_bytes": self._fs_spill_peak_bytes,
+            "rss_peak_sampled_in_window_bytes": self._rss_peak_in_window or None,
+        }
 
     def __enter__(self) -> "_DuckDBMemorySampler":
         self._thread.start()
@@ -977,6 +1133,83 @@ def _op_duckdb_column_statistics(args: dict) -> dict:
             "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
             "duckdb_memory_peak_by_tag": sampler.peak_by_tag(),
             **spill,
+        }
+    finally:
+        storage.close()
+
+
+def _op_duckdb_column_statistics_spill_diagnostic(args: dict) -> dict:
+    """
+    STEP 87 - same production ``column_statistics()`` call as
+    ``_op_duckdb_column_statistics``, instrumented to tell DuckDB-managed
+    memory, memory outside DuckDB's manager, and temp-disk activity
+    apart under a deliberately low ``memory_limit``.
+
+    RSS is reported three ways, never conflated:
+    - ``rss_before_bytes``/``rss_after_bytes``: point-in-time readings
+      immediately around the call (``current_rss_bytes``);
+    - ``rss_peak_sampled_in_window_bytes``: max current RSS the sampler
+      saw *during* the call (a lower bound on the in-window peak);
+    - ``lifetime_peak_rss_*``: the process high-water mark, which also
+      covers interpreter start-up and parquet open.
+
+    A DuckDB error (e.g. ``OutOfMemoryException``) is caught and
+    reported with the instrumentation intact rather than discarding it;
+    a hard process kill still surfaces via the worker's no-result path.
+    """
+    _apply_duckdb_governance(args)
+
+    spy_cls = _make_spy_duckdb_storage()
+    storage = spy_cls.from_parquet(args["parquet_path"])
+    try:
+        settings = dict(
+            storage.connection.execute(
+                "SELECT name, value FROM duckdb_settings() WHERE name IN "
+                "('memory_limit', 'temp_directory', 'threads', "
+                "'max_temp_directory_size', 'preserve_insertion_order')"
+            ).fetchall()
+        )
+        spill_dir = getattr(storage, "_temp_dir", None)
+
+        lifetime_peak_before = peak_rss_bytes()
+        rss_before = current_rss_bytes()
+        sampler = _DuckDBMemorySampler(
+            storage.connection, interval=0.02, spill_dir=spill_dir, extended=True
+        )
+        completed = False
+        error = None
+        result_rows = None
+        with sampler:
+            t0 = time.perf_counter()
+            try:
+                stats = storage.column_statistics()
+                result_rows = len(stats)
+                completed = True
+            except Exception as exc:  # noqa: BLE001 - recorded, not hidden
+                error = f"{type(exc).__name__}: {exc}"
+            elapsed = time.perf_counter() - t0
+        rss_after = current_rss_bytes()
+        lifetime_peak_after = peak_rss_bytes()
+
+        spill_after = _measure_spill(storage)
+        return {
+            "elapsed_s": elapsed,
+            "completed": completed,
+            "op_error": error,
+            "result_rows": result_rows,
+            "duckdb_settings": settings,
+            "spill_dir": spill_dir,
+            "rss_before_bytes": rss_before,
+            "rss_after_bytes": rss_after,
+            "lifetime_peak_rss_before_op_bytes": lifetime_peak_before,
+            "lifetime_peak_rss_after_op_bytes": lifetime_peak_after,
+            # Kept under the usual key so OpResult/report consumers see
+            # the same (lifetime) meaning they always have.
+            "peak_rss_bytes": lifetime_peak_after,
+            "to_dataframe_calls": int(getattr(storage, "to_dataframe_calls", 0)),
+            "sampler": sampler.extended_summary(),
+            "spill_bytes": spill_after["spill_bytes"],
+            "spill_file_count_after_op": spill_after["spill_file_count"],
         }
     finally:
         storage.close()
@@ -1330,6 +1563,7 @@ _WORKER_OPS = {
     "duckdb_quality": _op_duckdb_quality,
     "duckdb_duplicates": _op_duckdb_duplicates,
     "duckdb_column_statistics": _op_duckdb_column_statistics,
+    "duckdb_column_statistics_spill_diagnostic": _op_duckdb_column_statistics_spill_diagnostic,
     "duckdb_quality_iqr": _op_duckdb_quality_iqr,
     "duckdb_column_statistics_breakdown": _op_duckdb_column_statistics_breakdown,
     "duckdb_quality_iqr_breakdown": _op_duckdb_quality_iqr_breakdown,
@@ -1972,6 +2206,15 @@ def main() -> int:
         "unchanged.",
     )
     parser.add_argument(
+        "--spill-diagnostic",
+        action="store_true",
+        help="STEP 87 opt-in: after generation/ingestion, run ONLY the "
+        "instrumented column_statistics spill diagnostic "
+        "(_op_duckdb_column_statistics_spill_diagnostic) per size and skip "
+        "every other op. Pair with a low --duckdb-memory-limit to force "
+        "limit pressure.",
+    )
+    parser.add_argument(
         "--pandas-max-rows",
         type=int,
         default=DEFAULT_PANDAS_MAX_ROWS,
@@ -2178,6 +2421,47 @@ def main() -> int:
                 break
 
             parquet_path = ing["parquet_path"]
+
+            if args.spill_diagnostic:
+                remaining = max(30.0, deadline - time.time())
+                op_timeout = _op_timeout(size, "column_statistics_spill_diagnostic", remaining)
+                diag = _run_duckdb_op(
+                    "duckdb_column_statistics_spill_diagnostic",
+                    {"parquet_path": parquet_path},
+                    workdir,
+                    op_timeout,
+                    args.duckdb_memory_limit,
+                    args.duckdb_temp_root,
+                )
+                extra = {
+                    k: v
+                    for k, v in diag.items()
+                    if k not in ("ok", "elapsed_s", "peak_rss_bytes", "result_rows",
+                                 "spill_bytes", "error")
+                }
+                extra["parquet_bytes"] = ing.get("output_bytes")
+                report["results"].append(
+                    asdict(
+                        OpResult(
+                            size=size,
+                            operation="column_statistics_spill_diagnostic",
+                            engine="duckdb",
+                            # The op catches DuckDB errors itself (so the
+                            # instrumentation survives) and the worker then
+                            # marks it ok - so an OOM must be read from
+                            # "completed"/"op_error", not the worker's "ok".
+                            ok=bool(diag.get("ok", False) and diag.get("completed", False)),
+                            elapsed_s=diag.get("elapsed_s"),
+                            peak_rss_bytes=diag.get("peak_rss_bytes"),
+                            result_rows=diag.get("result_rows"),
+                            spill_bytes=diag.get("spill_bytes"),
+                            extra=extra,
+                            error=diag.get("error") or diag.get("op_error"),
+                        )
+                    )
+                )
+                shutil.rmtree(size_dir, ignore_errors=True)
+                continue
 
             for kind in ("global_agg", "grouped_agg", "filter", "sort_limit"):
                 remaining = max(30.0, deadline - time.time())
