@@ -1,6 +1,11 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { getDatasetProfile, getApiErrorMessage } from "../services/api";
+import Button from "./ui/Button.vue";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
+import Panel from "./ui/Panel.vue";
+import StatusChip from "./ui/StatusChip.vue";
 
 const props = defineProps({
     datasetId: {
@@ -155,290 +160,128 @@ onMounted(() => {
 </script>
 
 <template>
-    <section class="mt-4 w-full">
-        <!-- =========================================================
-             HEADER
-        ========================================================== -->
+    <Panel title="Overview" description="Size and shape of the selected dataset.">
 
-        <div class="mb-4 flex items-center justify-between gap-4 max-[600px]:items-start">
-            <div class="flex min-w-0 items-center gap-3">
-                <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 via-indigo-500 to-blue-500 text-white shadow-[0_6px_16px_rgba(99,102,241,0.20)]">
-                    <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                        stroke-width="1.9">
-                        <rect x="3" y="3" width="18" height="18" rx="3" />
-                        <path d="M8 8h8M8 12h8M8 16h5" />
-                    </svg>
-                </div>
-
-                <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                        <h2 class="text-[17px] font-bold tracking-tight text-slate-900">
-                            Dataset Overview
-                        </h2>
-
-                        <span v-if="hasProfile && !loading"
-                            class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
-                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-
-                            Ready
-                        </span>
-                    </div>
-
-                    <p class="mt-0.5 text-[11px] text-slate-400">
-                        Summary of your loaded dataset
-                    </p>
-                </div>
-            </div>
-
-            <!-- Refresh -->
-
-            <button v-if="hasProfile && !loading" type="button" :disabled="refreshing"
-                class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 shadow-sm transition-all duration-200 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-600 hover:shadow disabled:cursor-not-allowed disabled:opacity-60"
-                @click="loadProfile({ refresh: true })">
-                <svg class="h-3 w-3" :class="{
-                    'animate-spin': refreshing,
-                }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M20 11a8.1 8.1 0 0 0-14.9-4" />
-                    <path d="M4 4v5h5" />
-                    <path d="M4 13a8.1 8.1 0 0 0 14.9 4" />
-                    <path d="M20 20v-5h-5" />
-                </svg>
-
-                {{ refreshing ? "Refreshing..." : "Refresh" }}
-            </button>
-        </div>
+        <template v-if="hasProfile && !loading" #actions>
+            <StatusChip tone="success" label="Ready" />
+            <Button size="sm" icon="refresh" :loading="refreshing" @click="loadProfile({ refresh: true })">
+                {{ refreshing ? "Refreshing…" : "Refresh" }}
+            </Button>
+        </template>
 
         <!-- =========================================================
              LOADING
         ========================================================== -->
 
-        <div v-if="loading" class="grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <article v-for="index in 4" :key="index"
-                class="rounded-xl border border-slate-100 bg-white p-4 shadow-[0_3px_12px_rgba(15,23,42,0.035)]">
-                <div class="flex items-center gap-3">
-                    <div class="h-10 w-10 animate-pulse rounded-xl bg-slate-100"></div>
-
-                    <div class="min-w-0 flex-1">
-                        <div class="h-2.5 w-14 animate-pulse rounded bg-slate-100"></div>
-
-                        <div class="mt-2 h-5 w-20 animate-pulse rounded bg-slate-100"></div>
-                    </div>
-                </div>
-            </article>
+        <div v-if="loading" class="grid grid-cols-2 gap-px overflow-clip rounded-panel bg-line xl:grid-cols-4"
+            aria-busy="true" aria-label="Loading dataset statistics">
+            <div v-for="index in 4" :key="index" class="bg-surface px-5 py-4">
+                <div class="h-3 w-16 animate-pulse rounded-control bg-sunken"></div>
+                <div class="mt-3 h-6 w-24 animate-pulse rounded-control bg-sunken"></div>
+                <div class="mt-2 h-3 w-20 animate-pulse rounded-control bg-sunken"></div>
+            </div>
         </div>
 
         <!-- =========================================================
              ERROR
         ========================================================== -->
 
-        <div v-else-if="error"
-            class="flex items-center gap-3 rounded-xl border border-rose-100 bg-gradient-to-r from-rose-50 to-white px-4 py-3 max-[600px]:items-start">
-            <div
-                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-rose-100 text-xs font-bold text-rose-600">
-                !
-            </div>
+        <div v-else-if="error" role="alert"
+            class="flex items-start gap-3 rounded-control bg-danger-soft px-4 py-3 max-[600px]:flex-col">
+
+            <Icon name="error" :size="16" class="mt-0.5 text-danger" />
 
             <div class="min-w-0 flex-1">
-                <strong class="block text-[11px] font-bold text-slate-900">
+                <p class="text-data font-semibold text-danger">
                     Unable to load dataset overview
-                </strong>
-
-                <p class="mt-0.5 text-[10px] leading-4 text-slate-500">
+                </p>
+                <p class="mt-0.5 text-data text-ink">
                     {{ error }}
                 </p>
             </div>
 
-            <button type="button"
-                class="shrink-0 rounded-lg bg-violet-600 px-2.5 py-1.5 text-[10px] font-semibold text-white shadow-sm transition hover:bg-violet-700"
-                @click="loadProfile()">
+            <Button size="sm" icon="refresh" @click="loadProfile()">
                 Retry
-            </button>
+            </Button>
+
         </div>
 
         <!-- =========================================================
              STATISTICS
+             One ruled strip rather than four separate cards: the
+             1px gaps on a `line` background draw the separators.
         ========================================================== -->
 
-        <div v-else-if="profile" class="grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <!-- =====================================================
-                 ROWS
-            ====================================================== -->
+        <dl v-else-if="profile" class="grid grid-cols-2 gap-px overflow-clip rounded-panel bg-line xl:grid-cols-4">
 
-            <article
-                class="group relative overflow-hidden rounded-xl border border-violet-100 bg-gradient-to-br from-violet-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(124,58,237,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(124,58,237,0.10)]">
-                <div
-                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-violet-100/50 blur-xl transition group-hover:bg-violet-200/60">
-                </div>
+            <!-- ROWS -->
+            <div class="bg-surface px-5 py-4">
+                <dt class="flex items-center gap-1.5 text-caption text-ink-muted">
+                    <Icon name="rows" :size="14" />
+                    Rows
+                </dt>
+                <dd class="mt-1.5 truncate text-title font-semibold tabular-nums text-ink">
+                    {{ rowCount }}
+                </dd>
+                <dd class="mt-0.5 text-caption text-ink-muted">
+                    Total records
+                </dd>
+            </div>
 
-                <div class="relative flex items-center gap-3">
-                    <div
-                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
-                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.9">
-                            <path d="M7 3h10l4 4v14H7z" />
-                            <path d="M7 7h14" />
-                            <path d="M11 3v4" />
-                            <path d="M11 11h6M11 15h6M11 19h4" />
-                        </svg>
-                    </div>
+            <!-- COLUMNS -->
+            <div class="bg-surface px-5 py-4">
+                <dt class="flex items-center gap-1.5 text-caption text-ink-muted">
+                    <Icon name="columns" :size="14" />
+                    Columns
+                </dt>
+                <dd class="mt-1.5 truncate text-title font-semibold tabular-nums text-ink">
+                    {{ columnCount }}
+                </dd>
+                <dd class="mt-0.5 text-caption text-ink-muted">
+                    Total fields
+                </dd>
+            </div>
 
-                    <div class="min-w-0">
-                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-violet-400">
-                            Rows
-                        </span>
+            <!-- DUPLICATES -->
+            <div class="bg-surface px-5 py-4">
+                <dt class="flex items-center gap-1.5 text-caption text-ink-muted">
+                    <Icon name="copy" :size="14" />
+                    Duplicate rows
+                </dt>
+                <dd class="mt-1.5 flex flex-wrap items-center gap-2">
+                    <span class="truncate text-title font-semibold tabular-nums text-ink">{{ duplicateRows }}</span>
+                    <StatusChip v-if="duplicatePercentage !== null"
+                        :tone="{ Clean: 'success', Low: 'warning', Review: 'error' }[duplicateStatus.label] || 'neutral'"
+                        :label="duplicateStatus.label" />
+                </dd>
+                <dd class="mt-0.5 text-caption tabular-nums text-ink-muted">
+                    {{ duplicatePercentage !== null ? `${duplicatePercentage}% of records` : "Duplicate rows" }}
+                </dd>
+            </div>
 
-                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
-                            {{ rowCount }}
-                        </strong>
+            <!-- MEMORY -->
+            <div class="bg-surface px-5 py-4">
+                <dt class="flex items-center gap-1.5 text-caption text-ink-muted">
+                    <Icon name="cpu" :size="14" />
+                    Memory
+                </dt>
+                <dd class="mt-1.5 flex items-baseline gap-1 truncate text-title font-semibold tabular-nums text-ink">
+                    {{ memoryUsage }}
+                    <span class="text-data font-medium text-ink-muted">MB</span>
+                </dd>
+                <dd class="mt-0.5 text-caption text-ink-muted">
+                    In memory
+                </dd>
+            </div>
 
-                        <span class="text-[9px] text-slate-400">
-                            Total records
-                        </span>
-                    </div>
-                </div>
-            </article>
-
-            <!-- =====================================================
-                 COLUMNS
-            ====================================================== -->
-
-            <article
-                class="group relative overflow-hidden rounded-xl border border-blue-100 bg-gradient-to-br from-blue-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(59,130,246,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(59,130,246,0.10)]">
-                <div
-                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-blue-100/50 blur-xl transition group-hover:bg-blue-200/60">
-                </div>
-
-                <div class="relative flex items-center gap-3">
-                    <div
-                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
-                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.9">
-                            <rect x="3" y="4" width="18" height="16" rx="2" />
-                            <path d="M3 10h18" />
-                            <path d="M9 10v10" />
-                        </svg>
-                    </div>
-
-                    <div class="min-w-0">
-                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-blue-400">
-                            Columns
-                        </span>
-
-                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
-                            {{ columnCount }}
-                        </strong>
-
-                        <span class="text-[9px] text-slate-400">
-                            Total features
-                        </span>
-                    </div>
-                </div>
-            </article>
-
-            <!-- =====================================================
-                 DUPLICATES
-            ====================================================== -->
-
-            <article
-                class="group relative overflow-hidden rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(16,185,129,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(16,185,129,0.10)]">
-                <div
-                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-emerald-100/50 blur-xl transition group-hover:bg-emerald-200/60">
-                </div>
-
-                <div class="relative flex items-center gap-3">
-                    <div
-                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
-                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.9">
-                            <path d="M8 8h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H11a3 3 0 0 1-3-3z" />
-                            <path d="M16 8V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3h2" />
-                        </svg>
-                    </div>
-
-                    <div class="min-w-0">
-                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-emerald-500">
-                            Duplicates
-                        </span>
-
-                        <strong class="mt-0.5 block truncate text-[21px] font-bold tracking-tight text-slate-900">
-                            {{ duplicateRows }}
-                        </strong>
-
-                        <span v-if="duplicatePercentage !== null" class="text-[9px] text-slate-400">
-                            {{ duplicatePercentage }}% of records
-                        </span>
-
-                        <span v-else class="text-[9px] text-slate-400">
-                            Duplicate rows
-                        </span>
-                    </div>
-                </div>
-            </article>
-
-            <!-- =====================================================
-                 MEMORY
-            ====================================================== -->
-
-            <article
-                class="group relative overflow-hidden rounded-xl border border-orange-100 bg-gradient-to-br from-orange-50/80 via-white to-white p-4 shadow-[0_4px_14px_rgba(249,115,22,0.045)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_22px_rgba(249,115,22,0.10)]">
-                <div
-                    class="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-orange-100/50 blur-xl transition group-hover:bg-orange-200/60">
-                </div>
-
-                <div class="relative flex items-center gap-3">
-                    <div
-                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-orange-100 text-orange-600">
-                        <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="1.9">
-                            <rect x="6" y="6" width="12" height="12" rx="2" />
-                            <path d="M9 1v5M15 1v5M9 18v5M15 18v5" />
-                            <path d="M1 9h5M1 15h5M18 9h5M18 15h5" />
-                        </svg>
-                    </div>
-
-                    <div class="min-w-0">
-                        <span class="block text-[10px] font-semibold uppercase tracking-wide text-orange-500">
-                            Memory
-                        </span>
-
-                        <strong
-                            class="mt-0.5 flex items-baseline gap-1 truncate text-[21px] font-bold tracking-tight text-slate-900">
-                            {{ memoryUsage }}
-
-                            <small class="text-[10px] font-semibold text-slate-500">
-                                MB
-                            </small>
-                        </strong>
-
-                        <span class="text-[9px] text-slate-400">
-                            In memory
-                        </span>
-                    </div>
-                </div>
-            </article>
-        </div>
+        </dl>
 
         <!-- =========================================================
              NO DATASET SELECTED
         ========================================================== -->
 
-        <div v-else
-            class="flex min-h-[160px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white px-5 text-center">
-            <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                    <rect x="3" y="3" width="18" height="18" rx="3" />
-                    <path d="M8 8h8M8 12h8M8 16h5" />
-                </svg>
-            </div>
+        <EmptyState v-else icon="overview" title="No dataset selected"
+            description="Upload or select a dataset to see its overview." />
 
-            <h3 class="mt-3 text-[13px] font-bold text-slate-700">
-                No dataset selected
-            </h3>
-
-            <p class="mt-1 max-w-xs text-[10px] leading-5 text-slate-400">
-                Upload or select a dataset to see its overview.
-            </p>
-        </div>
-    </section>
+    </Panel>
 </template>

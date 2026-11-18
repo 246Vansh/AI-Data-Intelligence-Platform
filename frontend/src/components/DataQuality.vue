@@ -1,6 +1,10 @@
 <script setup>
 import { ref, computed, onMounted } from "vue";
 import { getDatasetQuality, getApiErrorMessage } from "../services/api";
+import { healthScore as computeHealthScore, scoreBand, severityCounts } from "../services/qualityScore";
+import Button from "./ui/Button.vue";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
 
 // Scoped to an explicit dataset like the other panels - the
 // un-scoped /dataset/quality route reads the server's global
@@ -15,61 +19,88 @@ const props = defineProps({
 const loading = ref(true);
 const error = ref(null);
 const qualityData = ref(null);
+// Severity filter for the issue list (as before the redesign).
 const activeFilter = ref("all");
 
-const statusColor = computed(() => {
-    const status = qualityData.value?.status;
-    if (status === "healthy") return "emerald";
-    if (status === "info") return "blue";
-    if (status === "warning") return "amber";
-    return "rose";
+// Same score as before (now shared with the top bar's quality pill).
+const healthScore = computed(() => computeHealthScore(qualityData.value));
+const band = computed(() => scoreBand(healthScore.value));
+const counts = computed(() => severityCounts(qualityData.value));
+
+const BAND_TEXT = {
+    unknown: "No quality score is available for this audit.",
+    good: "Your dataset is in good shape.",
+    fair: "A few issues need attention.",
+    poor: "Significant issues need attention.",
+};
+
+// Score ring geometry (SVG circle, r = 52).
+const RING = 2 * Math.PI * 52;
+const ringOffset = computed(() => RING * (1 - (healthScore.value ?? 0) / 100));
+const RING_COLOR = { good: "#2c7d3f", fair: "#c27c12", poor: "#c2412d", unknown: "#cfc5af" };
+
+const issues = computed(() => qualityData.value?.issues || []);
+
+const filteredIssues = computed(() =>
+    activeFilter.value === "all" ? issues.value : issues.value.filter((issue) => issue.severity === activeFilter.value),
+);
+
+const ISSUE_FILTERS = computed(() => [
+    { id: "all", label: `All (${issues.value.length})` },
+    { id: "warning", label: "Warnings" },
+    { id: "info", label: "Info" },
+]);
+
+function issuesOfType(...types) {
+    return issues.value.filter((issue) => types.includes(issue.type));
+}
+
+function sumCounts(list) {
+    return list.reduce((sum, issue) => sum + (Number(issue.count) || 0), 0);
+}
+
+function columnsLabel(list) {
+    const columns = new Set(list.map((issue) => issue.column).filter(Boolean));
+    return `${columns.size} ${columns.size === 1 ? "column" : "columns"}`;
+}
+
+// Issue summary: one row per check the backend runs. Figures are the
+// backend's own issue counts - nothing is estimated here.
+const summaryRows = computed(() => {
+    const missing = issuesOfType("missing_values");
+    const duplicates = issuesOfType("duplicate_rows");
+    const structure = issuesOfType("constant_column", "high_cardinality");
+    const outliers = issuesOfType("numeric_outliers");
+    return [
+        { key: "missing", label: "Missing values", scope: columnsLabel(missing), value: `${sumCounts(missing).toLocaleString()} cells`, flagged: missing.length > 0 },
+        { key: "duplicates", label: "Duplicate rows", scope: `${sumCounts(duplicates).toLocaleString()} rows`, value: duplicates.length ? "Found" : "None", flagged: duplicates.length > 0 },
+        { key: "structure", label: "Column structure", scope: columnsLabel(structure), value: structure.length ? `${structure.length} flagged` : "None", flagged: structure.length > 0 },
+        { key: "outliers", label: "Outliers (distribution)", scope: columnsLabel(outliers), value: `${sumCounts(outliers).toLocaleString()} values`, flagged: outliers.length > 0 },
+    ];
 });
 
-const healthScore = computed(() => {
-    if (!qualityData.value) return 100;
-    const issues = qualityData.value.issues || [];
-    if (issues.length === 0) return 100;
+const SEVERITY_STYLE = {
+    error: { icon: "error", tile: "bg-[#fbe4df] text-[#c2412d]" },
+    warning: { icon: "warning", tile: "bg-[#fbecd6] text-[#c27012]" },
+    info: { icon: "info", tile: "bg-[#e3eef8] text-[#2f6fae]" },
+};
 
-    let penalty = 0;
-    for (const issue of issues) {
-        if (issue.severity === "error") penalty += 25;
-        else if (issue.severity === "warning") penalty += 10;
-        else penalty += 3;
-    }
-    return Math.max(0, Math.min(100, 100 - penalty));
-});
+function severityStyle(issue) {
+    return SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.info;
+}
 
-const missingCount = computed(() => {
-    return qualityData.value?.issues
-        ?.filter((i) => i.type === "missing_values")
-        .reduce((sum, i) => sum + (i.count || 0), 0) || 0;
-});
-
-const duplicateCount = computed(() => {
-    return qualityData.value?.issues
-        ?.find((i) => i.type === "duplicate_rows")?.count || 0;
-});
-
-const outlierCount = computed(() => {
-    return qualityData.value?.issues
-        ?.filter((i) => i.type === "numeric_outliers")
-        .reduce((sum, i) => sum + (i.count || 0), 0) || 0;
-});
-
-const filteredIssues = computed(() => {
-    if (!qualityData.value?.issues) return [];
-    if (activeFilter.value === "all") return qualityData.value.issues;
-    return qualityData.value.issues.filter(
-        (i) => i.severity === activeFilter.value
-    );
-});
-
-async function fetchQuality() {
+// Phase 6: `refresh` bypasses the client cache (api.js cachedGet), the
+// same pattern as DatasetOverview/DataPreview/DatasetMetadata. Without
+// it the Refresh button re-read the cached response and never re-ran
+// the audit. Initial load is unchanged (cached).
+async function fetchQuality(options = {}) {
     loading.value = true;
     error.value = null;
 
     try {
-        const data = await getDatasetQuality(props.datasetId);
+        const data = await getDatasetQuality(props.datasetId, {
+            force: options.refresh === true,
+        });
         qualityData.value = data;
     } catch (err) {
         error.value = getApiErrorMessage(err);
@@ -79,197 +110,162 @@ async function fetchQuality() {
 }
 
 onMounted(() => {
-    fetchQuality();
+    if (props.datasetId) {
+        fetchQuality();
+    } else {
+        loading.value = false;
+    }
 });
 </script>
 
 <template>
-    <div class="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
+    <section aria-labelledby="quality-title" class="flex flex-col gap-5">
+
         <!-- Header -->
-        <div class="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 pb-5">
+        <header class="flex flex-wrap items-start justify-between gap-3">
             <div>
-                <div class="flex items-center gap-2.5">
-                    <div class="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
-                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                <h2 id="quality-title" class="text-[28px] font-bold leading-tight tracking-[-0.02em] text-ink">Data Quality</h2>
+                <p class="mt-1 text-body text-ink-muted">Automated checks for integrity, consistency and distribution.</p>
+            </div>
+            <Button v-if="datasetId" icon="refresh" :loading="loading" class="h-10 rounded-[10px] bg-surface px-4"
+                @click="fetchQuality({ refresh: true })">
+                Refresh
+            </Button>
+        </header>
+
+        <!-- No dataset selected -->
+        <div v-if="!datasetId" class="rounded-[16px] border border-[#e6decd] bg-surface">
+            <EmptyState icon="shield-check" title="No dataset selected"
+                description="Upload or select a dataset to audit its quality." />
+        </div>
+
+        <!-- Loading -->
+        <div v-else-if="loading" role="status"
+            class="flex h-48 items-center justify-center gap-3 rounded-[16px] border border-[#e6decd] bg-surface text-data text-ink-muted">
+            <span aria-hidden="true" class="h-5 w-5 animate-spin rounded-full border-2 border-forest/20 border-t-forest"></span>
+            Auditing dataset quality…
+        </div>
+
+        <!-- Error -->
+        <p v-else-if="error" role="alert"
+            class="flex items-start gap-2.5 rounded-[14px] border border-danger/20 bg-danger-soft px-4 py-3 text-data text-danger">
+            <Icon name="error" :size="16" class="mt-0.5" />
+            <span>{{ error }}</span>
+        </p>
+
+        <template v-else>
+
+            <!-- Overview: score ring + severity counts -->
+            <div
+                class="grid gap-5 rounded-[16px] border border-[#e6decd] bg-surface p-5 shadow-panel lg:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] lg:items-center">
+
+                <div class="flex items-center gap-5 lg:border-r lg:border-[#ece5d6] lg:pr-5">
+                    <div class="relative h-[120px] w-[120px] shrink-0" role="img"
+                        :aria-label="healthScore === null ? 'Overall quality score unavailable' : `Overall quality score ${healthScore} percent`">
+                        <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
+                            <circle cx="60" cy="60" r="52" fill="none" stroke="#e7efe2" stroke-width="12" />
+                            <circle cx="60" cy="60" r="52" fill="none" :stroke="RING_COLOR[band]" stroke-width="12"
+                                stroke-linecap="round" :stroke-dasharray="RING" :stroke-dashoffset="ringOffset" />
                         </svg>
+                        <span class="absolute inset-0 grid place-items-center text-[26px] font-bold tabular-nums text-ink">
+                            {{ healthScore === null ? "—" : `${healthScore}%` }}
+                        </span>
                     </div>
                     <div>
-                        <h3 class="text-base font-bold text-slate-800">
-                            Data Quality & Hygiene Audit
-                        </h3>
-                        <p class="text-xs text-slate-500">
-                            Automated integrity, anomaly, and distribution analysis
+                        <p class="text-[20px] font-bold tracking-[-0.01em] text-ink">Overall Quality</p>
+                        <p class="mt-1 text-data text-ink-muted">{{ BAND_TEXT[band] }}</p>
+                        <p class="mt-1 text-caption text-ink-subtle">
+                            Score calculated in the app from the issues below (critical −25, warning −10,
+                            info −3). Audit status: {{ qualityData?.status || "unknown" }}
                         </p>
                     </div>
                 </div>
+
+                <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div class="rounded-[12px] bg-[#fbf1e3] px-3 py-4 text-center">
+                        <dd class="text-[34px] font-semibold leading-none tabular-nums text-[#d9771c]">{{ counts.total }}</dd>
+                        <dt class="mt-2 text-data font-medium text-[#b8641a]">Issues</dt>
+                    </div>
+                    <div class="rounded-[12px] bg-[#fbe6e2] px-3 py-4 text-center">
+                        <dd class="text-[34px] font-semibold leading-none tabular-nums text-[#d23a2a]">{{ counts.error }}</dd>
+                        <dt class="mt-2 text-data font-medium text-ink">Critical</dt>
+                    </div>
+                    <div class="rounded-[12px] bg-[#f8efdc] px-3 py-4 text-center">
+                        <dd class="text-[34px] font-semibold leading-none tabular-nums text-[#c27c12]">{{ counts.warning }}</dd>
+                        <dt class="mt-2 text-data font-medium text-[#9c6510]">Warnings</dt>
+                    </div>
+                    <div class="rounded-[12px] bg-[#e9f1f8] px-3 py-4 text-center">
+                        <dd class="text-[34px] font-semibold leading-none tabular-nums text-[#2f86c8]">{{ counts.info }}</dd>
+                        <dt class="mt-2 text-data font-medium text-[#2a6ea6]">Info</dt>
+                    </div>
+                </dl>
             </div>
 
-            <button @click="fetchQuality"
-                class="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100">
-                <svg class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" fill="none" viewBox="0 0 24 24"
-                    stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                Refresh Audit
-            </button>
-        </div>
+            <div class="grid gap-5 lg:grid-cols-2">
 
-        <!-- Loading State -->
-        <div v-if="loading" class="flex h-48 items-center justify-center">
-            <div class="flex flex-col items-center gap-2">
-                <div class="h-7 w-7 animate-spin rounded-full border-2 border-violet-600 border-t-transparent"></div>
-                <span class="text-xs font-medium text-slate-500">Auditing dataset quality...</span>
-            </div>
-        </div>
-
-        <!-- Error State -->
-        <div v-else-if="error" class="rounded-xl border border-rose-200 bg-rose-50/50 p-4 text-xs text-rose-700">
-            {{ error }}
-        </div>
-
-        <!-- Main Content -->
-        <div v-else class="space-y-6">
-            <!-- Top Summary Cards -->
-            <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                <!-- Health Score Card -->
-                <div class="rounded-xl border border-slate-100 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
-                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Health Score</span>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span class="text-2xl font-black" :class="healthScore >= 80
-                            ? 'text-emerald-600'
-                            : healthScore >= 60
-                                ? 'text-amber-600'
-                                : 'text-rose-600'
-                            ">
-                            {{ healthScore }}%
-                        </span>
-                        <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" :class="healthScore >= 80
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : healthScore >= 60
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-rose-100 text-rose-700'
-                            ">
-                            {{ qualityData?.status }}
-                        </span>
-                    </div>
-                </div>
-
-                <!-- Missing Values Card -->
-                <div class="rounded-xl border border-slate-100 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
-                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Missing Values</span>
-                    <div class="mt-2 text-2xl font-black text-slate-800">
-                        {{ missingCount.toLocaleString() }}
-                    </div>
-                    <span class="text-[10px] text-slate-500">
-                        {{ missingCount === 0 ? "Zero null values" : "Requires attention" }}
-                    </span>
-                </div>
-
-                <!-- Duplicates Card -->
-                <div class="rounded-xl border border-slate-100 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
-                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Duplicate Rows</span>
-                    <div class="mt-2 text-2xl font-black text-slate-800">
-                        {{ duplicateCount.toLocaleString() }}
-                    </div>
-                    <span class="text-[10px] text-slate-500">
-                        {{ duplicateCount === 0 ? "Unique rows" : "Duplicate records" }}
-                    </span>
-                </div>
-
-                <!-- Outliers Card -->
-                <div class="rounded-xl border border-slate-100 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
-                    <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">IQR Outliers</span>
-                    <div class="mt-2 text-2xl font-black text-slate-800">
-                        {{ outlierCount.toLocaleString() }}
-                    </div>
-                    <span class="text-[10px] text-slate-500">
-                        {{ outlierCount === 0 ? "Normal distribution" : "Statistical outliers" }}
-                    </span>
-                </div>
-            </div>
-
-            <!-- Issues Filter & Details Table -->
-            <div class="rounded-xl border border-slate-100 bg-white">
-                <!-- Filter Tabs -->
-                <div class="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                    <div class="flex items-center gap-1.5">
-                        <button @click="activeFilter = 'all'" :class="activeFilter === 'all'
-                            ? 'bg-slate-900 text-white'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                            " class="rounded-lg px-2.5 py-1 text-xs font-semibold transition">
-                            All ({{ qualityData?.issues?.length || 0 }})
-                        </button>
-                        <button @click="activeFilter = 'warning'" :class="activeFilter === 'warning'
-                            ? 'bg-amber-600 text-white'
-                            : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
-                            " class="rounded-lg px-2.5 py-1 text-xs font-semibold transition">
-                            Warnings
-                        </button>
-                        <button @click="activeFilter = 'info'" :class="activeFilter === 'info'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-blue-50 text-blue-700 hover:bg-blue-100'
-                            " class="rounded-lg px-2.5 py-1 text-xs font-semibold transition">
-                            Info
-                        </button>
-                    </div>
-
-                    <span class="text-xs font-medium text-slate-400">
-                        Showing {{ filteredIssues.length }} items
-                    </span>
-                </div>
-
-                <!-- Issues Table / List -->
-                <div v-if="filteredIssues.length === 0" class="p-8 text-center">
-                    <div class="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
-                        <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                        </svg>
-                    </div>
-                    <h4 class="mt-2 text-xs font-bold text-slate-700">No issues found in this category</h4>
-                    <p class="text-[11px] text-slate-500">Your dataset passes all corresponding validation checks.</p>
-                </div>
-
-                <div v-else class="divide-y divide-slate-100">
-                    <div v-for="(issue, index) in filteredIssues" :key="index"
-                        class="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 transition hover:bg-slate-50/70">
-                        <div class="flex items-start gap-3">
-                            <span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
-                                :class="issue.severity === 'error'
-                                    ? 'bg-rose-100 text-rose-700'
-                                    : issue.severity === 'warning'
-                                        ? 'bg-amber-100 text-amber-700'
-                                        : 'bg-blue-100 text-blue-700'
-                                    ">
-                                !
-                            </span>
-                            <div>
-                                <p class="text-xs font-semibold text-slate-800">
-                                    {{ issue.message }}
-                                </p>
-                                <div class="mt-1 flex items-center gap-2 text-[10px] text-slate-400">
-                                    <span v-if="issue.column" class="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">
-                                        column: {{ issue.column }}
+                <!-- Issue summary -->
+                <section aria-labelledby="issue-summary-title"
+                    class="rounded-[16px] border border-[#e6decd] bg-surface px-5 pb-3 pt-4 shadow-panel">
+                    <h3 id="issue-summary-title" class="text-lead font-semibold text-ink">Issue Summary</h3>
+                    <table class="mt-3 w-full text-left text-data">
+                        <caption class="sr-only">Checks run by the audit and what they found</caption>
+                        <tbody>
+                            <tr v-for="row in summaryRows" :key="row.key" class="border-t border-[#ece5d6] first:border-t-0">
+                                <th scope="row" class="py-2.5 pr-3 font-normal text-ink">
+                                    <span class="flex items-center gap-2">
+                                        <Icon :name="row.flagged ? 'warning' : 'check-circle'" :size="16"
+                                            :class="row.flagged ? 'text-[#c27012]' : 'text-success'" />
+                                        {{ row.label }}
                                     </span>
-                                    <span>type: {{ issue.type }}</span>
-                                </div>
-                            </div>
-                        </div>
+                                </th>
+                                <td class="py-2.5 pr-3 text-ink-muted tabular-nums">{{ row.scope }}</td>
+                                <td class="py-2.5 text-right tabular-nums text-ink">{{ row.value }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
 
-                        <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                            :class="issue.severity === 'error'
-                                ? 'bg-rose-100 text-rose-700'
-                                : issue.severity === 'warning'
-                                    ? 'bg-amber-100 text-amber-700'
-                                    : 'bg-blue-100 text-blue-700'
-                                ">
-                            {{ issue.severity }}
-                        </span>
+                <!-- Issues -->
+                <section aria-labelledby="issues-title"
+                    class="rounded-[16px] border border-[#e6decd] bg-surface px-5 pb-3 pt-4 shadow-panel">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <h3 id="issues-title" class="text-lead font-semibold text-ink">
+                            Issues <span class="tabular-nums">({{ issues.length }})</span>
+                        </h3>
+                        <div v-if="issues.length" class="flex items-center gap-0.5 rounded-control bg-sunken p-0.5" role="group"
+                            aria-label="Filter issues by severity">
+                            <button v-for="filter in ISSUE_FILTERS" :key="filter.id" type="button"
+                                :aria-pressed="activeFilter === filter.id" @click="activeFilter = filter.id"
+                                class="rounded-[6px] px-2.5 py-1 text-caption font-medium transition-colors duration-150"
+                                :class="activeFilter === filter.id ? 'bg-surface text-ink shadow-panel' : 'text-ink-muted hover:text-ink'">
+                                {{ filter.label }}
+                            </button>
+                        </div>
                     </div>
-                </div>
+                    <EmptyState v-if="!issues.length" icon="check" title="No issues found"
+                        description="Your dataset passes every check in this audit." />
+                    <EmptyState v-else-if="!filteredIssues.length" icon="check" title="No issues found in this category"
+                        description="Your dataset passes all corresponding validation checks." />
+                    <ul v-else class="mt-2 max-h-[360px] overflow-y-auto [scrollbar-width:thin]">
+                        <li v-for="(issue, index) in filteredIssues" :key="index" class="flex items-start gap-3 py-2.5">
+                            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-full"
+                                :class="severityStyle(issue).tile">
+                                <Icon :name="severityStyle(issue).icon" :size="16" />
+                                <span class="sr-only">{{ issue.severity }}</span>
+                            </span>
+                            <div class="min-w-0 pt-1">
+                                <p class="text-data text-ink">{{ issue.message }}</p>
+                                <p v-if="issue.column" class="mt-0.5 text-caption text-ink-muted">
+                                    <span class="font-mono">{{ issue.column }}</span> · {{ issue.severity }}
+                                </p>
+                            </div>
+                        </li>
+                    </ul>
+                </section>
+
             </div>
-        </div>
-    </div>
+
+        </template>
+
+    </section>
 </template>

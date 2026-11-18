@@ -1,6 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { getDatasetMetadata, getApiErrorMessage } from "../services/api";
+import Button from "./ui/Button.vue";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
 
 const emit = defineEmits(["question-selected"]);
 
@@ -90,7 +93,7 @@ const filteredColumns = computed(() => {
     }
 
     return columns.value.filter((column) =>
-        [column.name, column.role, column.data_type].some((value) =>
+        [column.name, column.role, roleLabel(column.role), column.data_type].some((value) =>
             String(value ?? "")
                 .toLowerCase()
                 .includes(query),
@@ -357,6 +360,10 @@ function normalizeType(type) {
         .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+// Presentation only (Phase 4): same branching as before, restyled to
+// design tokens. Status colors (warn/danger) are deliberately not used -
+// a role is an identity, not a state - and the badge always shows the
+// role's name, so meaning never rests on color alone.
 function roleClass(role) {
     const normalized = String(role || "").toLowerCase();
 
@@ -364,35 +371,81 @@ function roleClass(role) {
         normalized.includes("metric") ||
         normalized.includes("numeric")
     ) {
-        return "border-blue-200 bg-gradient-to-r from-blue-50 to-cyan-50 text-blue-700";
+        return "border-forest/20 bg-forest-soft text-forest";
     }
 
     if (
         normalized.includes("dimension") ||
         normalized.includes("categor")
     ) {
-        return "border-violet-200 bg-gradient-to-r from-violet-50 to-fuchsia-50 text-violet-700";
+        return "border-line-strong bg-sunken text-ink";
     }
 
     if (
         normalized.includes("date") ||
         normalized.includes("time")
     ) {
-        return "border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 text-amber-700";
+        return "border-forest/30 bg-surface text-forest";
     }
 
     if (
         normalized.includes("identifier") ||
         normalized.includes("id")
     ) {
-        return "border-slate-200 bg-gradient-to-r from-slate-50 to-gray-50 text-slate-700";
+        return "border-line bg-surface text-ink-muted";
     }
 
-    return "border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 text-emerald-700";
+    return "border-line bg-canvas text-ink-muted";
 }
 
 function clearSearch() {
     searchQuery.value = "";
+}
+
+// =========================================================
+// SCHEMA PRESENTATION (visual reference)
+// =========================================================
+
+// The column shown in the details card: the user's pick, else the first
+// measure, else the first column. Pure view state.
+const selectedColumnName = ref("");
+
+const selectedColumn = computed(() => {
+    const byName = columns.value.find((column) => column.name === selectedColumnName.value);
+    return byName || numericColumns.value[0] || columns.value[0] || null;
+});
+
+// Display names for the backend's roles, as in the reference.
+const ROLE_LABELS = { metric: "Measure", numeric: "Measure", dimension: "Dimension", categorical: "Dimension", time: "Time", date: "Time", identifier: "Identifier" };
+
+function roleLabel(role) {
+    return ROLE_LABELS[String(role || "").toLowerCase()] || normalizeRole(role);
+}
+
+// A role is an identity, not a state: each gets its own hue, and the
+// label is always shown, so meaning never rests on color alone.
+const ROLE_STYLES = {
+    Measure: { dot: "bg-[#b08a3e]", text: "text-[#8a6a2a]" },
+    Dimension: { dot: "bg-[#3f8a4f]", text: "text-[#2f6b3c]" },
+    Time: { dot: "bg-[#8fbf8a]", text: "text-[#4f7d4a]" },
+    Identifier: { dot: "bg-[#d98a2b]", text: "text-[#b0661a]" },
+};
+
+function roleStyle(role) {
+    return ROLE_STYLES[roleLabel(role)] || { dot: "bg-line-strong", text: "text-ink-muted" };
+}
+
+// Missing share of all rows, from the backend's own counts.
+function missingPercent(column) {
+    const missing = Number(column?.missing_count);
+    const rows = Number(metadata.value?.row_count);
+    if (!Number.isFinite(missing)) {
+        return "—";
+    }
+    if (!Number.isFinite(rows) || rows <= 0) {
+        return formatNumber(missing);
+    }
+    return `${((missing / rows) * 100).toFixed(1)}%`;
 }
 
 onMounted(() => {
@@ -401,443 +454,194 @@ onMounted(() => {
 </script>
 
 <template>
-    <section class="mt-10 w-full">
+    <section aria-labelledby="schema-title" class="flex flex-col gap-5">
 
-        <!-- =====================================================
-             HEADER
-        ====================================================== -->
-
-        <div class="mb-5 flex items-end justify-between gap-6 max-[760px]:flex-col max-[760px]:items-start">
-
-            <div class="flex items-start gap-3">
-
-                <!-- Colorful Header Icon -->
-                <div
-                    class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-200/60">
-
-                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-
-                        <path d="M4 5h16" />
-                        <path d="M4 12h16" />
-                        <path d="M4 19h16" />
-                        <circle cx="8" cy="5" r="1.5" />
-                        <circle cx="16" cy="12" r="1.5" />
-                        <circle cx="10" cy="19" r="1.5" />
-
-                    </svg>
-
+        <!-- Header -->
+        <header class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+                <h2 id="schema-title" class="text-[28px] font-bold leading-tight tracking-[-0.02em] text-ink">Dataset Schema</h2>
+                <p class="mt-1 text-body text-ink-muted">Columns, data types and analytical roles.</p>
+            </div>
+            <div v-if="metadata" class="flex flex-wrap items-center gap-2">
+                <div class="relative w-[240px] max-sm:w-full">
+                    <Icon name="search" :size="16"
+                        class="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted" />
+                    <input v-model="searchQuery" type="search" placeholder="Filter columns…"
+                        aria-label="Filter columns by name, role or type"
+                        class="h-10 w-full appearance-none rounded-[10px] border border-[#e6decd] bg-surface pl-10 pr-9 text-data text-ink placeholder:text-ink-muted focus-visible:border-forest [&::-webkit-search-cancel-button]:hidden" />
+                    <button v-if="searchQuery" type="button" aria-label="Clear filter"
+                        class="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-control text-ink-muted hover:bg-sunken hover:text-ink"
+                        @click="clearSearch">
+                        <Icon name="x" :size="14" />
+                    </button>
                 </div>
+                <Button icon="refresh" :loading="refreshing" class="h-10 rounded-[10px] bg-surface px-4"
+                    @click="loadMetadata({ refresh: true })">
+                    {{ refreshing ? "Refreshing…" : "Refresh" }}
+                </Button>
+            </div>
+        </header>
 
-                <div>
+        <!-- Loading -->
+        <div v-if="loading" class="rounded-[16px] border border-[#e6decd] bg-surface p-5" aria-busy="true"
+            aria-label="Loading dataset schema">
+            <div class="space-y-2">
+                <div v-for="row in 8" :key="row" class="h-9 animate-pulse rounded-control bg-sunken"></div>
+            </div>
+        </div>
 
-                    <div class="flex flex-wrap items-center gap-2">
+        <!-- Error -->
+        <div v-else-if="error" role="alert"
+            class="flex items-start gap-3 rounded-[14px] border border-danger/20 bg-danger-soft px-4 py-3 max-[600px]:flex-col">
+            <Icon name="error" :size="16" class="mt-0.5 text-danger" />
+            <div class="min-w-0 flex-1">
+                <p class="text-data font-semibold text-danger">Unable to load dataset schema</p>
+                <p class="mt-0.5 text-data text-ink">{{ error }}</p>
+            </div>
+            <Button size="sm" icon="refresh" @click="loadMetadata()">Try again</Button>
+        </div>
 
-                        <h2 class="m-0 text-xl font-bold tracking-[-0.35px] text-slate-900">
-                            Dataset Schema
-                        </h2>
+        <template v-else-if="metadata">
 
-                        <span v-if="metadata"
-                            class="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.3px] text-emerald-700 shadow-sm">
+            <div class="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
 
-                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                <!-- Columns table -->
+                <div class="overflow-hidden rounded-[16px] border border-[#e6decd] bg-surface shadow-panel">
+                    <div class="max-h-[620px] overflow-auto [scrollbar-width:thin]">
+                        <table class="w-full min-w-[640px] border-separate border-spacing-0 text-left">
+                            <caption class="sr-only">Dataset columns. Select a row to see its details.</caption>
+                            <thead class="sticky top-0 z-10">
+                                <tr class="text-data font-semibold text-ink">
+                                    <th scope="col" class="w-12 border-b border-[#ece5d6] bg-[#f6f1e5] py-3 pl-5 pr-2">#</th>
+                                    <th scope="col" class="border-b border-[#ece5d6] bg-[#f6f1e5] px-3 py-3">Column</th>
+                                    <th scope="col" class="border-b border-[#ece5d6] bg-[#f6f1e5] px-3 py-3">Type</th>
+                                    <th scope="col" class="border-b border-[#ece5d6] bg-[#f6f1e5] px-3 py-3">Role</th>
+                                    <th scope="col" class="border-b border-[#ece5d6] bg-[#f6f1e5] px-3 py-3 text-right">Missing</th>
+                                    <th scope="col" class="border-b border-[#ece5d6] bg-[#f6f1e5] py-3 pl-3 pr-5 text-right">Unique</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-data text-ink">
+                                <tr v-for="(column, index) in filteredColumns" :key="column.name"
+                                    class="cursor-pointer transition-colors duration-150"
+                                    :class="selectedColumn?.name === column.name ? 'bg-forest-soft/60' : 'hover:bg-canvas'"
+                                    @click="selectedColumnName = column.name">
+                                    <td class="border-b border-[#efe8da] py-3 pl-5 pr-2 tabular-nums text-ink-muted">{{ index + 1 }}</td>
+                                    <th scope="row" class="max-w-[240px] border-b border-[#efe8da] px-3 py-3 font-normal">
+                                        <button type="button" class="block max-w-full truncate text-left hover:underline"
+                                            :aria-pressed="selectedColumn?.name === column.name" :title="column.name"
+                                            @click.stop="selectedColumnName = column.name">
+                                            {{ column.name }}
+                                        </button>
+                                    </th>
+                                    <td class="whitespace-nowrap border-b border-[#efe8da] px-3 py-3 text-ink-muted">
+                                        {{ column.data_type || "—" }}
+                                    </td>
+                                    <td class="whitespace-nowrap border-b border-[#efe8da] px-3 py-3">
+                                        <span class="inline-flex items-center gap-1.5 font-medium" :class="roleStyle(column.role).text">
+                                            <span aria-hidden="true" class="h-2 w-2 rounded-full" :class="roleStyle(column.role).dot"></span>
+                                            {{ roleLabel(column.role) }}
+                                        </span>
+                                    </td>
+                                    <td class="whitespace-nowrap border-b border-[#efe8da] px-3 py-3 text-right tabular-nums"
+                                        :class="Number(column.missing_count) > 0 ? 'font-medium text-warn-ink' : ''">
+                                        {{ missingPercent(column) }}
+                                    </td>
+                                    <td class="whitespace-nowrap border-b border-[#efe8da] py-3 pl-3 pr-5 text-right tabular-nums">
+                                        {{ formatNumber(column.unique_values) }}
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
 
-                            Ready
-
-                        </span>
-
+                        <EmptyState v-if="!filteredColumns.length && searchQuery" icon="search"
+                            title="No columns match this filter"
+                            :description="`Nothing matches “${searchQuery}”. Try a column name, role or type.`">
+                            <template #action>
+                                <Button size="sm" @click="clearSearch">Clear filter</Button>
+                            </template>
+                        </EmptyState>
                     </div>
-
-                    <p class="mt-1 max-w-[620px] text-[13px] leading-5 text-slate-500">
-                        Understand the columns, data types, analytical roles,
-                        and quality characteristics available to the data
-                        engine.
+                    <p class="border-t border-[#ece5d6] bg-[#f8f4ea] px-5 py-2.5 text-caption text-ink-muted">
+                        <span class="tabular-nums">{{ visibleColumnCount }}</span> of
+                        <span class="tabular-nums">{{ columnCount }}</span> columns
                     </p>
-
                 </div>
 
-            </div>
-
-
-            <!-- Refresh -->
-            <button v-if="metadata" type="button" :disabled="refreshing"
-                class="inline-flex items-center gap-2 rounded-xl border border-violet-200 bg-gradient-to-r from-white via-violet-50 to-indigo-50 px-4 py-2.5 text-xs font-bold text-violet-700 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:from-violet-50 hover:to-fuchsia-50 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 cursor-pointer"
-                @click="loadMetadata({ refresh: true })">
-
-                <svg class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2">
-
-                    <path d="M20 11a8.1 8.1 0 0 0-14.9-4" />
-                    <path d="M4 4v5h5" />
-                    <path d="M4 13a8.1 8.1 0 0 0 14.9 4" />
-                    <path d="M20 20v-5h-5" />
-
-                </svg>
-
-                {{ refreshing ? "Refreshing..." : "Refresh" }}
-
-            </button>
-
-        </div>
-
-
-        <!-- =====================================================
-             LOADING
-        ====================================================== -->
-
-        <div v-if="loading"
-            class="overflow-hidden rounded-[20px] border border-violet-100 bg-white shadow-lg shadow-violet-100/40">
-
-            <div class="border-b border-violet-100 bg-gradient-to-r from-blue-50 via-violet-50 to-fuchsia-50 p-5">
-
-                <div class="mb-5 flex items-center justify-between gap-4">
-
-                    <div class="space-y-2">
-
-                        <div class="h-4 w-36 animate-pulse rounded bg-violet-200"></div>
-
-                        <div class="h-3 w-56 animate-pulse rounded bg-indigo-100"></div>
-
-                    </div>
-
-                    <div class="h-9 w-56 animate-pulse rounded-lg bg-white/80"></div>
-
-                </div>
-
-            </div>
-
-            <div class="grid grid-cols-1 gap-4 bg-slate-50/60 p-5 sm:grid-cols-2 lg:grid-cols-3">
-
-                <div v-for="card in 6" :key="card" class="rounded-2xl border border-violet-100 bg-white p-5 shadow-sm">
-
-                    <div class="flex items-center justify-between">
-
-                        <div class="h-4 w-28 animate-pulse rounded bg-violet-100"></div>
-
-                        <div class="h-6 w-16 animate-pulse rounded-full bg-fuchsia-100"></div>
-
-                    </div>
-
-                    <div class="mt-5 space-y-3">
-
-                        <div class="h-3 w-24 animate-pulse rounded bg-slate-100"></div>
-
-                        <div class="h-3 w-32 animate-pulse rounded bg-indigo-100"></div>
-
-                        <div class="h-3 w-28 animate-pulse rounded bg-violet-100"></div>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
-
-
-        <!-- =====================================================
-             ERROR
-        ====================================================== -->
-
-        <div v-else-if="error"
-            class="rounded-[20px] border border-red-200 bg-gradient-to-br from-red-50 via-white to-orange-50 p-6 shadow-lg shadow-red-100/40">
-
-            <div class="flex items-start gap-4">
-
-                <div
-                    class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-red-100 to-orange-100 text-sm font-bold text-red-600 shadow-sm">
-                    !
-                </div>
-
-                <div>
-
-                    <h3 class="m-0 text-sm font-bold text-slate-900">
-                        Unable to load dataset schema
+                <!-- Column details -->
+                <aside v-if="selectedColumn" aria-labelledby="column-detail-title"
+                    class="rounded-[16px] border border-[#e6decd] bg-surface px-5 pb-5 pt-4 shadow-panel">
+                    <h3 id="column-detail-title" class="truncate text-lead font-semibold text-ink" :title="selectedColumn.name">
+                        Column: {{ selectedColumn.name }}
                     </h3>
+                    <dl class="mt-3 divide-y divide-[#ece5d6] text-data">
+                        <div class="flex items-center justify-between gap-3 py-2.5">
+                            <dt class="text-ink-muted">Type</dt>
+                            <dd class="rounded-[8px] bg-[#f0e9d9] px-2.5 py-1 font-medium text-ink">{{ selectedColumn.data_type || "—" }}</dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 py-2.5">
+                            <dt class="text-ink-muted">Role</dt>
+                            <dd class="inline-flex items-center gap-1.5 rounded-[8px] bg-[#f0e9d9] px-2.5 py-1 font-medium"
+                                :class="roleStyle(selectedColumn.role).text">
+                                <span aria-hidden="true" class="h-2 w-2 rounded-full" :class="roleStyle(selectedColumn.role).dot"></span>
+                                {{ roleLabel(selectedColumn.role) }}
+                            </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 py-2.5">
+                            <dt class="text-ink-muted">Missing</dt>
+                            <dd class="tabular-nums text-ink">
+                                {{ formatNumber(selectedColumn.missing_count ?? 0) }} ({{ missingPercent(selectedColumn) }})
+                            </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 py-2.5">
+                            <dt class="text-ink-muted">Unique</dt>
+                            <dd class="font-semibold tabular-nums text-ink">{{ formatNumber(selectedColumn.unique_values) }}</dd>
+                        </div>
+                    </dl>
 
-                    <p class="mt-1 text-[13px] leading-5 text-slate-500">
-                        {{ error }}
-                    </p>
+                    <div v-if="selectedColumn.allowed_operations?.length" class="mt-3">
+                        <p class="text-data font-medium text-ink">Supported operations</p>
+                        <p class="mt-1 text-data text-ink-muted">
+                            {{ selectedColumn.allowed_operations.map((op) => String(op).replace(/_/g, " ")).join(", ") }}
+                        </p>
+                    </div>
 
-                    <button type="button"
-                        class="mt-4 rounded-xl bg-gradient-to-r from-red-500 to-orange-500 px-4 py-2.5 text-xs font-bold text-white shadow-md transition-all hover:-translate-y-0.5 hover:from-red-600 hover:to-orange-600 hover:shadow-lg"
-                        @click="loadMetadata()">
-                        Try Again
-                    </button>
-
-                </div>
-
+                    <div v-if="Array.isArray(selectedColumn.sample_values) && selectedColumn.sample_values.length" class="mt-4">
+                        <p class="text-data font-medium text-ink">Example values</p>
+                        <p class="mt-1 break-words text-data text-ink-muted">
+                            {{ [...new Set(selectedColumn.sample_values.map(String))].slice(0, 4).join(", ") }}
+                        </p>
+                    </div>
+                </aside>
             </div>
 
-        </div>
-
-
-        <!-- =====================================================
-             METADATA
-        ====================================================== -->
-
-        <div v-else-if="metadata"
-            class="overflow-hidden rounded-[20px] border border-violet-100 bg-white shadow-lg shadow-violet-100/40">
-
-
-            <!-- =================================================
-                 SUMMARY
-            ================================================== -->
-
-            <div class="grid grid-cols-1 border-b border-violet-100 sm:grid-cols-3">
-
-                <!-- Columns -->
-                <div
-                    class="border-b border-violet-100 bg-gradient-to-br from-blue-50 to-cyan-50 px-5 py-5 sm:border-b-0 sm:border-r">
-
-                    <div class="flex items-center justify-between">
-
-                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-blue-500">
-                            Columns
-                        </p>
-
-                        <span
-                            class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 text-blue-500 shadow-sm">
-                            #
-                        </span>
-
-                    </div>
-
-                    <p class="mt-2 text-2xl font-extrabold text-blue-700">
-                        {{ formatNumber(columnCount) }}
-                    </p>
-
-                    <p class="mt-1 text-[10px] font-medium text-blue-500">
-                        Available fields
-                    </p>
-
-                </div>
-
-
-                <!-- Unique -->
-                <div
-                    class="border-b border-violet-100 bg-gradient-to-br from-violet-50 to-fuchsia-50 px-5 py-5 sm:border-b-0 sm:border-r">
-
-                    <div class="flex items-center justify-between">
-
-                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px] text-violet-500">
-                            Unique Values
-                        </p>
-
-                        <span
-                            class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 text-violet-500 shadow-sm">
-                            ◈
-                        </span>
-
-                    </div>
-
-                    <p class="mt-2 text-2xl font-extrabold text-violet-700">
-                        {{ formatNumber(totalUniqueValues) }}
-                    </p>
-
-                    <p class="mt-1 text-[10px] font-medium text-violet-500">
-                        Distinct values
-                    </p>
-
-                </div>
-
-
-                <!-- Missing -->
-                <div class="px-5 py-5 transition-colors duration-200" :class="totalMissingValues > 0
-                        ? 'bg-amber-50'
-                        : 'bg-emerald-50'
-                    ">
-                    <div class="flex items-center justify-between">
-
-                        <p class="m-0 text-[10px] font-bold uppercase tracking-[0.5px]" :class="totalMissingValues > 0
-                                ? 'text-amber-600'
-                                : 'text-emerald-600'
-                            ">
-                            Missing Values
-                        </p>
-
-                        <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-white/80 shadow-sm" :class="totalMissingValues > 0
-                                ? 'text-amber-500'
-                                : 'text-emerald-500'
-                            ">
-                            <svg v-if="totalMissingValues > 0" class="h-4 w-4" viewBox="0 0 24 24" fill="none"
-                                stroke="currentColor" stroke-width="2">
-                                <path d="M12 9v4" />
-                                <path d="M12 17h.01" />
-                                <path
-                                    d="M10.3 3.8 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0Z" />
-                            </svg>
-
-                            <svg v-else class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <path d="m5 12 4 4L19 6" />
-                            </svg>
-                        </span>
-
-                    </div>
-
-                    <p class="mt-2 text-2xl font-extrabold" :class="totalMissingValues > 0
-                            ? 'text-amber-700'
-                            : 'text-emerald-700'
-                        ">
-                        {{ formatNumber(totalMissingValues) }}
-                    </p>
-
-                    <p class="mt-1 text-[10px] font-medium" :class="totalMissingValues > 0
-                            ? 'text-amber-500'
-                            : 'text-emerald-500'
-                        ">
-                        {{
-                            totalMissingValues > 0
-                                ? "Needs attention"
-                                : "No missing values"
-                        }}
-                    </p>
-
-                </div>
-            </div>
-
-
-            <!-- =================================================
-                 EXAMPLE QUESTIONS
-            ================================================== -->
-
-            <div v-if="exampleQuestions.length"
-                class="border-b border-violet-100 bg-gradient-to-br from-violet-50/70 via-white to-blue-50/60 px-5 py-5">
-
-                <div class="flex items-start justify-between gap-4 max-[650px]:flex-col">
-
-                    <div class="flex items-start gap-3">
-
-                        <div
-                            class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-200">
-
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-
-                                <path d="M12 3 14.5 9.5 21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"
-                                    stroke-linejoin="round" />
-
-                            </svg>
-
-                        </div>
-
-                        <div>
-
-                            <h3 class="m-0 text-sm font-bold text-slate-900">
-                                Example Questions
-                            </h3>
-
-                            <p class="mt-1 max-w-[620px] text-[11px] leading-5 text-slate-500">
-                                Try these questions to explore your uploaded
-                                dataset with the analytics engine.
-                            </p>
-
-                        </div>
-
-                    </div>
-
-                    <span
-                        class="shrink-0 rounded-full border border-violet-200 bg-gradient-to-r from-violet-100 to-fuchsia-100 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.4px] text-violet-700">
-                        Dataset-aware
-                    </span>
-
-                </div>
-
-
-                <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-
-                    <button v-for="(question, index) in exampleQuestions" :key="`${question}-${index}`" type="button"
-                        class="group flex min-h-[62px] items-center justify-between gap-3 rounded-xl border border-violet-100 bg-white px-4 py-3 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-violet-300 hover:bg-gradient-to-r hover:from-violet-50 hover:to-fuchsia-50 hover:shadow-md cursor-pointer"
-                        @click="selectQuestion(question)">
-
-                        <span class="text-[11px] font-medium leading-5 text-slate-600 group-hover:text-violet-700">
-                            {{ question }}
-                        </span>
-
-                        <span
-                            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-50 to-indigo-50 text-violet-500 transition-all group-hover:from-violet-500 group-hover:to-fuchsia-500 group-hover:text-white">
-
-                            <svg v-if="copiedQuestion !== question" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"
-                                stroke="currentColor" stroke-width="2">
-
-                                <path d="M5 12h13" stroke-linecap="round" />
-                                <path d="m13 6 6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
-
-                            </svg>
-
-                            <svg v-else class="h-3.5 w-3.5 text-white" viewBox="0 0 24 24" fill="none"
-                                stroke="currentColor" stroke-width="2">
-
-                                <path d="m5 12 4 4L19 6" stroke-linecap="round" stroke-linejoin="round" />
-
-                            </svg>
-
-                        </span>
-
-                    </button>
-
-                </div>
-
-                <p class="mt-3 text-[9px] text-slate-400">
-                    Click a question to use it in the analytics query.
+            <!-- Example questions (unchanged behavior: runs in Analyze) -->
+            <section v-if="exampleQuestions.length" aria-labelledby="schema-questions-title"
+                class="rounded-[16px] border border-[#e6decd] bg-surface px-5 pb-5 pt-4 shadow-panel">
+                <h3 id="schema-questions-title" class="text-lead font-semibold text-ink">Questions to ask</h3>
+                <p class="mt-1 text-data text-ink-muted">
+                    Pick one to run it in Analyze. It is also copied to your clipboard.
                 </p>
-
-            </div>
-
-
-            <!-- =================================================
-                 FOOTER
-            ================================================== -->
-
-            <div
-                class="flex items-center justify-between gap-4 border-t border-violet-100 bg-gradient-to-r from-slate-50 via-violet-50/50 to-indigo-50/50 px-[18px] py-3 text-[11px] text-slate-400 max-[600px]:flex-col max-[600px]:items-start">
-
-                <div class="flex items-center gap-2">
-
-                    <span class="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.10)]">
-                    </span>
-
-                    <span class="font-medium">
-                        Schema loaded successfully
-                    </span>
-
+                <div class="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <button v-for="(question, index) in exampleQuestions" :key="`${question}-${index}`" type="button"
+                        class="group flex items-center gap-3 rounded-[10px] px-2 py-2 text-left transition-colors duration-150 hover:bg-sunken/60"
+                        @click="selectQuestion(question)">
+                        <span aria-hidden="true"
+                            class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#f1ebdd] text-ink-muted group-hover:text-forest">
+                            <Icon v-if="copiedQuestion !== question" name="arrow-right" :size="14" />
+                            <Icon v-else name="check" :size="14" />
+                        </span>
+                        <span class="text-data text-ink">{{ question }}</span>
+                        <span v-if="copiedQuestion === question" class="sr-only">Copied</span>
+                    </button>
                 </div>
+            </section>
 
-                <span class="rounded-full bg-white px-3 py-1 font-bold text-violet-600 shadow-sm">
+        </template>
 
-                    {{ visibleColumnCount }} visible columns
-
-                </span>
-
-            </div>
-
-        </div>
-
-        <!-- =====================================================
-             NO DATASET SELECTED
-        ====================================================== -->
-
-        <div v-else
-            class="flex min-h-[200px] flex-col items-center justify-center rounded-[20px] border border-dashed border-violet-100 bg-white px-5 text-center">
-            <div
-                class="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-50 text-violet-400">
-                <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M4 5h16" />
-                    <path d="M4 12h16" />
-                    <path d="M4 19h16" />
-                    <circle cx="8" cy="5" r="1.5" />
-                    <circle cx="16" cy="12" r="1.5" />
-                    <circle cx="10" cy="19" r="1.5" />
-                </svg>
-            </div>
-
-            <h3 class="mt-3 text-sm font-bold text-slate-700">
-                No dataset selected
-            </h3>
-
-            <p class="mt-1.5 max-w-xs text-[11px] leading-5 text-slate-400">
-                Upload or select a dataset to view its schema.
-            </p>
+        <!-- No dataset selected -->
+        <div v-else class="rounded-[16px] border border-[#e6decd] bg-surface">
+            <EmptyState icon="columns" title="No dataset selected"
+                description="Upload or select a dataset to view its schema." />
         </div>
 
     </section>

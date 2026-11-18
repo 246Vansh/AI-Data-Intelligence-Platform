@@ -1,1 +1,380 @@
 @import "tailwindcss";
+
+/* =========================================================
+   DESIGN FOUNDATION - Forest & Ivory (visual redesign, Stage 1)
+   =========================================================
+
+   Two worlds, one system:
+   - the FOREST world: sidebar, mobile drawer, auth brand panel. Deep
+     green surfaces, ivory text, muted gold used sparingly as the one
+     accent (brand mark, active marker, focus on forest).
+   - the IVORY world: the workspace. Warm off-white canvas, near-white
+     raised surfaces, hairline warm borders, green-ink text.
+
+   Token names are semantic and shared by every component (canvas,
+   surface, forest, ink-muted, ...). Tailwind's own scales are left
+   untouched for components not yet redesigned.
+
+   Contrast rules (WCAG 2.x, computed):
+   - ink #1B2A22 on canvas #F6F2E9 ............ ~14:1
+   - ink-muted #56645B on canvas .............. ~5.6:1  (AA body text)
+   - ink-subtle #7C877F on canvas ............. ~3.6:1  (placeholders/meta >= 14px only)
+   - forest #183D30 on canvas ................. ~10.8:1 (primary, links, focus)
+   - on-forest #F3EEE2 on forest .............. ~10.3:1
+   - on-forest-muted #A9BDAF on forest ........ ~5.9:1
+   - gold #C9A55E: ON FOREST ONLY ............. ~5.4:1  (on ivory ~2:1 - never text)
+   - gold-ink #7A5C22 on gold-soft ............ ~5.3:1
+
+   Chart colors were validated with the dataviz palette validator
+   against the `surface` color (lightness band, chroma floor,
+   colorblind separation, normal-vision floor, >= 3:1 contrast):
+   categorical order 1-6 and sequential ramp 1-5 all PASS. Keep the
+   categorical order fixed; never cycle or regenerate hues. */
+
+@theme {
+    /* ---- Ivory world: surfaces ---- */
+    --color-canvas: #f8f3e8;        /* workspace background (warm ivory) */
+    --color-surface: #fdfaf3;       /* raised panels, inputs, cards */
+    --color-topbar: #fdf9f1;        /* dataset context bar */
+    --color-sunken: #efe9dc;        /* table headers, wells, segmented tracks */
+    --color-line: #e5ddcc;          /* hairline separators, card borders */
+    --color-line-strong: #d3c8b1;   /* input borders, emphasized rules */
+
+    /* ---- Forest world ---- */
+    --color-forest: #183d30;        /* sidebar, primary actions, focus */
+    --color-forest-deep: #0f2a20;   /* sidebar bottom of gradient, auth panel */
+    --color-forest-hover: #22503f;  /* hover on forest; primary hover */
+    --color-forest-raised: #23503a; /* selected dataset on forest */
+    --color-forest-active: #41704b; /* selected section in the sidebar nav */
+    --color-forest-button: #3d6a48; /* filled button on forest (add dataset) */
+    --color-forest-line: #2c5244;   /* separators on forest */
+    --color-forest-soft: #e3ebe1;   /* selected / hover wash on ivory */
+    --color-on-forest: #f3eee2;     /* text on forest */
+    --color-on-forest-muted: #a9bdaf;
+    --color-sage: #a8b99a;          /* fills on ivory; text only on forest */
+
+    /* ---- Accent: muted gold (sparingly) ---- */
+    --color-gold: #c9a55e;          /* on forest only: mark, active marker, focus */
+    --color-gold-soft: #f4ebd6;     /* ivory-side gold wash */
+    --color-gold-ink: #7a5c22;      /* gold-family text on ivory */
+
+    /* ---- Text ---- */
+    --color-ink: #1b2a22;
+    --color-ink-muted: #56645b;
+    --color-ink-subtle: #7c877f;
+
+    /* ---- Status (always paired with an icon + label) ---- */
+    --color-success: #2f6b4c;
+    --color-success-soft: #e3eee4;
+    --color-success-strong: #1f7a3a; /* filled check icon in the quality pill */
+    --color-success-pill: #dcefd6;   /* quality pill fill */
+    --color-danger: #a4402f;
+    --color-danger-soft: #f7e5df;
+    --color-warn-ink: #7a5c22;
+    --color-warn-soft: #f5ebd3;
+
+    /* ---- Typography ---- */
+    --font-sans: "Instrument Sans", "Instrument Sans Fallback", ui-sans-serif, system-ui,
+        -apple-system, "Segoe UI", sans-serif;
+    --font-serif: "Instrument Serif", "Instrument Serif Fallback", ui-serif, Georgia, "Times New Roman", serif;
+    --font-mono: "JetBrains Mono", "JetBrains Mono Fallback", ui-monospace, "SFMono-Regular",
+        Menlo, Consolas, monospace;
+
+    /* Type scale - 12px is the floor. Named, so Tailwind's text-xs/sm/...
+       keep their current meaning in unmigrated components. */
+    --text-caption: 0.75rem;        /* 12px */
+    --text-caption--line-height: 1rem;
+    --text-data: 0.8125rem;         /* 13px - tables, dense UI */
+    --text-data--line-height: 1.25rem;
+    --text-body: 0.875rem;          /* 14px */
+    --text-body--line-height: 1.375rem;
+    --text-lead: 1rem;              /* 16px */
+    --text-lead--line-height: 1.5rem;
+    --text-title: 1.25rem;          /* 20px */
+    --text-title--line-height: 1.75rem;
+    --text-title--letter-spacing: -0.01em;
+    --text-display: 1.75rem;        /* 28px */
+    --text-display--line-height: 2.125rem;
+    --text-display--letter-spacing: -0.02em;
+    --text-hero: 2.375rem;          /* 38px - auth brand statement only */
+    --text-hero--line-height: 2.75rem;
+    --text-hero--letter-spacing: -0.025em;
+
+    /* ---- Spacing rhythm ----
+       Tailwind's 4px scale is the grid. Shell rhythm: 16px gutters on
+       mobile, 24px on laptop/desktop; 56px bars; 260px sidebar. */
+    --spacing-sidebar: 16.25rem;    /* 260px  (w-sidebar) */
+    --spacing-bar: 3.5rem;          /* 56px   (h-bar) */
+
+    /* ---- Shape: radius by hierarchy ---- */
+    --radius-control: 8px;          /* buttons, inputs, nav items */
+    --radius-panel: 12px;           /* panels, tables, dialogs, cards */
+
+    /* ---- Elevation: three levels ---- */
+    --shadow-panel: 0 1px 0 rgb(24 61 48 / 0.04), 0 1px 3px rgb(24 61 48 / 0.05);
+    --shadow-raised: 0 1px 2px rgb(24 61 48 / 0.05), 0 6px 16px -6px rgb(24 61 48 / 0.12);
+    --shadow-overlay: 0 16px 40px -12px rgb(15 42 32 / 0.28), 0 2px 6px rgb(15 42 32 / 0.08);
+
+    /* ---- Motion ---- */
+    --ease-out-quiet: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+    /* Entry-only overlay motion for Reka dialogs, sheets and menus
+       (data-[state=open]:animate-*). Short and small-distance; the
+       global reduced-motion rule below turns all of it off. */
+    --animate-overlay-in: overlay-in 160ms var(--ease-out-quiet);
+    --animate-dialog-in: dialog-in 180ms var(--ease-out-quiet);
+    --animate-sheet-in-right: sheet-in-right 220ms var(--ease-out-quiet);
+    --animate-sheet-in-left: sheet-in-left 220ms var(--ease-out-quiet);
+    --animate-sheet-in-bottom: sheet-in-bottom 240ms var(--ease-out-quiet);
+    --animate-pop-in: pop-in 140ms var(--ease-out-quiet);
+
+    @keyframes overlay-in {
+        from { opacity: 0; }
+    }
+    /* Only `transform`: centering uses Tailwind's separate `translate`
+       property, which composes with this instead of being overwritten. */
+    @keyframes dialog-in {
+        from { opacity: 0; transform: translateY(6px) scale(0.98); }
+    }
+    @keyframes sheet-in-right {
+        from { transform: translateX(16px); opacity: 0; }
+    }
+    @keyframes sheet-in-left {
+        from { transform: translateX(-16px); opacity: 0; }
+    }
+    @keyframes sheet-in-bottom {
+        from { transform: translateY(24px); opacity: 0; }
+    }
+    @keyframes pop-in {
+        from { opacity: 0; transform: scale(0.97); }
+    }
+}
+
+/* Data-visualization colors (validated; fixed order). `static` makes
+   Tailwind always emit these variables - ECharts reads them at runtime
+   via getComputedStyle, which no utility class would otherwise
+   trigger, so the chart theme never duplicates these hex values. */
+@theme static {
+    --color-chart-1: #2e8a63;
+    --color-chart-2: #3f78c0;
+    --color-chart-3: #af7a12;
+    --color-chart-4: #b4507f;
+    --color-chart-5: #6f9a2a;
+    --color-chart-6: #7e5bb8;
+
+    --color-seq-1: #94b8a1;
+    --color-seq-2: #6c9a80;
+    --color-seq-3: #4a7e63;
+    --color-seq-4: #2d6449;
+    --color-seq-5: #183d30;
+
+    /* Ranked bars (Analyze): darkest = largest value, as in the
+       reference. Every step keeps >= 3:1 against `surface`. */
+    --color-rank-1: #2f6243;
+    --color-rank-2: #457552;
+    --color-rank-3: #5e8b66;
+    --color-rank-4: #6f9a74;
+    --color-rank-5: #7fa682;
+}
+
+/* =========================================================
+   FONTS - self-hosted variable WOFF2 (SIL OFL 1.1; licenses in
+   public/fonts). Latin + Latin Extended subsets, same unicode-ranges
+   Google Fonts uses, so a browser only downloads what a page needs.
+   ========================================================= */
+
+@font-face {
+    font-family: "Instrument Sans";
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url("/fonts/instrument-sans-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+        U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+        U+FEFF, U+FFFD;
+}
+
+@font-face {
+    font-family: "Instrument Sans";
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url("/fonts/instrument-sans-latin-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+        U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+        U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+    font-family: "JetBrains Mono";
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+        U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+        U+FEFF, U+FFFD;
+}
+
+@font-face {
+    font-family: "JetBrains Mono";
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url("/fonts/jetbrains-mono-latin-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+        U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+        U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+    font-family: "Instrument Serif";
+    font-style: italic;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/fonts/instrument-serif-italic-latin.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+        U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+        U+FEFF, U+FFFD;
+}
+
+@font-face {
+    font-family: "Instrument Serif Fallback";
+    src: local("Georgia Italic"), local("Georgia-Italic"), local("Times New Roman Italic");
+    font-style: italic;
+}
+
+/* Metric-matched fallbacks: while the web fonts load (font-display:
+   swap), text renders in a local font scaled to the same advance width
+   and vertical metrics, so the swap causes no layout shift. Values
+   computed from the font files (avg advance + hhea metrics):
+   Instrument Sans vs Arial 0.4854/0.4746 em; JetBrains Mono vs
+   Consolas 0.600/0.5498 em. */
+
+@font-face {
+    font-family: "Instrument Sans Fallback";
+    src: local("Arial"), local("ArialMT"), local("Helvetica");
+    size-adjust: 102.3%;
+    ascent-override: 94.8%;
+    descent-override: 24.4%;
+    line-gap-override: 0%;
+}
+
+@font-face {
+    font-family: "JetBrains Mono Fallback";
+    src: local("Consolas"), local("Menlo");
+    size-adjust: 109.1%;
+    ascent-override: 93.5%;
+    descent-override: 27.5%;
+    line-gap-override: 0%;
+}
+
+/* =========================================================
+   GLOBAL BASE
+   ========================================================= */
+
+@layer base {
+    html {
+        background-color: var(--color-canvas);
+        color: var(--color-ink);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+        color-scheme: light;
+    }
+
+    body {
+        min-height: 100vh;
+        background-color: var(--color-canvas);
+    }
+
+    ::selection {
+        background-color: var(--color-forest-soft);
+        color: var(--color-forest);
+    }
+
+    /* Keyboard focus, everywhere, by default. Components that already
+       style their own focus (focus:outline-none + ring-*) keep theirs:
+       a utility class outranks this element-level rule. */
+    :focus-visible {
+        outline: 2px solid var(--color-forest);
+        outline-offset: 2px;
+    }
+
+    /* Inside the forest world (sidebar, drawer, auth brand panel) the
+       forest outline would be invisible: gold takes over there. */
+    .theme-forest :focus-visible {
+        outline-color: var(--color-gold);
+    }
+
+    .theme-forest {
+        color-scheme: dark;
+        scrollbar-color: var(--color-forest-line) transparent;
+    }
+
+    /* Disabled form controls read as unavailable everywhere, not only
+       where a component remembered to style it. */
+    :where(button, input, select, textarea):disabled {
+        cursor: not-allowed;
+    }
+
+    /* Respect reduced motion globally: decorative pulses/pings stop and
+       transitions become instant. Loading text and static indicators
+       still communicate state. */
+    @media (prefers-reduced-motion: reduce) {
+        *,
+        ::before,
+        ::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+        }
+    }
+}
+
+/* =========================================================
+   BROWSER AUTOFILL (deliberately UNLAYERED)
+   =========================================================
+
+   Chrome/Edge/Safari paint autofilled fields with their own light-blue
+   (or yellow) background and override the text color. That background
+   cannot be reset directly; the standard fix covers it with an inset
+   box-shadow in the field's real surface color, and delays the
+   browser's background-color change indefinitely.
+
+   Why outside @layer: Tailwind 4 emits utilities in @layer utilities,
+   which beats @layer base regardless of specificity - and the auth
+   inputs carry box-shadow utilities (inner shadow, focus ring). Inside
+   the base layer this override lost to them and the blue showed
+   through (Stage 1 bug). Unlayered declarations outrank every layer.
+
+   Only paint is changed: the field stays a native input, so password
+   managers, the browser's own autofill UI and accessibility are
+   untouched. The focus ring is re-added here so an autofilled field
+   still shows focus. */
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+textarea:-webkit-autofill,
+select:-webkit-autofill {
+    -webkit-text-fill-color: var(--color-ink);
+    caret-color: var(--color-ink);
+    -webkit-box-shadow: 0 0 0 1000px var(--color-surface) inset;
+    box-shadow: 0 0 0 1000px var(--color-surface) inset;
+    transition: background-color 600000s 0s, color 600000s 0s;
+}
+
+input:-webkit-autofill:focus,
+input:-webkit-autofill:focus-visible {
+    -webkit-text-fill-color: var(--color-ink);
+    -webkit-box-shadow: 0 0 0 1000px var(--color-surface) inset, 0 0 0 3px rgb(24 61 48 / 0.15);
+    box-shadow: 0 0 0 1000px var(--color-surface) inset, 0 0 0 3px rgb(24 61 48 / 0.15);
+}
+
+/* Firefox (no -webkit- prefix): honors a plain background override. */
+input:autofill {
+    background-color: var(--color-surface);
+    color: var(--color-ink);
+}

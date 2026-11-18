@@ -1,8 +1,44 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
-import { getDatasetPreview, getApiErrorMessage } from "../services/api";
+import { useBreakpoints } from "@vueuse/core";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+
+import { useUiPreference } from "../composables/useUiPreference";
+import {
+    datasetUrls,
+    getApiErrorMessage,
+    getDatasetMetadata,
+    getDatasetPreview,
+    getDatasetProfile,
+    onCachedResponse,
+} from "../services/api";
+import { COLUMN_KINDS, describeColumns, kindSummary } from "../services/columnInsight";
+import CellValue from "./data/CellValue.vue";
+import ColumnDetails from "./data/ColumnDetails.vue";
+import Button from "./ui/Button.vue";
+import Dialog from "./ui/Dialog.vue";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
+import SegmentedControl from "./ui/SegmentedControl.vue";
+import InspectorFrame from "./workspace/InspectorFrame.vue";
+
+// =========================================================
+// DATA WORKSPACE (Phase 3)
+// =========================================================
+//
+// The Data tab: the preview table is the workspace, with a column
+// inspector beside it (docked from 1024px, collapsible, resizable) or,
+// on phones, a Rows / Columns view with a bottom sheet per column.
+//
+// Data sources are unchanged: the preview request is this component's
+// own (as before). Column details come from the dataset's /profile and
+// /metadata responses, which the Context Bar and the Analyze/Schema
+// panels already request - api.js cachedGet() shares those requests and
+// responses, so this component adds no network traffic of its own for
+// them. It also follows their refreshes (onCachedResponse).
 
 const PREVIEW_ROW_LIMIT = 10;
+// Phone record view: fields shown per record before "Show all".
+const MOBILE_FIELD_LIMIT = 6;
 
 const props = defineProps({
     datasetId: {
@@ -10,6 +46,10 @@ const props = defineProps({
         default: "",
     },
 });
+
+// ---------------------------------------------------------
+// Preview (unchanged behaviour)
+// ---------------------------------------------------------
 
 const dataset = ref(null);
 const loading = ref(true);
@@ -68,673 +108,596 @@ async function loadPreview(options = {}) {
     }
 }
 
+// ---------------------------------------------------------
+// Column context: cached /profile + /metadata (no new requests)
+// ---------------------------------------------------------
+
+const profile = ref(null);
+const metadata = ref(null);
+
+async function loadColumnContext() {
+    const requestedId = props.datasetId;
+    if (!requestedId) {
+        return;
+    }
+
+    const [profileResult, metadataResult] = await Promise.allSettled([
+        getDatasetProfile(requestedId),
+        getDatasetMetadata(requestedId),
+    ]);
+
+    if (requestedId !== props.datasetId) {
+        return;
+    }
+
+    // A failure only means fewer details in the inspector; the
+    // Context Bar / Schema tab report those errors themselves.
+    profile.value = profileResult.status === "fulfilled" ? profileResult.value : null;
+    metadata.value = metadataResult.status === "fulfilled" ? metadataResult.value : null;
+}
+
+const stopFollowingRefreshes = onCachedResponse((url, data) => {
+    if (!props.datasetId) {
+        return;
+    }
+    if (url === datasetUrls.profile(props.datasetId)) {
+        profile.value = data;
+    } else if (url === datasetUrls.metadata(props.datasetId)) {
+        metadata.value = data;
+    }
+});
+
+onBeforeUnmount(stopFollowingRefreshes);
+
+// Refresh: the preview, plus the dataset profile the removed Overview
+// panel used to refresh (the Context Bar follows it).
+function refresh() {
+    loadPreview({ refresh: true });
+    if (props.datasetId) {
+        getDatasetProfile(props.datasetId, { force: true }).catch(() => { });
+    }
+}
+
+onMounted(() => {
+    loadPreview();
+    loadColumnContext();
+});
+
+// ---------------------------------------------------------
+// Rows and columns
+// ---------------------------------------------------------
+
 const sourceRows = computed(() =>
     Array.isArray(dataset.value?.rows)
         ? dataset.value.rows
         : [],
 );
 
+const previewColumns = computed(() =>
+    Array.isArray(dataset.value?.columns)
+        ? dataset.value.columns
+        : [],
+);
+
+// Search filters the preview sample only (as before). Each entry keeps
+// its position in the preview, so row numbers stay stable while
+// filtering.
 const filteredRows = computed(() => {
     const query = searchQuery.value.trim().toLowerCase();
 
-    if (!query) {
-        return sourceRows.value.slice(0, PREVIEW_ROW_LIMIT);
-    }
-
     return sourceRows.value
-        .filter((row) =>
-            Object.values(row || {}).some((value) =>
+        .slice(0, PREVIEW_ROW_LIMIT)
+        .map((row, index) => ({ row: row || {}, number: index + 1 }))
+        .filter(({ row }) =>
+            !query ||
+            Object.values(row).some((value) =>
                 String(value ?? "")
                     .toLowerCase()
                     .includes(query),
             ),
-        )
-        .slice(0, PREVIEW_ROW_LIMIT);
+        );
 });
 
-// Size of the preview sample the backend returned - not the dataset's
-// row count, which the preview payload does not carry. Search filters
-// this sample only.
-const totalRowCount = computed(() => sourceRows.value.length);
+const totalRowCount = computed(() => Math.min(sourceRows.value.length, PREVIEW_ROW_LIMIT));
 
+// The whole dataset's row count, from the profile this panel already
+// loads (no extra request); null when unknown.
+const datasetRowCount = computed(() => {
+    const rows = Number(profile.value?.rows);
+    return Number.isFinite(rows) && rows > 0 ? rows.toLocaleString() : null;
+});
 const visibleRowCount = computed(() => filteredRows.value.length);
+const isSearchActive = computed(() => Boolean(searchQuery.value.trim()));
 
-const columnCount = computed(() =>
-    Array.isArray(dataset.value?.columns)
-        ? dataset.value.columns.length
-        : 0,
+const columns = computed(() =>
+    describeColumns({
+        columns: previewColumns.value,
+        rows: sourceRows.value.slice(0, PREVIEW_ROW_LIMIT),
+        profile: profile.value,
+        metadata: metadata.value,
+    }),
 );
 
-const isSearchActive = computed(() =>
-    Boolean(searchQuery.value.trim()),
-);
+const typeSummary = computed(() => kindSummary(columns.value));
 
-function formatCell(value) {
-    if (value === null || value === undefined || value === "") {
-        return "—";
-    }
-
-    if (typeof value === "number") {
-        return new Intl.NumberFormat("en-US", {
-            maximumFractionDigits: 2,
-        }).format(value);
-    }
-
-    return String(value);
-}
+// Only when the profile is available: how many columns have any
+// missing value across the whole dataset (a count of columns, taken
+// from the profile's own missing counts).
+const columnsWithMissing = computed(() => {
+    if (!profile.value) return null;
+    const known = columns.value.filter((column) => column.missingCount !== null);
+    return known.length ? known.filter((column) => column.missingCount > 0).length : null;
+});
 
 function clearSearch() {
     searchQuery.value = "";
 }
 
-function getColumnWidth(column) {
-    const name = String(column || "").toLowerCase();
+// Column widths: by kind, widened for long names (capped - the full
+// name is in the header's tooltip and in the inspector).
+const KIND_WIDTH = { number: 120, date: 184, boolean: 96, text: 200, other: 140 };
 
-    /*
-     * Wider fields
-     */
-    if (
-        name.includes("description") ||
-        name.includes("summary") ||
-        name.includes("overview") ||
-        name.includes("cast")
-    ) {
-        return "280px";
-    }
+const ROW_NUMBER_WIDTH = 48;
 
-    /*
-     * Medium fields
-     */
-    if (
-        name.includes("title") ||
-        name.includes("director") ||
-        name.includes("country") ||
-        name.includes("listed")
-    ) {
-        return "170px";
-    }
-
-    /*
-     * Smaller fields
-     */
-    if (
-        name.includes("date") ||
-        name.includes("year") ||
-        name.includes("rating") ||
-        name.includes("duration")
-    ) {
-        return "130px";
-    }
-
-    /*
-     * Default column width
-     *
-     * 120px prevents the last column from being squeezed
-     * into a partially visible state.
-     */
-    return "120px";
+function columnWidth(column) {
+    const byName = Math.min(280, Math.ceil(column.name.length * 7.4) + 56);
+    return Math.max(KIND_WIDTH[column.kind] || 140, byName);
 }
 
-onMounted(() => {
-    loadPreview();
+// The table gets the exact sum as its width: with `table-layout: fixed`
+// and a content-sized (max-content) width, browsers widen columns past
+// their <col> widths to fit long values. (min-width: 100% still fills
+// the workspace when there are few columns.)
+const tableWidth = computed(() => ROW_NUMBER_WIDTH + columns.value.reduce((sum, column) => sum + columnWidth(column), 0));
+
+const kindOf = (kind) => COLUMN_KINDS[kind] || COLUMN_KINDS.other;
+
+function formatPercent(value) {
+    if (value === null) return "";
+    return value > 0 && value < 0.1 ? "<0.1%" : `${Number(value.toFixed(1))}%`;
+}
+
+// ---------------------------------------------------------
+// Layout + column selection
+// ---------------------------------------------------------
+
+const breakpoints = useBreakpoints({ tablet: 768, desktop: 1024, wide: 1440 });
+const isMobile = breakpoints.smaller("tablet");
+const inspectorDocked = breakpoints.greaterOrEqual("desktop");
+
+// First visit: open on wide screens, collapsed on laptops (the table
+// gets the width; selecting a column opens it). Then the user's choice.
+const inspectorOpen = useUiPreference(
+    "data.inspector-open",
+    typeof window === "undefined" ? true : window.innerWidth >= 1440,
+);
+
+const selectedName = ref(null);
+const selectedColumn = computed(() => columns.value.find((column) => column.name === selectedName.value) || null);
+const sheetOpen = ref(false);
+const tableScroller = ref(null);
+
+// Desktop details card: the picked column, else the first numeric one
+// (as in the visual reference), so the card is never blank. Display
+// only - it does not mark a selection or open anything.
+const detailsColumn = computed(
+    () => selectedColumn.value || columns.value.find((column) => column.kind === "number") || columns.value[0] || null,
+);
+
+// A new preview (refresh / other dataset) drops a selection that no
+// longer exists.
+watch(previewColumns, (names) => {
+    if (selectedName.value && !names.includes(selectedName.value)) {
+        selectedName.value = null;
+        sheetOpen.value = false;
+    }
 });
+
+function selectColumn(name, { reveal = false } = {}) {
+    selectedName.value = name;
+
+    if (isMobile.value) {
+        sheetOpen.value = true;
+        return;
+    }
+
+    if (inspectorDocked.value) {
+        inspectorOpen.value = true;
+    }
+
+    // Picked from the inspector list: bring the column into view.
+    if (reveal) {
+        nextTick(() => {
+            const header = [...(tableScroller.value?.querySelectorAll("th[data-column]") || [])]
+                .find((th) => th.dataset.column === name);
+            header?.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
+    }
+}
+
+// Phone: Rows / Columns
+const mobileView = ref("rows");
+const MOBILE_VIEWS = [
+    { value: "rows", label: "Rows", icon: "rows" },
+    { value: "columns", label: "Columns", icon: "columns" },
+];
+
+const expandedRecords = ref(new Set());
+
+function toggleRecord(number) {
+    const next = new Set(expandedRecords.value);
+    next.has(number) ? next.delete(number) : next.add(number);
+    expandedRecords.value = next;
+}
+
+function recordFields(number) {
+    return expandedRecords.value.has(number) ? columns.value : columns.value.slice(0, MOBILE_FIELD_LIMIT);
+}
 </script>
 
 <template>
-    <section class="mt-5 w-full">
+    <section class="flex min-h-0 flex-col" :class="isMobile ? '' : 'h-full'" aria-label="Data preview">
 
         <!-- =====================================================
-             HEADER
+             TABLET / DESKTOP: table canvas + column inspector
         ====================================================== -->
 
-        <div class="mb-4 flex items-center justify-between gap-3 max-[650px]:items-start">
+        <InspectorFrame v-if="!isMobile" storage-key="workspace-data-inspector-v2" inspector-label="Columns"
+            :stacked="!inspectorDocked" :collapsed="!inspectorOpen" bare :default-size="300">
 
-            <div class="flex min-w-0 items-center gap-3">
+            <div class="flex flex-col gap-5 px-4 pb-6 pt-5 sm:px-6 lg:pl-9 lg:pr-5 lg:pt-7" :class="inspectorDocked ? 'h-full' : ''">
 
-                <!-- Header Icon -->
-                <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-200/60">
+                <!-- Header: title + tools (size, memory and quality are in
+                     the top bar above). -->
+                <header class="flex shrink-0 flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <h2 class="text-[28px] font-bold leading-tight tracking-[-0.02em] text-ink">Data Explorer</h2>
+                        <p class="mt-1 text-body text-ink-muted">Preview your dataset and inspect column details.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <div v-if="dataset" class="relative w-[260px] max-md:w-full">
+                            <Icon name="search" :size="16"
+                                class="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted" />
+                            <input v-model="searchQuery" type="search" placeholder="Search in preview…"
+                                aria-label="Search the preview rows"
+                                class="h-10 w-full appearance-none rounded-[10px] border border-[#e6decd] bg-surface pl-10 pr-9 text-data text-ink transition-colors duration-150 placeholder:text-ink-muted focus-visible:border-forest [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden" />
+                            <button v-if="searchQuery" type="button" aria-label="Clear search"
+                                class="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-control text-ink-muted hover:bg-sunken hover:text-ink"
+                                @click="clearSearch">
+                                <Icon name="x" :size="14" />
+                            </button>
+                        </div>
+                        <Button v-if="dataset" icon="refresh" :loading="refreshing" class="h-10 rounded-[10px] bg-surface px-4"
+                            @click="refresh">
+                            Refresh
+                        </Button>
+                        <Button v-if="dataset && inspectorDocked && !inspectorOpen" icon="panel-right"
+                            class="h-10 rounded-[10px] bg-surface px-4" :aria-pressed="false" @click="inspectorOpen = true">
+                            Column details
+                        </Button>
+                    </div>
+                </header>
 
-                    <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <rect x="3" y="3" width="18" height="18" rx="4" />
-                        <path d="M3 9h18" />
-                        <path d="M9 9v12" />
-                        <path d="M13 13h4" />
-                        <path d="M13 17h4" />
-                    </svg>
+                <div class="flex min-h-0 shrink flex-col overflow-hidden rounded-[16px] border border-[#e6decd] bg-surface shadow-panel">
 
+                <!-- LOADING -->
+                <div v-if="loading" aria-busy="true" aria-label="Loading preview rows" class="min-h-0 flex-1">
+                    <div class="h-10 border-b border-line bg-sunken"></div>
+                    <div v-for="row in 8" :key="row" class="flex gap-6 border-b border-line px-6 py-3">
+                        <div v-for="column in 6" :key="column" class="h-3 flex-1 animate-pulse rounded-control bg-sunken"></div>
+                    </div>
                 </div>
 
-                <div class="min-w-0">
+                <!-- ERROR -->
+                <div v-else-if="error" class="p-4 sm:p-6">
+                    <div role="alert" class="flex items-start gap-3 rounded-control bg-danger-soft px-4 py-3">
+                        <Icon name="error" :size="16" class="mt-0.5 text-danger" />
+                        <div class="min-w-0 flex-1">
+                            <p class="text-data font-semibold text-danger">Unable to load preview</p>
+                            <p class="mt-0.5 break-words text-data text-ink">{{ error }}</p>
+                        </div>
+                        <Button size="sm" icon="refresh" @click="loadPreview()">Retry</Button>
+                    </div>
+                </div>
 
-                    <div class="flex items-center gap-2">
+                <!-- NO DATASET -->
+                <div v-else-if="!dataset" class="p-4 sm:p-6">
+                    <EmptyState icon="table" title="No dataset selected"
+                        description="Upload or select a dataset to preview its records." />
+                </div>
 
-                        <h2 class="text-lg font-bold tracking-tight text-slate-900">
-                            Data Preview
-                        </h2>
+                <!-- EMPTY DATASET -->
+                <EmptyState v-else-if="!sourceRows.length" icon="table" title="No records available"
+                    description="The uploaded dataset does not contain preview records." />
 
-                        <span v-if="dataset"
-                            class="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-gradient-to-r from-emerald-50 to-green-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
+                <!-- NO SEARCH RESULTS -->
+                <EmptyState v-else-if="!filteredRows.length" icon="search" title="No matching preview rows"
+                    :description="`Nothing in the preview matches “${searchQuery}”.`">
+                    <template #action>
+                        <Button size="sm" @click="clearSearch">Clear search</Button>
+                    </template>
+                </EmptyState>
 
-                            <span
-                                class="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.10)]"></span>
+                <!-- TABLE -->
+                <template v-else>
 
-                            Live
+                    <div ref="tableScroller"
+                        class="min-h-0 overflow-auto overscroll-contain [scrollbar-color:var(--color-line-strong)_transparent] [scrollbar-width:thin]"
+                        :class="inspectorDocked ? 'flex-1' : 'max-h-[560px]'">
 
-                        </span>
+                        <table class="min-w-full border-separate border-spacing-0 text-left"
+                            :style="{ tableLayout: 'fixed', width: `${tableWidth}px` }">
 
+                            <colgroup>
+                                <col :style="{ width: `${ROW_NUMBER_WIDTH}px` }" />
+                                <col v-for="column in columns" :key="`width-${column.name}`"
+                                    :style="{ width: `${columnWidth(column)}px` }" />
+                            </colgroup>
+
+                            <thead class="sticky top-0 z-10">
+                                <tr>
+                                    <th scope="col"
+                                        class="sticky left-0 z-20 border-b border-[#ece5d6] bg-[#f6f1e5] px-2 text-center text-data font-semibold text-ink">
+                                        #
+                                    </th>
+                                    <th v-for="column in columns" :key="column.name" scope="col" :data-column="column.name"
+                                        class="border-b border-line p-0 align-bottom transition-colors duration-150"
+                                        :class="column.name === selectedName ? 'bg-forest-soft shadow-[inset_0_-2px_0_var(--color-forest)]' : 'bg-[#f6f1e5]'">
+                                        <button type="button" :aria-pressed="column.name === selectedName"
+                                            :title="column.name"
+                                            class="flex w-full flex-col gap-0.5 px-3 py-2.5 text-left outline-none transition-colors duration-150 hover:bg-forest-soft/70 focus-visible:bg-forest-soft focus-visible:shadow-[inset_0_0_0_2px_var(--color-forest)]"
+                                            :class="column.kind === 'number' ? 'items-end text-right' : ''"
+                                            @click="selectColumn(column.name)">
+                                            <span class="flex max-w-full items-center gap-1.5"
+                                                :class="column.kind === 'number' ? 'flex-row-reverse' : ''">
+                                                <span class="truncate text-data font-semibold text-ink">{{ column.name }}</span>
+                                            </span>
+                                            <span class="max-w-full truncate text-caption text-ink-muted">
+                                                {{ column.dataType || kindOf(column.kind).label.toLowerCase() }}<template
+                                                    v-if="column.missingCount"> · <span class="text-warn-ink">{{ formatPercent(column.missingPercentage) || column.missingCount }} missing</span></template>
+                                            </span>
+                                        </button>
+                                    </th>
+                                </tr>
+                            </thead>
+
+                            <tbody class="text-data">
+                                <tr v-for="{ row, number } in filteredRows" :key="number" class="group">
+                                    <td
+                                        class="sticky left-0 z-[5] border-b border-[#efe8da] bg-surface px-2 py-2.5 text-center align-top text-data tabular-nums text-ink group-hover:bg-canvas">
+                                        {{ number }}
+                                    </td>
+                                    <td v-for="column in columns" :key="column.name"
+                                        class="border-b border-[#efe8da] px-3 py-2.5 align-top text-ink group-hover:bg-canvas"
+                                        :class="[
+                                            column.kind === 'number' ? 'text-right tabular-nums' : '',
+                                            column.kind === 'date' ? 'tabular-nums' : '',
+                                            column.name === selectedName ? 'bg-forest-soft/45' : 'bg-surface',
+                                        ]">
+                                        <div class="overflow-hidden text-ellipsis whitespace-nowrap">
+                                            <CellValue :value="row[column.name]" :kind="column.kind" />
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+
+                        </table>
                     </div>
 
-                    <p class="mt-1 truncate text-[11px] text-slate-400">
-                        Inspect records and fields before building your analysis.
+                    <p
+                        class="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-[#ece5d6] bg-[#f8f4ea] px-5 py-2.5 text-data text-ink-muted">
+                        <span>
+                            <template v-if="isSearchActive">
+                                <span class="font-semibold tabular-nums text-ink">{{ visibleRowCount }}</span> matching ·
+                            </template>
+                            Showing first <span class="tabular-nums">{{ totalRowCount }}</span> rows<template
+                                v-if="datasetRowCount"> of <span class="tabular-nums">{{ datasetRowCount }}</span></template>
+                        </span>
+                        <ul v-if="typeSummary.length" class="flex items-center gap-3 text-caption" aria-label="Column types">
+                            <li v-for="entry in typeSummary" :key="entry.kind" class="flex items-center gap-1"
+                                :title="`${entry.count} ${entry.label.toLowerCase()} column${entry.count === 1 ? '' : 's'}`">
+                                <Icon :name="entry.icon" :size="14" class="text-forest" />
+                                <span class="tabular-nums text-ink">{{ entry.count }}</span>
+                                <span class="sr-only">{{ entry.label }} columns</span>
+                            </li>
+                        </ul>
+                        <span v-if="columnsWithMissing !== null" class="flex items-center gap-1.5 text-caption">
+                            <span aria-hidden="true" class="h-1.5 w-1.5 rounded-full"
+                                :class="columnsWithMissing ? 'bg-gold' : 'bg-sage'"></span>
+                            <template v-if="columnsWithMissing">
+                                <span class="tabular-nums text-ink">{{ columnsWithMissing }}</span>
+                                column{{ columnsWithMissing === 1 ? "" : "s" }} with missing values
+                            </template>
+                            <template v-else>No missing values</template>
+                        </span>
+                        <span class="flex items-center gap-3 text-caption">
+                            <span><span class="font-mono italic text-ink-muted/70">null</span> missing value</span>
+                            <span><span class="font-mono italic text-ink-muted/70">empty</span> blank text</span>
+                        </span>
+                        <span class="ml-auto text-caption max-md:ml-0">Select a column header to inspect it.</span>
                     </p>
 
-                </div>
-
-            </div>
-
-
-            <!-- Refresh -->
-            <button v-if="dataset" type="button" :disabled="refreshing"
-                class="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg border border-violet-100 bg-gradient-to-r from-white to-violet-50/60 px-3 text-[10px] font-bold text-violet-600 shadow-sm transition duration-200 hover:border-violet-300 hover:from-violet-50 hover:to-indigo-50 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
-                @click="loadPreview({ refresh: true })">
-
-                <svg class="h-4 w-4" :class="{ 'animate-spin': refreshing }" viewBox="0 0 24 24" fill="none"
-                    stroke="currentColor" stroke-width="2">
-                    <path d="M20 11a8.1 8.1 0 0 0-14.9-4" />
-                    <path d="M4 4v5h5" />
-                    <path d="M4 13a8.1 8.1 0 0 0 14.9 4" />
-                    <path d="M20 20v-5h-5" />
-                </svg>
-
-                {{ refreshing ? "Refreshing" : "Refresh" }}
-
-            </button>
-
-        </div>
-
-
-        <!-- =====================================================
-             LOADING
-        ====================================================== -->
-
-        <div v-if="loading" class="overflow-hidden rounded-xl border border-violet-100 bg-white shadow-sm">
-
-            <div
-                class="flex items-center justify-between border-b border-violet-100 bg-gradient-to-r from-blue-50 via-violet-50 to-fuchsia-50 px-4 py-4">
-
-                <div class="space-y-2">
-
-                    <div class="h-3.5 w-32 animate-pulse rounded bg-violet-200"></div>
-
-                    <div class="h-2.5 w-44 animate-pulse rounded bg-indigo-100"></div>
-
-                </div>
-
-                <div class="h-8 w-40 animate-pulse rounded-lg bg-white/80"></div>
-
-            </div>
-
-            <div>
-
-                <div v-for="row in 7" :key="row" class="flex gap-3 border-b border-slate-100 px-4 py-4">
-
-                    <div v-for="column in 7" :key="column"
-                        class="h-3 flex-1 animate-pulse rounded bg-gradient-to-r from-slate-100 to-violet-100"></div>
+                </template>
 
                 </div>
 
             </div>
 
-        </div>
+            <!-- ===================================================
+                 COLUMN INSPECTOR
+            ==================================================== -->
 
+            <template v-if="dataset && !loading && !error && columns.length" #inspector>
+              <!-- Cards on the canvas: details, then every column. -->
+              <div class="flex flex-col gap-4 pb-6 pl-1 pr-6" :class="inspectorDocked ? 'h-full pt-[112px]' : 'px-4 pt-2'">
 
-        <!-- =====================================================
-             ERROR
-        ====================================================== -->
-
-        <div v-else-if="error"
-            class="flex items-center gap-3 rounded-xl border border-red-200 bg-gradient-to-r from-red-50 via-orange-50 to-amber-50 px-5 py-4 shadow-sm">
-
-            <div
-                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-red-100 to-orange-100 text-sm font-bold text-red-600">
-                !
-            </div>
-
-            <div class="min-w-0 flex-1">
-
-                <h3 class="text-xs font-bold text-slate-800">
-                    Unable to load preview
-                </h3>
-
-                <p class="mt-1 truncate text-[10px] text-slate-500">
-                    {{ error }}
-                </p>
-
-            </div>
-
-            <button type="button"
-                class="shrink-0 rounded-lg bg-gradient-to-r from-red-500 to-orange-500 px-3 py-2 text-[10px] font-bold text-white shadow-sm transition hover:from-red-600 hover:to-orange-600 hover:shadow-md"
-                @click="loadPreview()">
-                Retry
-            </button>
-
-        </div>
-
-
-        <!-- =====================================================
-             MAIN CARD
-        ====================================================== -->
-
-        <div v-else-if="dataset"
-            class="overflow-hidden rounded-xl border border-violet-100 bg-white shadow-md shadow-violet-100/40">
-
-            <!-- =================================================
-                 TOOLBAR
-            ================================================== -->
-
-            <div
-                class="border-b border-violet-100 bg-gradient-to-r from-blue-50/80 via-violet-50/70 to-fuchsia-50/60 px-4 py-4">
-
-                <div class="flex items-center justify-between gap-4 max-[700px]:flex-col max-[700px]:items-stretch">
-
-                    <!-- Dataset Info -->
-                    <div class="flex min-w-0 items-center gap-3">
-
-                        <div
-                            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 via-violet-500 to-purple-600 text-white shadow-sm shadow-violet-200">
-
-                            <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="1.8">
-                                <rect x="3" y="4" width="18" height="16" rx="3" />
-                                <path d="M3 9h18" />
-                                <path d="M8 9v11" />
-                            </svg>
-
-                        </div>
-
-                        <div class="min-w-0">
-
-                            <div class="flex items-center gap-2">
-
-                                <h3 class="truncate text-sm font-bold text-slate-800">
-                                    Dataset Records
-                                </h3>
-
-                                <span
-                                    class="shrink-0 rounded-full border border-indigo-200 bg-gradient-to-r from-indigo-100 to-violet-100 px-2 py-1 text-[9px] font-bold text-indigo-700">
-                                    {{ columnCount }} fields
-                                </span>
-
-                            </div>
-
-                            <p class="mt-1 text-[10px] text-slate-400">
-
-                                <strong class="text-blue-600">
-                                    {{ visibleRowCount }}
-                                </strong>
-
-                                of
-
-                                <strong class="text-violet-600">
-                                    {{ totalRowCount }}
-                                </strong>
-
-                                preview records
-
-                                <span v-if="isSearchActive" class="font-bold text-fuchsia-500">
-                                    · filtered
-                                </span>
-
-                            </p>
-
-                        </div>
-
-                    </div>
-
-
-                    <!-- SEARCH -->
-                    <div class="relative w-full max-w-sm">
-
-                        <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-violet-400"
-                            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-
-                            <circle cx="11" cy="11" r="7" />
-                            <path d="m20 20-4-4" />
-
-                        </svg>
-
-
-                        <!--
-                            appearance-none + [&::-webkit-search-cancel-button]:hidden
-                            removes the browser's native search X.
-                        -->
-                        <input v-model="searchQuery" type="search" placeholder="Search preview rows..."
-                            aria-label="Search the preview rows"
-                            class="h-9 w-full appearance-none rounded-lg border border-violet-200 bg-white/95 pl-9 pr-9 text-[10px] text-slate-700 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden [&::-ms-clear]:hidden" />
-
-
-                        <!-- Only ONE custom clear button -->
-                        <button v-if="searchQuery" type="button" aria-label="Clear search"
-                            class="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-base leading-none text-slate-400 transition hover:bg-violet-100 hover:text-violet-600"
-                            @click="clearSearch">
-                            ×
+                <section aria-labelledby="column-details-title"
+                    class="shrink-0 rounded-[16px] border border-[#e6decd] bg-surface px-4 pb-4 pt-3.5 shadow-panel" aria-live="polite">
+                    <div class="mb-3 flex items-center justify-between gap-2">
+                        <h3 id="column-details-title" class="text-lead font-semibold text-ink">Column Details</h3>
+                        <button v-if="inspectorDocked" type="button" aria-label="Hide column details"
+                            class="grid h-8 w-8 place-items-center rounded-control text-ink-muted transition-colors hover:bg-sunken hover:text-ink"
+                            @click="inspectorOpen = false">
+                            <Icon name="panel-right" :size="16" />
                         </button>
-
                     </div>
-
-                </div>
-
-            </div>
-
-
-            <!-- =================================================
-                 EMPTY DATASET
-            ================================================== -->
-
-            <div v-if="!sourceRows.length"
-                class="flex min-h-[280px] flex-col items-center justify-center bg-gradient-to-b from-white to-indigo-50/30 px-5 text-center">
-
-                <div
-                    class="flex h-14 w-14 items-center justify-center rounded-xl bg-gradient-to-br from-blue-100 via-violet-100 to-fuchsia-100 text-violet-500 shadow-sm">
-
-                    <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <rect x="3" y="4" width="18" height="16" rx="3" />
-                        <path d="M3 9h18" />
-                    </svg>
-
-                </div>
-
-                <h3 class="mt-4 text-sm font-bold text-slate-800">
-                    No records available
-                </h3>
-
-                <p class="mt-1.5 max-w-xs text-[10px] leading-5 text-slate-400">
-                    The uploaded dataset does not contain preview records.
-                </p>
-
-            </div>
-
-
-            <!-- =================================================
-                 NO RESULTS
-            ================================================== -->
-
-            <div v-else-if="!filteredRows.length"
-                class="flex min-h-[280px] flex-col items-center justify-center bg-gradient-to-b from-white to-violet-50/30 px-5 text-center">
-
-                <div
-                    class="flex h-14 w-14 items-center justify-center rounded-xl bg-gradient-to-br from-slate-100 to-violet-100 text-violet-400 shadow-sm">
-
-                    <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <circle cx="11" cy="11" r="7" />
-                        <path d="m20 20-4-4" />
-                    </svg>
-
-                </div>
-
-                <h3 class="mt-4 text-sm font-bold text-slate-800">
-                    No matching preview rows
-                </h3>
-
-                <p class="mt-1.5 text-[10px] text-slate-400">
-
-                    Nothing matches
-
-                    <strong class="text-violet-500">
-                        "{{ searchQuery }}"
-                    </strong>
-
-                </p>
-
-                <button type="button"
-                    class="mt-4 rounded-lg bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-2 text-[10px] font-bold text-white shadow-sm transition hover:from-violet-700 hover:to-indigo-700 hover:shadow-md"
-                    @click="clearSearch">
-                    Clear Search
-                </button>
-
-            </div>
-
-
-            <!-- =================================================
-                 TABLE
-            ================================================== -->
-
-            <div v-else>
-
-                <!--
-                    IMPORTANT:
-
-                    1. Horizontal scrolling remains enabled.
-                    2. Vertical scrolling remains enabled.
-                    3. Scrollbars are visually hidden.
-                    4. The table has a real minimum width.
-                    5. Columns cannot be squeezed into half-visible
-                       widths.
-                -->
-
-                <div
-                    class="max-h-[560px] w-full overflow-auto overscroll-contain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-
-                    <table class="w-max min-w-full border-separate border-spacing-0 text-left"
-                        style="table-layout: fixed">
-
-                        <!-- =================================================
-                             COLUMN WIDTHS
-                        ================================================== -->
-
-                        <colgroup>
-
-                            <!-- Row number -->
-                            <col style="width: 52px; min-width: 52px" />
-
-                            <!-- Dataset columns -->
-                            <col v-for="column in dataset.columns" :key="`width-${column}`" :style="{
-                                width: getColumnWidth(column),
-                                minWidth: getColumnWidth(column),
-                            }" />
-
-                        </colgroup>
-
-
-                        <!-- =================================================
-                             HEADER
-                        ================================================== -->
-
-                        <thead class="sticky top-0 z-10">
-
-                            <tr>
-
-                                <!-- Row number header -->
-                                <th
-                                    class="sticky left-0 z-20 h-12 w-[52px] min-w-[52px] border-b border-r border-indigo-200 bg-gradient-to-br from-blue-100 via-indigo-100 to-violet-100 px-3 text-center text-[9px] font-bold uppercase tracking-wide text-indigo-500">
-                                    #
-                                </th>
-
-
-                                <!-- Dataset columns -->
-                                <th v-for="(column, index) in dataset.columns" :key="column"
-                                    class="h-12 border-b border-r border-violet-100 bg-gradient-to-b from-violet-50 via-white to-indigo-50/40 px-3.5">
-
-                                    <div class="flex min-w-0 items-center gap-2">
-
-                                        <span
-                                            class="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-violet-100 to-indigo-100 px-1.5 text-[8px] font-bold text-violet-600">
-                                            {{ index + 1 }}
-                                        </span>
-
-                                        <span
-                                            class="min-w-0 truncate text-[9px] font-bold uppercase tracking-wide text-slate-600"
-                                            :title="column">
-                                            {{ column }}
-                                        </span>
-
-                                    </div>
-
-                                </th>
-
-                            </tr>
-
-                        </thead>
-
-
-                        <!-- =================================================
-                             BODY
-                        ================================================== -->
-
-                        <tbody>
-
-                            <tr v-for="(row, rowIndex) in filteredRows" :key="rowIndex" class="group">
-
-                                <!-- Row Number -->
-                                <td
-                                    class="sticky left-0 z-[5] h-[72px] w-[52px] min-w-[52px] border-b border-r border-indigo-100 bg-gradient-to-br from-blue-50 to-violet-50 px-3 text-center align-middle transition group-hover:from-violet-100 group-hover:to-fuchsia-100">
-
-                                    <span
-                                        class="inline-flex min-w-6 items-center justify-center rounded-md bg-white/90 px-1.5 py-1 text-[9px] font-bold text-violet-600 shadow-sm">
-                                        {{ rowIndex + 1 }}
-                                    </span>
-
-                                </td>
-
-
-                                <!-- Cells -->
-                                <td v-for="(column, columnIndex) in dataset.columns" :key="column"
-                                    class="h-[72px] border-b border-r border-slate-100 px-3.5 align-middle transition"
-                                    :class="[
-                                        columnIndex % 4 === 0
-                                            ? 'bg-blue-50/25 group-hover:bg-blue-50/70'
-                                            : columnIndex % 4 === 1
-                                                ? 'bg-violet-50/20 group-hover:bg-violet-50/70'
-                                                : columnIndex % 4 === 2
-                                                    ? 'bg-fuchsia-50/15 group-hover:bg-fuchsia-50/60'
-                                                    : 'bg-white group-hover:bg-indigo-50/60'
-                                    ]">
-
-                                    <div class="line-clamp-3 max-w-full overflow-hidden text-ellipsis text-[10px] leading-5 text-slate-600"
-                                        :class="{
-                                            'italic text-slate-300':
-                                                row[column] === null ||
-                                                row[column] === undefined ||
-                                                row[column] === '',
-                                        }" :title="String(row[column] ?? '')">
-                                        {{ formatCell(row[column]) }}
-                                    </div>
-
-                                </td>
-
-                            </tr>
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-
-
-                <!-- =================================================
-                     SCROLL HINT
-                ================================================== -->
-
-                <div
-                    class="flex h-9 items-center justify-center gap-2 border-t border-violet-100 bg-gradient-to-r from-blue-50 via-violet-50 to-fuchsia-50 text-[9px] font-medium text-slate-500">
-
-                    <span
-                        class="flex h-4 w-4 items-center justify-center rounded-full bg-violet-100 font-bold text-violet-500">
-                        ↔
-                    </span>
-
-                    <span>
-                        Scroll horizontally to explore all fields
-                    </span>
-
-                    <span class="font-bold text-violet-500">
-                        →
-                    </span>
-
-                </div>
-
-            </div>
-
-
-            <!-- =================================================
-                 FOOTER
-            ================================================== -->
-
-            <div
-                class="flex items-center justify-between gap-3 border-t border-violet-100 bg-gradient-to-r from-slate-50 via-violet-50/40 to-indigo-50/50 px-4 py-3 max-[520px]:items-start max-[520px]:flex-col">
-
-                <div class="flex items-center gap-2 text-[9px] text-slate-400">
-
-                    <span
-                        class="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.08)]"></span>
-
-                    <span>
-
-                        Preview limited to first
-
-                        <strong class="font-bold text-violet-600">
-                            {{ PREVIEW_ROW_LIMIT }}
-                        </strong>
-
-                        records
-
-                    </span>
-
-                </div>
-
-
-                <div class="flex items-center gap-3 text-[9px] text-slate-400">
-
-                    <span>
-
-                        <strong class="font-bold text-blue-600">
-                            {{ visibleRowCount }}
-                        </strong>
-
-                        visible
-
-                    </span>
-
-                    <span class="h-4 w-px bg-violet-200"></span>
-
-                    <span>
-
-                        <strong class="font-bold text-violet-600">
-                            {{ columnCount }}
-                        </strong>
-
-                        fields
-
-                    </span>
-
-                </div>
-
-            </div>
-
-        </div>
+                    <ColumnDetails v-if="detailsColumn" :column="detailsColumn" />
+                    <p v-else class="text-data text-ink-muted">
+                        Select a column to see its type, role, missing values and unique count.
+                    </p>
+                </section>
+
+                <section aria-labelledby="all-columns-title"
+                    class="flex min-h-0 shrink flex-col rounded-[16px] border border-[#e6decd] bg-surface pb-2 pt-3.5 shadow-panel">
+                    <h3 id="all-columns-title" class="px-4 pb-2 text-data font-semibold text-ink">
+                        All columns <span class="font-normal tabular-nums text-ink-muted">{{ columns.length }}</span>
+                    </h3>
+                    <ul class="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]" aria-label="All columns">
+                        <li v-for="column in columns" :key="column.name">
+                            <button type="button" :aria-pressed="column.name === selectedName"
+                                class="flex w-full items-center gap-2 px-4 py-1.5 text-left transition-colors duration-150 hover:bg-sunken/60"
+                                :class="column.name === selectedName ? 'bg-forest-soft' : ''"
+                                @click="selectColumn(column.name, { reveal: true })">
+                                <Icon :name="kindOf(column.kind).icon" :size="14" class="shrink-0 text-ink-muted" />
+                                <span class="min-w-0 flex-1 truncate text-data text-ink" :title="column.name">{{ column.name }}</span>
+                                <span v-if="column.missingCount" class="shrink-0 text-caption tabular-nums text-warn-ink">
+                                    {{ formatPercent(column.missingPercentage) || column.missingCount }}
+                                </span>
+                            </button>
+                        </li>
+                    </ul>
+                </section>
+              </div>
+
+            </template>
+
+        </InspectorFrame>
 
         <!-- =====================================================
-             NO DATASET SELECTED
+             PHONE: Rows / Columns, column details in a sheet
         ====================================================== -->
 
-        <div v-else
-            class="flex min-h-[220px] flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white px-5 text-center">
-            <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="3" y="3" width="18" height="18" rx="4" />
-                    <path d="M3 9h18" />
-                    <path d="M9 9v12" />
-                </svg>
+        <div v-else class="flex flex-col gap-3 px-4 py-4">
+
+            <div class="flex items-center justify-between gap-3">
+                <p class="text-data text-ink">
+                    <span class="font-semibold">Preview</span>
+                    <span class="text-ink-muted"> · first {{ PREVIEW_ROW_LIMIT }} rows</span>
+                </p>
+                <Button v-if="dataset" size="sm" icon="refresh" :loading="refreshing" aria-label="Refresh preview"
+                    @click="refresh">
+                    <span class="sr-only">Refresh</span>
+                </Button>
             </div>
 
-            <h3 class="mt-3 text-sm font-bold text-slate-700">
-                No dataset selected
-            </h3>
+            <div v-if="dataset && !loading && !error" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-ink-muted">
+                <span v-for="entry in typeSummary" :key="entry.kind" class="flex items-center gap-1">
+                    <Icon :name="entry.icon" :size="14" class="text-forest" />
+                    <span class="tabular-nums text-ink">{{ entry.count }}</span> {{ entry.label.toLowerCase() }}
+                </span>
+                <span v-if="columnsWithMissing" class="flex items-center gap-1.5">
+                    <span aria-hidden="true" class="h-1.5 w-1.5 rounded-full bg-gold"></span>
+                    {{ columnsWithMissing }} with missing values
+                </span>
+            </div>
 
-            <p class="mt-1.5 max-w-xs text-[10px] leading-5 text-slate-400">
-                Upload or select a dataset to preview its records.
-            </p>
+            <SegmentedControl v-if="dataset && !loading && !error && sourceRows.length" v-model="mobileView"
+                :items="MOBILE_VIEWS" label="Preview view" class="self-start" />
+
+            <!-- States (same as desktop) -->
+            <div v-if="loading" aria-busy="true" aria-label="Loading preview rows" class="space-y-3">
+                <div v-for="row in 4" :key="row" class="h-16 animate-pulse rounded-control bg-sunken"></div>
+            </div>
+
+            <div v-else-if="error" role="alert" class="flex flex-col items-start gap-2 rounded-control bg-danger-soft px-4 py-3">
+                <p class="text-data font-semibold text-danger">Unable to load preview</p>
+                <p class="break-words text-data text-ink">{{ error }}</p>
+                <Button size="sm" icon="refresh" @click="loadPreview()">Retry</Button>
+            </div>
+
+            <EmptyState v-else-if="!dataset" icon="table" title="No dataset selected"
+                description="Upload or select a dataset to preview its records." />
+
+            <EmptyState v-else-if="!sourceRows.length" icon="table" title="No records available"
+                description="The uploaded dataset does not contain preview records." />
+
+            <!-- ROWS: each preview record as a field list -->
+            <template v-else-if="mobileView === 'rows'">
+
+                <div class="relative">
+                    <Icon name="search" :size="16"
+                        class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted" />
+                    <input v-model="searchQuery" type="search" placeholder="Search preview rows"
+                        aria-label="Search the preview rows"
+                        class="h-11 w-full appearance-none rounded-control border border-line-strong bg-surface pl-9 pr-11 text-body text-ink placeholder:text-ink-muted focus-visible:border-forest [&::-webkit-search-cancel-button]:hidden" />
+                    <button v-if="searchQuery" type="button" aria-label="Clear search"
+                        class="absolute right-0.5 top-1/2 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-control text-ink-muted"
+                        @click="clearSearch">
+                        <Icon name="x" :size="16" />
+                    </button>
+                </div>
+
+                <EmptyState v-if="!filteredRows.length" icon="search" title="No matching preview rows"
+                    :description="`Nothing in the preview matches “${searchQuery}”.`">
+                    <template #action>
+                        <Button size="sm" @click="clearSearch">Clear search</Button>
+                    </template>
+                </EmptyState>
+
+                <ol v-else class="divide-y divide-line border-y border-line" aria-label="Preview rows">
+                    <li v-for="{ row, number } in filteredRows" :key="number" class="py-3">
+                        <p class="mb-1.5 font-mono text-caption text-ink-muted">Row {{ number }}</p>
+                        <dl class="space-y-1">
+                            <div v-for="column in recordFields(number)" :key="column.name"
+                                class="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-baseline gap-3">
+                                <dt class="truncate font-mono text-caption text-ink-muted" :title="column.name">{{ column.name }}</dt>
+                                <dd class="min-w-0 break-words text-data text-ink"
+                                    :class="column.kind === 'number' ? 'text-right tabular-nums' : ''">
+                                    <CellValue :value="row[column.name]" :kind="column.kind" />
+                                </dd>
+                            </div>
+                        </dl>
+                        <button v-if="columns.length > MOBILE_FIELD_LIMIT" type="button"
+                            class="mt-1.5 min-h-11 text-caption font-medium text-forest" :aria-expanded="expandedRecords.has(number)"
+                            @click="toggleRecord(number)">
+                            {{ expandedRecords.has(number) ? "Show fewer fields" : `Show all ${columns.length} fields` }}
+                        </button>
+                    </li>
+                </ol>
+
+                <p class="text-caption text-ink-muted">
+                    <template v-if="isSearchActive"><span class="tabular-nums">{{ visibleRowCount }}</span> of </template>
+                    <span class="tabular-nums">{{ totalRowCount }}</span> preview rows.
+                    <span class="font-mono italic text-ink-muted/70">null</span> = missing,
+                    <span class="font-mono italic text-ink-muted/70">empty</span> = blank text.
+                </p>
+
+            </template>
+
+            <!-- COLUMNS: tap for details -->
+            <ul v-else class="divide-y divide-line border-y border-line" aria-label="All columns">
+                <li v-for="column in columns" :key="column.name">
+                    <button type="button" class="flex min-h-12 w-full items-center gap-3 py-2 text-left"
+                        aria-haspopup="dialog" @click="selectColumn(column.name)">
+                        <Icon :name="kindOf(column.kind).icon" :size="16" class="shrink-0 text-forest" />
+                        <span class="min-w-0 flex-1">
+                            <span class="block truncate font-mono text-data text-ink">{{ column.name }}</span>
+                            <span class="block text-caption text-ink-muted">
+                                {{ column.dataType || kindOf(column.kind).label.toLowerCase() }}<template
+                                    v-if="column.missingCount"> · <span class="text-warn-ink">{{ formatPercent(column.missingPercentage) || column.missingCount }} missing</span></template>
+                            </span>
+                        </span>
+                        <Icon name="chevron-right" :size="16" class="shrink-0 text-ink-muted" />
+                    </button>
+                </li>
+            </ul>
+
+            <Dialog v-model:open="sheetOpen" side="bottom" hide-title
+                :title="selectedColumn ? `Column ${selectedColumn.name}` : 'Column'"
+                :description="selectedColumn ? kindOf(selectedColumn.kind).label : ''">
+                <ColumnDetails v-if="selectedColumn" :column="selectedColumn" />
+            </Dialog>
+
         </div>
 
     </section>

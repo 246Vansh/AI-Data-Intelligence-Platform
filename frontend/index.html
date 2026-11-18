@@ -2,9 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- viewport-fit=cover: without it iOS reports env(safe-area-inset-*)
+         as 0, and the mobile bottom tab bar / bottom sheets could not pad
+         themselves above the home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>AI Data Intelligence Platform</title>
+    <meta name="description" content="Upload datasets, explore their schema and quality, and ask questions of your data." />
+    <meta name="theme-color" content="#183D30" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <!-- The Latin subset covers the app's own UI text; preloaded so the
+         first paint already uses it. JetBrains Mono is not preloaded: it
+         is only used for code-like content and loads on demand. -->
+    <link rel="preload" href="/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin />
   </head>
   <body>
     <div id="app"></div>

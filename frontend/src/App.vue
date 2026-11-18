@@ -18,9 +18,9 @@ onMounted(() => {
 
 <template>
     <div v-if="view === 'loading'" role="status" aria-live="polite"
-        class="flex min-h-screen items-center justify-center bg-[#f6f7fb]">
-        <div class="flex items-center gap-3 text-[12px] font-medium text-slate-500">
-            <span class="h-4 w-4 animate-spin rounded-full border-2 border-violet-200 border-t-violet-600"
+        class="flex min-h-dvh items-center justify-center bg-canvas">
+        <div class="flex items-center gap-3 text-data font-medium text-ink-muted">
+            <span class="h-4 w-4 animate-spin rounded-full border-2 border-forest-soft border-t-forest"
                 aria-hidden="true"></span>
             Checking your session…
         </div>

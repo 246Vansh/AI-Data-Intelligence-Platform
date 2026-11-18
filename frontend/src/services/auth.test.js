@@ -492,6 +492,35 @@ test("the app-wide store signs out when a data request returns 401", async () =>
     assert.equal(resolveAppView(authStore.state), "auth");
 });
 
+test("a refresh stored in the cache notifies subscribers with the new data, without extra requests", async () => {
+    const hits = [];
+    const notified = [];
+    let status = "warning";
+    const stop = apiModule.onCachedResponse((url, data) => notified.push([url, data.status]));
+
+    await withAdapter(
+        (config) => {
+            hits.push(config.url);
+            return respond(config, 200, { status, issues: [] });
+        },
+        async () => {
+            apiModule.clearDatasetCache();
+            await apiModule.getDatasetQuality("ds-q");          // first load: 1 request, notifies
+            await apiModule.getDatasetQuality("ds-q");          // cache hit: no request, no notify
+            status = "healthy";
+            await apiModule.getDatasetQuality("ds-q", { force: true }); // refresh: 1 request, notifies
+        },
+    );
+
+    stop();
+    assert.equal(apiModule.datasetUrls.quality("ds-q"), "/dataset/ds-q/quality");
+    assert.deepEqual(hits, ["/dataset/ds-q/quality", "/dataset/ds-q/quality"]);
+    assert.deepEqual(notified, [
+        ["/dataset/ds-q/quality", "warning"],
+        ["/dataset/ds-q/quality", "healthy"],
+    ]);
+});
+
 test("axios sends credentials (cookie) with requests", () => {
     assert.equal(apiModule.api.defaults.withCredentials, true);
 });
@@ -536,6 +565,11 @@ test("no flow writes to localStorage, sessionStorage or document.cookie", async 
     assert.deepEqual(cookieWrites, []);
 });
 
+// The single, deliberately narrow exception: composables/useUiPreference.js
+// stores interface choices (e.g. "library open") - namespaced "ui.*" keys,
+// booleans/numbers only. Everything else stays storage-free.
+const UI_PREFERENCE_MODULE = join("composables", "useUiPreference.js");
+
 test("frontend source never references browser storage or document.cookie", () => {
     const srcDir = fileURLToPath(new URL("..", import.meta.url));
     const offenders = [];
@@ -545,7 +579,7 @@ test("frontend source never references browser storage or document.cookie", () =
             const path = join(dir, name);
             if (statSync(path).isDirectory()) {
                 walk(path);
-            } else if (/\.(js|vue)$/.test(name) && !name.endsWith(".test.js")) {
+            } else if (/\.(js|vue)$/.test(name) && !name.endsWith(".test.js") && !path.endsWith(UI_PREFERENCE_MODULE)) {
                 const text = readFileSync(path, "utf8");
                 if (/localStorage|sessionStorage|document\.cookie/.test(text)) {
                     offenders.push(path);
@@ -556,4 +590,41 @@ test("frontend source never references browser storage or document.cookie", () =
 
     walk(srcDir);
     assert.deepEqual(offenders, []);
+});
+
+test("the UI-preference exception cannot store arbitrary data", async () => {
+    const source = readFileSync(fileURLToPath(new URL(`../${UI_PREFERENCE_MODULE.replace(/\\/g, "/")}`, import.meta.url)), "utf8");
+    assert.doesNotMatch(source, /sessionStorage|document\.cookie/);
+
+    const { uiPreferenceKey, useUiPreference } = await import("../composables/useUiPreference.js");
+
+    assert.equal(uiPreferenceKey("workspace.library-open"), "ui.workspace.library-open");
+    assert.throws(() => uiPreferenceKey("Session Token"));
+    assert.throws(() => uiPreferenceKey(""));
+    assert.throws(() => useUiPreference("auth.token", "secret-value"), /booleans or finite numbers/);
+    assert.throws(() => useUiPreference("user.email", "alice@example.com"), /booleans or finite numbers/);
+    assert.throws(() => useUiPreference("payload", { rows: [] }), /booleans or finite numbers/);
+});
+
+test("the splitter-size adapter stores only numeric layouts under ui.splitter.*", async () => {
+    const stored = new Map();
+    const saved = globalThis.window;
+    globalThis.window = { localStorage: { getItem: (k) => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v) } };
+    try {
+        const { splitterStorage } = await import("../composables/useUiPreference.js");
+        splitterStorage.setItem("layout", JSON.stringify({ "a,b": { expandToSizes: {}, layout: [30, 70] } }));
+        // Reka's shape for a px-sized panel (library, inspectors): NOT
+        // stored - Reka restores it as a percentage, i.e. at the wrong
+        // px width after a window-size change (see useUiPreference.js).
+        splitterStorage.setItem("px-layout", JSON.stringify({ "canvas,inspector": { expandToSizes: {}, layout: [64.7, 35.3], sizeUnits: { 1: "px" } } }));
+        splitterStorage.setItem("smuggle", JSON.stringify({ token: "secret" }));
+        splitterStorage.setItem("smuggle-in-units", JSON.stringify({ a: { layout: [50], sizeUnits: { 0: "secret" } } }));
+        splitterStorage.setItem("garbage", "not json");
+
+        assert.deepEqual([...stored.keys()], ["ui.splitter.layout"]);
+        assert.equal(splitterStorage.getItem("smuggle"), null);
+        assert.equal(splitterStorage.getItem("smuggle-in-units"), null);
+    } finally {
+        globalThis.window = saved;
+    }
 });

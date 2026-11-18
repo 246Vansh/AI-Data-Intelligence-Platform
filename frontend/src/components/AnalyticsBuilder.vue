@@ -1,8 +1,33 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 
 import AnalyticsInsights from "./AnalyticsInsights.vue";
-import AnalyticsChart from "./AnalyticsChart.vue";
+import AnalyticsChartFallback from "./AnalyticsChartFallback.vue";
+
+// Workspace Phase 0: the chart (and ECharts with it) is code-split and
+// fetched on first use, so the initial page no longer downloads the
+// charting library. Same component, same props - only how it loads.
+const AnalyticsChart = defineAsyncComponent({
+    loader: () => import("./AnalyticsChart.vue"),
+    loadingComponent: { render: () => h(AnalyticsChartFallback, { state: "loading" }) },
+    errorComponent: { render: () => h(AnalyticsChartFallback, { state: "error" }) },
+    delay: 120,
+});
+import Button from "./ui/Button.vue";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
+import SegmentedControl from "./ui/SegmentedControl.vue";
+import TabPanel from "./ui/TabPanel.vue";
+import Tabs from "./ui/Tabs.vue";
+import InspectorFrame from "./workspace/InspectorFrame.vue";
+import Menu from "./ui/Menu.vue";
+import Tooltip from "./ui/Tooltip.vue";
+
+import { useBreakpoints } from "@vueuse/core";
+import { AccordionContent, AccordionHeader, AccordionItem, AccordionRoot, AccordionTrigger } from "reka-ui";
+
+import { useUiPreference } from "../composables/useUiPreference";
+import { formatCompactNumber, formatNumber, summarizeResult } from "../services/chartSummary";
 
 import {
     analyzeDataset,
@@ -174,11 +199,31 @@ const metricColumns = computed(() => {
         .map(([name]) => name);
 });
 
+// A dimension is worth grouping by when the backend's own distinct
+// count says it forms a handful of groups. An identifier-like column
+// (one value per row, e.g. order_id) would produce one "group" per row,
+// so it is never suggested. Columns without a reported count keep
+// their place after the groupable ones.
+const MAX_SUGGESTED_GROUPS = 50;
+
+function groupability(info) {
+    const unique = Number(info?.unique_values);
+    const rowCount = Number(metadata.value?.row_count);
+    if (!Number.isFinite(unique)) {
+        return 1; // unknown
+    }
+    if (unique < 2 || unique > MAX_SUGGESTED_GROUPS || (Number.isFinite(rowCount) && unique >= rowCount)) {
+        return 2; // not useful as a grouping
+    }
+    return 0; // groupable
+}
+
 const dimensionColumns = computed(() => {
     return columnEntries.value
         .filter(([, info]) =>
-            ["dimension", "categorical"].includes(info?.role),
+            ["dimension", "categorical"].includes(info?.role) && groupability(info) < 2,
         )
+        .sort(([, a], [, b]) => groupability(a) - groupability(b))
         .map(([name]) => name);
 });
 
@@ -212,13 +257,20 @@ const CROSS_DATASET_SUGGESTIONS = [
     "What combined insights can be found?",
 ];
 
+// Each suggestion: a short chip label (as in the visual reference) and
+// the full question it fills in - the same questions as before, so
+// nothing new is sent to the planner. `trend` marks time-based ones.
+function capitalize(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
 const exampleQuestions = computed(() => {
     if (props.analysisMode === "comparison") {
-        return COMPARISON_SUGGESTIONS;
+        return COMPARISON_SUGGESTIONS.map((question) => ({ label: question, question }));
     }
 
     if (props.analysisMode === "cross_dataset") {
-        return CROSS_DATASET_SUGGESTIONS;
+        return CROSS_DATASET_SUGGESTIONS.map((question) => ({ label: question, question }));
     }
 
     const examples = [];
@@ -231,73 +283,43 @@ const exampleQuestions = computed(() => {
 
     const timeColumn = timeColumns.value[0];
 
-    // -----------------------------------------------------
     // Time-based examples
-    // -----------------------------------------------------
+    if (timeColumn && metric) {
+        examples.push({ label: `Monthly ${metric} trend`, question: `Show me the monthly trend of ${metric}.`, trend: true });
+    }
+
+    // Dimension + metric examples
+    if (dimension && metric) {
+        examples.push({ label: `${capitalize(metric)} by ${dimension}`, question: `Show the top 5 ${dimension} by total ${metric}.` });
+        examples.push({ label: `Average ${metric} by ${dimension}`, question: `Show the average ${metric} by ${dimension}.` });
+    }
+
+    // Second dimension
+    if (secondDimension && metric && secondDimension !== dimension) {
+        examples.push({ label: `Top performing ${secondDimension}`, question: `Show the top 5 ${secondDimension} by average ${metric}.` });
+    }
 
     if (timeColumn && metric) {
-        examples.push(`Show me the monthly trend of ${metric}.`);
-        examples.push(`Show me the yearly trend of ${metric}.`);
+        examples.push({ label: `Yearly ${metric} trend`, question: `Show me the yearly trend of ${metric}.`, trend: true });
     }
 
-    // -----------------------------------------------------
-    // Dimension + metric examples
-    // -----------------------------------------------------
-
-    if (dimension && metric) {
-        examples.push(
-            `Show the top 5 ${dimension} by total ${metric}.`,
-        );
-
-        examples.push(
-            `Show the average ${metric} by ${dimension}.`,
-        );
-    }
-
-    // -----------------------------------------------------
-    // Second dimension
-    // -----------------------------------------------------
-
-    if (
-        secondDimension &&
-        metric &&
-        secondDimension !== dimension
-    ) {
-        examples.push(
-            `Show the top 5 ${secondDimension} by average ${metric}.`,
-        );
-    }
-
-    // -----------------------------------------------------
     // Second metric
-    // -----------------------------------------------------
-
-    if (
-        secondMetric &&
-        dimension &&
-        secondMetric !== metric
-    ) {
-        examples.push(
-            `Show the average ${secondMetric} by ${dimension}.`,
-        );
+    if (secondMetric && dimension && secondMetric !== metric) {
+        examples.push({ label: `Average ${secondMetric} by ${dimension}`, question: `Show the average ${secondMetric} by ${dimension}.` });
     }
 
-    // -----------------------------------------------------
     // Fallback
-    // -----------------------------------------------------
-
     if (!examples.length && metric) {
-        examples.push(`Show the total ${metric}.`);
-        examples.push(`Show the average ${metric}.`);
+        examples.push({ label: `Total ${metric}`, question: `Show the total ${metric}.` });
+        examples.push({ label: `Average ${metric}`, question: `Show the average ${metric}.` });
     }
 
     if (!examples.length && dimension) {
-        examples.push(
-            `Show the distribution of ${dimension}.`,
-        );
+        examples.push({ label: `${capitalize(dimension)} distribution`, question: `Show the distribution of ${dimension}.` });
     }
 
-    return [...new Set(examples)].slice(0, 5);
+    const seen = new Set();
+    return examples.filter((example) => !seen.has(example.question) && seen.add(example.question)).slice(0, 4);
 });
 
 // =========================================================
@@ -552,732 +574,926 @@ watch(
 onMounted(() => {
     loadMetadata();
 });
+
+// =========================================================
+// WORKSPACE PRESENTATION (Phase 2)
+// =========================================================
+//
+// View-only state for the Analyze workspace. Nothing below reads or
+// writes the analysis, follow-up, cancellation or error state above -
+// it only decides how the current result is laid out.
+//
+// - The inspector (findings + calculation) docks on the right from
+//   1024px, below that it stacks under the result; its open/closed
+//   choice is a UI preference.
+// - Chart | Table: the chart is offered exactly when it was before
+//   (rows + a non-table visualization); the table shows the same
+//   returned rows (tableRows, 500-row cap) that table results always
+//   showed. A table-type result opens on Table, as before.
+// - On mobile the composer folds into a one-line question bar once a
+//   result exists; tapping it expands the composer again.
+// - The KPI row uses services/chartSummary.js, the same implementation
+//   the chart uses, so the figures can never disagree.
+
+const breakpoints = useBreakpoints({ tablet: 768, desktop: 1024 });
+const isMobile = breakpoints.smaller("tablet");
+const inspectorDocked = breakpoints.greaterOrEqual("desktop");
+const inspectorOpen = useUiPreference("analyze.inspector-open", true);
+
+const questionInput = ref(null);
+const composerExpanded = ref(false);
+const resultView = ref("chart");
+
+const summary = computed(() => (result.value ? summarizeResult(result.value) : null));
+
+// Same condition that has always decided whether the chart renders.
+const canShowChart = computed(
+    () => hasRows.value && !!result.value?.visualization && result.value.visualization.type !== "table",
+);
+
+// Same condition that has always decided whether the results table renders.
+const isTableResult = computed(
+    () => result.value?.visualization?.type === "table" || (!!result.value?.visualization && !hasRows.value),
+);
+
+const RESULT_VIEWS = [
+    { value: "chart", label: "Chart", icon: "bar-chart" },
+    { value: "table", label: "Table", icon: "table" },
+];
+
+const insightCount = computed(() => result.value?.insights?.insights?.length || 0);
+
+const showCompactQuestion = computed(
+    () => isMobile.value && !!result.value && !composerExpanded.value && !loading.value,
+);
+
+// A new result opens on its natural view and folds the mobile composer.
+watch(result, (next, previous) => {
+    if (next && next !== previous) {
+        resultView.value = canShowChart.value ? "chart" : "table";
+        composerExpanded.value = false;
+    }
+});
+
+function expandComposer() {
+    composerExpanded.value = true;
+    nextTick(() => questionInput.value?.focus());
+}
+
+// =========================================================
+// ANALYZE WORKSPACE PRESENTATION (visual redesign, Stage 2)
+// =========================================================
+//
+// Still view-only: everything below reads the state above and never
+// changes how a question is planned, executed or followed up.
+
+// The follow-up switch, shown as "Follow up | New question". Same
+// boolean (followUpEnabled) the checkbox used to bind.
+const COMPOSER_MODES = [
+    { value: "follow-up", label: "Follow up", icon: "message" },
+    { value: "new", label: "New question", icon: "plus" },
+];
+
+const composerMode = computed({
+    get: () => (followUpEnabled.value ? "follow-up" : "new"),
+    set: (value) => {
+        if (!loading.value) {
+            followUpEnabled.value = value === "follow-up";
+        }
+    },
+});
+
+// Refinements offered after a result. Only edits the existing
+// follow-up resolver (ai/follow_up.py) applies to the previous plan:
+// flipping a top/bottom N ranking, or replacing a single grouping
+// column with another real dimension of this dataset. Choosing one
+// only fills the composer (in follow-up mode) - nothing is sent until
+// the user presses Analyze.
+const refineSuggestions = computed(() => {
+    if (!canFollowUp.value || props.analysisMode !== "single") {
+        return [];
+    }
+
+    const plan = result.value?.plan || {};
+    const grouped = Array.isArray(plan.group_by) ? plan.group_by : [];
+    const suggestions = [];
+
+    if (grouped.length && Number.isInteger(plan.limit) && plan.limit > 0) {
+        suggestions.push(plan.sort === "asc"
+            ? `Make it the top ${plan.limit} instead`
+            : `Make it the bottom ${plan.limit} instead`);
+    }
+
+    if (grouped.length === 1 && !plan.time_granularity) {
+        for (const dimension of dimensionColumns.value) {
+            if (!grouped.includes(dimension) && suggestions.length < 3) {
+                suggestions.push(`Show it by ${dimension} instead`);
+            }
+        }
+    }
+
+    return suggestions;
+});
+
+function applyRefinement(text) {
+    if (loading.value) {
+        return;
+    }
+    question.value = text;
+    followUpEnabled.value = true;
+    composerExpanded.value = true;
+    nextTick(() => questionInput.value?.focus());
+}
+
+// Who planned the analysis (backend's own label), shown on the result.
+const SOURCE_LABELS = { "rule-based": "Rule-based analysis", ai: "AI-planned analysis", "follow-up": "Follow-up" };
+const resultSource = computed(() => SOURCE_LABELS[result.value?.plan_explanation?.interpreted_by] || "");
+
+const returnedRowCount = computed(() => result.value?.data?.row_count ?? result.value?.data?.rows?.length ?? 0);
+
+// The group a KPI extreme belongs to, read from the same rows/values
+// the chart uses. Only named when exactly one group holds the value.
+function groupFor(value) {
+    const current = summary.value;
+    if (!current || value === null || value === undefined) {
+        return "";
+    }
+    const matches = current.numericValues
+        .map((number, index) => (number === value ? index : -1))
+        .filter((index) => index >= 0);
+    if (matches.length !== 1) {
+        return "";
+    }
+    const label = current.rows[matches[0]]?.[current.xColumn];
+    return label === null || label === undefined || label === "" ? "Unknown" : String(label);
+}
+
+// Chart view on a wide canvas: the plotted values beside the chart,
+// when there are few enough groups to read at a glance.
+const SIDE_TABLE_MAX_ROWS = 12;
+const showSideTable = computed(
+    () => !!summary.value?.hasChartData && summary.value.rows.length <= SIDE_TABLE_MAX_ROWS,
+);
+
+const inspectorTab = ref("findings");
+const INSPECTOR_TABS = computed(() => [
+    { value: "findings", label: "Findings" },
+    ...(planExplanation.value ? [{ value: "calculation", label: "Calculation" }] : []),
+]);
+
+// ---- Result header -------------------------------------------------
+
+// One line describing the result: the executed plan's first step
+// ("Sum of revenue for each region."), else the question asked.
+const resultDescription = computed(
+    () => planExplanation.value?.steps?.[0] || result.value?.question || "",
+);
+
+const rowInfo = computed(() => {
+    const data = result.value?.data;
+    if (!data) {
+        return "";
+    }
+    return data.row_limit_reached
+        ? `Row limit of ${formatNumber(data.row_limit)} reached - any groups beyond it are not shown, and insights only state what the returned rows can support.`
+        : `${formatNumber(returnedRowCount.value)} rows returned by this analysis.`;
+});
+
+// ---- KPI tiles (values from services/chartSummary.js) -------------
+
+const metricName = computed(() => result.value?.plan?.metric || summary.value?.yColumn || "value");
+
+const kpiTiles = computed(() => {
+    const current = summary.value;
+    if (!current?.showKpis) {
+        return [];
+    }
+    const x = current.xColumn || "group";
+    return [
+        current.totalLabel
+            ? {
+                key: "total",
+                label: `Total ${metricName.value}${current.rowLimitReached ? " (shown)" : ""}`,
+                value: current.totalValue,
+                icon: "layers",
+                tile: "bg-[#f3e9d3] text-[#9a7634]",
+            }
+            : {
+                key: "groups",
+                label: `${capitalize(x)} groups`,
+                value: current.rows.length,
+                icon: "layers",
+                tile: "bg-[#f3e9d3] text-[#9a7634]",
+            },
+        { key: "average", label: `Avg. per ${x}`, value: current.averageValue, icon: "trend-up", tile: "bg-[#e6eee1] text-forest" },
+        { key: "highest", label: "Highest", value: current.maximumValue, sub: groupFor(current.maximumValue), icon: "arrow-up", tile: "bg-[#e1f0dc] text-[#24803a]" },
+        { key: "lowest", label: "Lowest", value: current.minimumValue, sub: groupFor(current.minimumValue), icon: "arrow-down", tile: "bg-[#fbe4df] text-[#d1352b]" },
+    ];
+});
+
+// ---- Plotted-values table beside the chart ------------------------
+
+// Share of the shown total - only meaningful for additive aggregations
+// (sum / count), where the group values add up to a total.
+const showShare = computed(() => !!summary.value?.totalLabel && summary.value.totalValue > 0);
+
+function shareFor(row) {
+    const value = Number(row?.[summary.value?.yColumn]);
+    if (!showShare.value || !Number.isFinite(value)) {
+        return "—";
+    }
+    return `${((value / summary.value.totalValue) * 100).toFixed(1)}%`;
+}
+
+// ---- Next questions -------------------------------------------------
+//
+// Follow-ups the resolver supports for this result first, then other
+// suggestions built from this dataset's columns. Nothing is invented.
+
+const nextQuestions = computed(() => {
+    if (!result.value) {
+        return [];
+    }
+    const items = refineSuggestions.value.map((text) => ({ key: `r-${text}`, label: text, refine: true }));
+    for (const example of exampleQuestions.value) {
+        if (example.question !== result.value.question) {
+            items.push({ key: `e-${example.question}`, label: example.question, example });
+        }
+    }
+    return items.slice(0, 3);
+});
+
+function chooseNextQuestion(item) {
+    if (item.refine) {
+        applyRefinement(item.label);
+    } else {
+        useExample(item.example.question);
+        nextTick(() => questionInput.value?.focus());
+    }
+}
+
+// The composer's "Refine" menu: the same supported follow-ups.
+const refineMenuItems = computed(() =>
+    refineSuggestions.value.map((text) => ({ key: text, label: text, icon: "arrow-right" })),
+);
+
+// ---- Mobile: "View findings" ---------------------------------------
+
+const stackedSections = ref(["findings"]);
+
+function viewFindings() {
+    if (!stackedSections.value.includes("findings")) {
+        stackedSections.value = [...stackedSections.value, "findings"];
+    }
+    nextTick(() => document.getElementById("analyze-findings")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+// A result without an explanation has no Calculation tab to stay on.
+watch(planExplanation, (explanation) => {
+    if (!explanation && inspectorTab.value === "calculation") {
+        inspectorTab.value = "findings";
+    }
+});
+
 </script>
 
 <template>
-    <section class="w-full">
-
-        <!-- =====================================================
-             ASK YOUR DATA
-        ====================================================== -->
-
-        <div
-            class="relative mt-10 overflow-hidden rounded-[24px] border border-violet-200/70 bg-gradient-to-br from-white via-violet-50/40 to-indigo-50/70 p-7 shadow-[0_8px_25px_rgba(79,70,229,0.07),0_25px_60px_rgba(124,58,237,0.08)] max-[700px]:p-5">
-
-            <!-- Decorative background -->
-
-            <div
-                class="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full bg-violet-300/20 blur-3xl">
-            </div>
-
-            <div
-                class="pointer-events-none absolute -bottom-24 -left-20 h-64 w-64 rounded-full bg-blue-300/20 blur-3xl">
-            </div>
-
-            <div
-                class="pointer-events-none absolute right-1/3 top-1/2 h-32 w-32 rounded-full bg-fuchsia-300/10 blur-3xl">
-            </div>
-
-            <div class="relative z-10">
-
-                <!-- Header -->
-
-                <div
-                    class="mb-[26px] flex items-center justify-between gap-5 max-[700px]:flex-col max-[700px]:items-start">
-
-                    <div class="flex items-center gap-[13px]">
-
-                        <div
-                            class="relative flex h-[46px] w-[46px] shrink-0 items-center justify-center rounded-[14px] bg-gradient-to-br from-violet-600 via-purple-600 to-indigo-600 text-white shadow-[0_8px_20px_rgba(124,58,237,0.28)]">
-
-                            <div class="absolute inset-0 rounded-[14px] bg-white/10">
-                            </div>
-
-                            <svg class="relative h-[23px] w-[23px]" viewBox="0 0 24 24" fill="none"
-                                stroke="currentColor" stroke-width="2">
-
-                                <path
-                                    d="M21 11.5a8.38 8.38 0 0 1-9 8.3 8.5 8.5 0 0 1-3.7-.8L3 20l1.3-4.2A8.4 8.4 0 1 1 21 11.5Z" />
-
-                                <path d="M8 12h.01M12 12h.01M16 12h.01" />
-
-                            </svg>
-
-                        </div>
-
-                        <div>
-
-                            <div class="flex items-center gap-2">
-
-                                <h2 class="m-0 text-[21px] font-bold tracking-[-0.4px] text-slate-900">
-
-                                    Ask Your Data
-
-                                </h2>
-
-                                <span
-                                    class="rounded-full bg-gradient-to-r from-violet-100 to-indigo-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.4px] text-violet-700">
-
-                                    AI
-
-                                </span>
-
-                            </div>
-
-                            <p class="mt-1 text-[13px] leading-normal text-slate-500">
-
-                                Ask a question in natural language
-                                and let AI analyze your dataset.
-
-                            </p>
-
-                        </div>
-
-                    </div>
-
-                    <div
-                        class="flex items-center gap-1.5 whitespace-nowrap rounded-full border border-violet-200 bg-gradient-to-r from-violet-100 to-indigo-100 px-[12px] py-[7px] text-xs font-bold text-violet-700 shadow-sm max-[700px]:self-start">
-
-                        <span class="animate-pulse text-sm text-violet-600">
-                            ✦
-                        </span>
-
-                        AI Powered
-
-                    </div>
-
-                </div>
-
-                <!-- No dataset selected -->
-
-                <div v-if="!datasetId"
-                    class="mb-4 flex items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium text-slate-600 shadow-sm">
-
-                    <span
-                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-200 font-bold text-slate-500">
-                        !
-                    </span>
-
-                    Upload or select a dataset before asking a question.
-
-                </div>
-
-                <!-- Metadata loading -->
-
-                <div v-if="metadataLoading"
-                    class="mb-4 flex items-center gap-2 rounded-xl border border-blue-200 bg-gradient-to-r from-blue-50 to-violet-50 px-4 py-3 text-xs font-medium text-blue-700 shadow-sm">
-
-                    <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-blue-200 border-t-violet-600">
-                    </span>
-
-                    Understanding your dataset...
-
-                </div>
-
-                <!-- Metadata error -->
-
-                <div v-if="metadataError"
-                    class="mb-4 flex items-center gap-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-3 text-xs font-medium text-amber-700 shadow-sm">
-
-                    <span
-                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 font-bold text-amber-600">
-                        !
-                    </span>
-
-                    {{ metadataError }}
-
-                </div>
-
-                <!-- Question -->
-
-                <div class="flex flex-col gap-[9px]">
-
-                    <label for="question" class="flex items-center gap-2 text-[13px] font-bold text-slate-700">
-
-                        <span class="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-500 to-indigo-500">
-                        </span>
-
-                        What do you want to know?
-
-                    </label>
-
-                    <div class="relative">
-
-                        <textarea id="question" v-model="question" rows="4" :disabled="loading || !datasetId"
-                            placeholder="Ask a question about your uploaded dataset..." @keydown="handleKeydown"
-                            class="box-border min-h-[130px] w-full resize-y rounded-[16px] border border-violet-200 bg-white/90 px-[17px] py-[17px] pr-12 text-sm leading-[1.6] text-slate-900 shadow-[0_4px_15px_rgba(79,70,229,0.04)] backdrop-blur-sm transition duration-200 placeholder:text-slate-400 hover:border-violet-300 focus:border-violet-500 focus:outline-none focus:ring-4 focus:ring-violet-500/10 disabled:cursor-wait disabled:bg-slate-50">
-                        </textarea>
-
-                        <div class="pointer-events-none absolute bottom-4 right-4 text-xl text-violet-500">
-
-                            <span class="animate-pulse">
-                                ✦
-                            </span>
-
-                        </div>
-
-                    </div>
-
-                    <!-- Example Questions -->
-
-                    <div v-if="exampleQuestions.length" class="mt-2">
-
-                        <div
-                            class="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.45px] text-slate-400">
-
-                            <span class="h-1 w-5 rounded-full bg-gradient-to-r from-violet-500 to-indigo-500">
-                            </span>
-
-                            Try an example
-
-                        </div>
-
-                        <div class="flex flex-wrap gap-2">
-
-                            <button v-for="(example, index) in exampleQuestions" :key="example" type="button"
-                                :disabled="loading" @click="useExample(example)"
-                                class="group rounded-full border px-3 py-[7px] text-[11px] font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50"
-                                :class="[
-                                    index % 4 === 0
-                                        ? 'border-violet-200 bg-violet-50 text-violet-700 hover:border-violet-400 hover:bg-violet-100'
-                                        : '',
-                                    index % 4 === 1
-                                        ? 'border-blue-200 bg-blue-50 text-blue-700 hover:border-blue-400 hover:bg-blue-100'
-                                        : '',
-                                    index % 4 === 2
-                                        ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:border-fuchsia-400 hover:bg-fuchsia-100'
-                                        : '',
-                                    index % 4 === 3
-                                        ? 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:border-indigo-400 hover:bg-indigo-100'
-                                        : '',
-                                ]">
-
-                                <span class="mr-1 opacity-60 transition group-hover:opacity-100">
-                                    ✦
-                                </span>
-
-                                {{ example }}
-
-                            </button>
-
-                        </div>
-
-                    </div>
-
-                    <!-- Footer -->
-
-                    <div
-                        class="mt-[8px] flex items-center justify-between gap-[15px] max-[700px]:flex-col max-[700px]:items-start">
-
-                        <span class="text-[11px] text-slate-400">
-
-                            Press
-
-                            <kbd
-                                class="mx-0.5 inline-block rounded-[5px] border border-slate-200 border-b-2 bg-white px-[5px] py-0.5 text-[10px] font-semibold text-slate-600 shadow-sm">
-                                Ctrl
-                            </kbd>
-
-                            +
-
-                            <kbd
-                                class="mx-0.5 inline-block rounded-[5px] border border-slate-200 border-b-2 bg-white px-[5px] py-0.5 text-[10px] font-semibold text-slate-600 shadow-sm">
-                                Enter
-                            </kbd>
-
-                            to analyze
-
-                        </span>
-
-                        <div class="flex items-center gap-2 max-[700px]:w-full max-[700px]:flex-wrap">
-
-                            <!-- Follow-up toggle: only offered for a successful
-                                 result on the currently selected dataset. -->
-
-                            <label v-if="canFollowUp"
-                                class="flex cursor-pointer select-none items-center gap-1.5 text-[11px] font-semibold text-slate-600">
-                                <input v-model="followUpEnabled" type="checkbox" :disabled="loading"
-                                    class="h-3.5 w-3.5 accent-violet-600" />
-                                Follow up on this result
-                            </label>
-
-                            <!-- Clear -->
-
-                            <button v-if="question || result" type="button" :disabled="loading" @click="clearAnalysis"
-                                class="rounded-[11px] border border-slate-200 bg-white px-[14px] py-3 text-[13px] font-semibold text-slate-600 shadow-sm transition-all duration-200 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-50">
-
-                                Clear
-
-                            </button>
-
-                            <!-- Analyze -->
-
-                            <button type="button" :disabled="loading || !question.trim() || !datasetId" @click="analyze"
-                                class="group flex min-w-[155px] items-center gap-[9px] rounded-[11px] border-0 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 px-[17px] py-3 text-[13px] font-bold text-white shadow-[0_8px_20px_rgba(109,40,217,0.28)] transition-all duration-200 hover:-translate-y-0.5 hover:from-violet-700 hover:via-purple-700 hover:to-indigo-700 hover:shadow-[0_14px_28px_rgba(99,102,241,0.35)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none max-[700px]:flex-1 max-[700px]:justify-center">
-
-                                <span v-if="loading"
-                                    class="h-[15px] w-[15px] animate-spin rounded-full border-2 border-white/40 border-t-white">
-                                </span>
-
-                                <svg v-else
-                                    class="h-[18px] w-[18px] transition-transform duration-200 group-hover:rotate-12"
-                                    viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-
-                                    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" />
-
-                                    <path d="M19 16v5M21.5 18.5h-5" />
-
-                                </svg>
-
-                                <span>
-                                    {{
-                                        loading
-                                            ? "Analyzing..."
-                                            : "Analyze Data"
-                                    }}
-                                </span>
-
-                                <span v-if="!loading"
-                                    class="ml-auto text-[17px] transition-transform duration-200 group-hover:translate-x-1">
-                                    →
-                                </span>
-
-                            </button>
-
-                        </div>
-
-                    </div>
-
-                </div>
-
-            </div>
-        </div>
-
-        <!-- =====================================================
-             ANALYSIS LOADING
-        ====================================================== -->
-
-        <div v-if="loading"
-            class="relative mt-[18px] overflow-hidden rounded-[16px] border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 px-5 py-4 shadow-[0_8px_25px_rgba(99,102,241,0.08)]">
-
-            <div class="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-violet-500 via-purple-500 to-indigo-500">
-            </div>
-
-            <div class="flex items-center gap-4">
-
-                <div
-                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-violet-100 to-indigo-100">
-
-                    <span class="h-4 w-4 animate-spin rounded-full border-2 border-violet-200 border-t-violet-600">
-                    </span>
-
-                </div>
-
-                <div>
-
-                    <strong class="block text-[13px] font-bold text-violet-900">
-                        {{ followUpPending ? "Applying your follow-up" : "Analyzing your question" }}
-                    </strong>
-
-                    <p class="mt-0.5 text-[11px] text-slate-500">
-                        Planning the analysis and preparing
-                        your results...
+    <section class="flex min-h-0 flex-col" :class="isMobile ? '' : 'h-full'">
+
+        <InspectorFrame storage-key="workspace-analyze-inspector-v2" inspector-label="Findings and calculation"
+            :stacked="!inspectorDocked" :collapsed="!inspectorOpen" bare :default-size="300">
+
+            <!-- =====================================================
+                 ANALYTICAL CANVAS
+            ====================================================== -->
+
+            <div class="mx-auto flex w-full max-w-[1100px] flex-col px-4 pb-6 pt-5 sm:px-6 lg:pl-9 lg:pr-5 lg:pt-7"
+                :class="isMobile ? 'gap-4' : 'min-h-full gap-5'">
+
+                <!-- Heading -->
+                <header>
+                    <h2 v-if="!isMobile" class="text-[34px] font-bold leading-[1.15] tracking-[-0.025em] text-ink">
+                        Analyze your data
+                        <span class="font-serif text-[38px] font-normal italic tracking-[-0.01em] text-forest">with AI</span>
+                    </h2>
+                    <h2 v-else class="text-[26px] font-bold leading-tight tracking-[-0.02em] text-ink">Ask your data</h2>
+                    <p class="mt-1.5 text-ink-muted" :class="isMobile ? 'text-data' : 'text-body'">
+                        {{ isMobile
+                            ? "Get insights, charts and exact calculations."
+                            : "Ask a question in natural language and get insights, charts and exact calculations." }}
                     </p>
+                </header>
 
-                </div>
+                <!-- Notices -->
 
-            </div>
-
-        </div>
-
-        <!-- =====================================================
-             ERROR
-        ====================================================== -->
-
-        <div v-if="error" :class="isClarificationError
-            ? 'border-amber-200 from-amber-50 to-yellow-50 shadow-[0_6px_20px_rgba(245,158,11,0.07)]'
-            : 'border-red-200 from-red-50 to-orange-50 shadow-[0_6px_20px_rgba(239,68,68,0.07)]'
-            "
-            class="relative mt-[18px] flex items-start gap-[13px] overflow-hidden rounded-[16px] border bg-gradient-to-r via-white px-[18px] py-4">
-
-            <div :class="isClarificationError
-                ? 'from-amber-400 to-yellow-400'
-                : 'from-red-500 to-orange-500'
-                " class="absolute inset-y-0 left-0 w-1 bg-gradient-to-b">
-            </div>
-
-            <div :class="isClarificationError
-                ? 'from-amber-100 to-yellow-100 text-amber-600'
-                : 'from-red-100 to-orange-100 text-red-600'
-                "
-                class="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-full bg-gradient-to-br font-bold">
-
-                {{ isClarificationError ? "?" : "!" }}
-
-            </div>
-
-            <div class="min-w-0">
-
-                <strong :class="isClarificationError ? 'text-amber-800' : 'text-red-800'"
-                    class="mb-[3px] block text-[13px] font-bold">
-                    {{ isClarificationError ? "Couldn't answer that question" : "Analysis failed" }}
-                </strong>
-
-                <p :class="isClarificationError ? 'text-amber-700' : 'text-red-700'" class="m-0 text-xs leading-5">
-                    {{ error }}
+                <p v-if="metadataLoading" role="status" class="flex items-center gap-2.5 text-data text-ink-muted">
+                    <span aria-hidden="true"
+                        class="h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-forest/30 border-t-forest"></span>
+                    Understanding your dataset…
                 </p>
 
-                <p v-if="keptPreviousResult && result" class="mt-1.5 text-[11px] font-semibold leading-5 text-amber-700">
-                    The previous result below is unchanged - edit your follow-up and try again.
+                <p v-if="metadataError" role="alert"
+                    class="flex items-center gap-2.5 rounded-control border border-warn-ink/15 bg-warn-soft px-3.5 py-2 text-data text-warn-ink">
+                    <Icon name="warning" :size="16" />
+                    {{ metadataError }}
                 </p>
 
-                <p v-if="isClarificationError" class="mt-1.5 text-[11px] leading-5 text-amber-600">
-                    Try rephrasing with specific column names, e.g. which metric to measure and what to group it by.
-                </p>
+                <!-- =================================================
+                     COMPOSER
+                ================================================== -->
 
-                <button v-if="canRetry" type="button" @click="analyze" :disabled="loading || !question.trim()"
-                    class="mt-3 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-[11px] font-bold text-red-700 shadow-sm transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50">
-
-                    Try Again
-
+                <!-- Mobile, after a result: a one-line question bar -->
+                <button v-if="showCompactQuestion" type="button" :aria-expanded="false"
+                    class="flex h-[52px] w-full items-center gap-3 rounded-[14px] border border-line bg-surface px-4 text-left shadow-panel"
+                    @click="expandComposer">
+                    <span class="min-w-0 flex-1 truncate text-body text-ink">{{ result?.question || question }}</span>
+                    <span class="shrink-0 text-caption font-semibold text-forest">Ask again</span>
                 </button>
 
-            </div>
+                <!-- Mobile composer: one line, mic (planned) or send -->
+                <div v-else-if="isMobile"
+                    class="rounded-[14px] border border-line bg-surface shadow-[0_1px_2px_rgb(24_61_48/0.05),0_4px_12px_-6px_rgb(24_61_48/0.12)] focus-within:border-forest/60 focus-within:ring-4 focus-within:ring-forest/10">
+                    <div class="flex items-center gap-2 pl-4 pr-1.5">
+                        <label for="question" class="sr-only">Ask your data</label>
+                        <textarea id="question" ref="questionInput" v-model="question" rows="1"
+                            :disabled="loading || !datasetId"
+                            :placeholder="!datasetId ? 'Choose a dataset first' : (canFollowUp && followUpEnabled ? 'Refine the result…' : 'What do you want to know?')"
+                            @keydown="handleKeydown"
+                            class="block min-h-[50px] flex-1 resize-none bg-transparent py-3.5 text-body text-ink outline-none placeholder:text-ink-muted focus-visible:outline-none"></textarea>
+                        <button v-if="(question || result) && !loading" type="button" aria-label="Clear question and result"
+                            class="grid h-10 w-10 shrink-0 place-items-center rounded-full text-ink-muted hover:bg-sunken hover:text-ink"
+                            @click="clearAnalysis">
+                            <Icon name="x" :size="16" />
+                        </button>
+                        <button v-if="question.trim() || loading" type="button" aria-label="Analyze"
+                            :disabled="!question.trim() || !datasetId || loading"
+                            class="grid h-10 w-10 shrink-0 place-items-center rounded-[10px] bg-[#183427] text-on-forest disabled:opacity-60"
+                            @click="analyze">
+                            <span v-if="loading" aria-hidden="true"
+                                class="h-4 w-4 animate-spin rounded-full border-2 border-on-forest/30 border-t-on-forest"></span>
+                            <Icon v-else name="send" :size="16" />
+                        </button>
+                        <Tooltip v-else content="Voice input - coming soon">
+                            <button type="button" aria-label="Voice input (coming soon)" aria-disabled="true"
+                                class="grid h-10 w-10 shrink-0 cursor-default place-items-center rounded-full text-ink">
+                                <Icon name="mic" :size="20" />
+                            </button>
+                        </Tooltip>
+                    </div>
+                    <div v-if="canFollowUp" class="flex items-center gap-2 border-t border-line/70 px-2 py-1.5">
+                        <SegmentedControl v-model="composerMode" :items="COMPOSER_MODES" label="Question mode" size="sm" />
+                    </div>
+                </div>
 
-        </div>
+                <!-- Desktop composer -->
+                <div v-else
+                    class="shrink-0 overflow-hidden rounded-[16px] border border-[#e6decd] bg-surface shadow-[0_1px_2px_rgb(24_61_48/0.04),0_8px_24px_-12px_rgb(24_61_48/0.16)] transition-[border-color,box-shadow] duration-150 focus-within:border-forest/50 focus-within:ring-4 focus-within:ring-forest/10"
+                    :class="!datasetId ? 'opacity-70' : ''">
 
-        <!-- =====================================================
-             RESULT
-        ====================================================== -->
-
-        <div v-if="result"
-            class="relative mt-6 overflow-hidden rounded-[22px] border border-indigo-100 bg-gradient-to-br from-white via-white to-indigo-50/40 p-6 shadow-[0_8px_25px_rgba(15,23,42,0.05),0_20px_50px_rgba(79,70,229,0.06)] max-[700px]:mt-[18px] max-[700px]:p-4">
-
-            <!-- Result decorative glow -->
-
-            <div
-                class="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-emerald-300/10 blur-3xl">
-            </div>
-
-            <div class="relative z-10">
-
-                <!-- Result Header -->
-
-                <div
-                    class="mb-[22px] flex items-center justify-between gap-5 max-[700px]:flex-col max-[700px]:items-start">
-
-                    <div class="flex items-start gap-3">
-
-                        <div
-                            class="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-[12px] bg-gradient-to-br from-emerald-400 to-teal-500 text-lg font-bold text-white shadow-[0_7px_18px_rgba(16,185,129,0.22)]">
-
-                            ✓
-
+                    <div class="flex items-start gap-3 px-5 pb-3 pt-4">
+                        <span aria-hidden="true"
+                            class="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#f0eadc] text-forest">
+                            <Icon name="sparkle" :size="16" />
+                        </span>
+                        <div class="min-w-0 flex-1">
+                            <label for="question" class="sr-only">Ask your data</label>
+                            <p v-if="canFollowUp && followUpEnabled"
+                                class="mb-0.5 flex min-w-0 items-center gap-1.5 text-caption text-forest">
+                                <Icon name="message" :size="14" />
+                                <span class="truncate">Following up on “{{ result?.question }}”</span>
+                            </p>
+                            <textarea id="question" ref="questionInput" v-model="question" rows="1"
+                                :disabled="loading || !datasetId"
+                                :placeholder="!datasetId
+                                    ? 'Choose a dataset to start asking questions'
+                                    : canFollowUp && followUpEnabled
+                                        ? 'Refine the result, e.g. “only include the North region” or “by city instead”'
+                                        : 'What would you like to know about your data?'"
+                                @keydown="handleKeydown"
+                                class="block min-h-9 w-full resize-none bg-transparent py-1.5 text-[17px] leading-snug text-ink outline-none [field-sizing:content] placeholder:text-ink-muted focus-visible:outline-none disabled:cursor-not-allowed">
+                            </textarea>
                         </div>
+                        <Tooltip v-if="question || result" content="Clear">
+                            <button type="button" aria-label="Clear question and result" :disabled="loading"
+                                class="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink-muted transition-colors duration-150 hover:bg-sunken hover:text-ink disabled:opacity-50"
+                                @click="clearAnalysis">
+                                <Icon name="x" :size="16" />
+                            </button>
+                        </Tooltip>
+                    </div>
 
+                    <div class="flex items-center gap-2 border-t border-[#efe8da] bg-[#f8f4ea] px-4 py-2.5">
+
+                        <!-- Follow up: continue from the current result (same
+                             switch as before); only possible after a result. -->
+                        <Tooltip :content="canFollowUp ? (followUpEnabled ? 'Following up on this result - press to ask a new question instead' : 'Follow up on this result') : 'Available after an analysis'">
+                            <button type="button" :aria-pressed="canFollowUp && followUpEnabled"
+                                :aria-disabled="!canFollowUp || loading"
+                                class="flex h-9 items-center gap-2 rounded-[10px] border px-3.5 text-body font-medium transition-colors duration-150"
+                                :class="canFollowUp && followUpEnabled
+                                    ? 'border-forest/25 bg-forest-soft text-forest'
+                                    : 'border-transparent bg-surface text-ink hover:border-line'"
+                                @click="canFollowUp && !loading && (composerMode = followUpEnabled ? 'new' : 'follow-up')">
+                                <Icon name="plus" :size="16" />
+                                Follow up
+                            </button>
+                        </Tooltip>
+
+                        <!-- Refine: supported follow-up edits for this result -->
+                        <Menu v-if="refineMenuItems.length" :items="refineMenuItems" align="start"
+                            @select="applyRefinement">
+                            <template #trigger>
+                                <button type="button" :disabled="loading"
+                                    class="flex h-9 items-center gap-2 rounded-[10px] border border-transparent bg-surface px-3.5 text-body font-medium text-ink transition-colors duration-150 hover:border-line data-[state=open]:border-line">
+                                    <Icon name="sliders" :size="16" />
+                                    Refine
+                                </button>
+                            </template>
+                        </Menu>
+                        <Tooltip v-else content="Available after an analysis">
+                            <button type="button" aria-disabled="true"
+                                class="flex h-9 cursor-default items-center gap-2 rounded-[10px] border border-transparent bg-surface px-3.5 text-body font-medium text-ink">
+                                <Icon name="sliders" :size="16" />
+                                Refine
+                            </button>
+                        </Tooltip>
+
+                        <button type="button" :aria-label="loading ? 'Analyzing…' : (canFollowUp && followUpEnabled ? 'Refine result' : 'Analyze')"
+                            :aria-busy="loading ? 'true' : undefined" :disabled="loading || !question.trim() || !datasetId"
+                            class="ml-auto grid h-10 w-11 place-items-center rounded-[10px] bg-[#173326] text-on-forest shadow-[0_1px_2px_rgb(0_0_0/0.2)] transition-colors duration-150 hover:bg-forest disabled:cursor-not-allowed disabled:bg-[#173326]/55"
+                            @click="analyze">
+                            <span v-if="loading" aria-hidden="true"
+                                class="h-4 w-4 animate-spin rounded-full border-2 border-on-forest/30 border-t-on-forest"></span>
+                            <Icon v-else name="send" :size="16" />
+                        </button>
+                    </div>
+
+                </div>
+
+                <!-- Suggestions (real columns; the chip shows a short label,
+                     the full question is what gets filled in) -->
+
+                <div v-if="datasetId && exampleQuestions.length"
+                    class="-mx-4 flex items-center gap-2.5 overflow-x-auto px-4 [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:px-0">
+                    <span v-if="!isMobile" class="mr-1.5 shrink-0 text-body font-medium text-ink">Try asking</span>
+                    <Tooltip v-for="example in exampleQuestions" :key="example.question" :content="example.question">
+                        <button type="button" :disabled="loading" @click="useExample(example.question)"
+                            class="flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border bg-surface px-4 text-data font-medium text-ink transition-colors duration-150 hover:bg-forest-soft disabled:opacity-50"
+                            :class="isMobile ? 'border-forest/45' : 'border-[#e3dbca] hover:border-forest/35'">
+                            <span v-if="example.trend && !isMobile" aria-hidden="true"
+                                class="grid h-3.5 w-3.5 place-items-center rounded-full bg-[#4f8a57]">
+                                <span class="h-1.5 w-1.5 rounded-full bg-[#d8ecd3]"></span>
+                            </span>
+                            {{ example.label }}
+                        </button>
+                    </Tooltip>
+                </div>
+
+                <!-- Running status (the previous result stays visible
+                     below - dimmed - until replaced) -->
+
+                <p v-if="loading && result" role="status" class="flex items-center gap-2.5 text-data text-ink">
+                    <span aria-hidden="true"
+                        class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-forest/20 border-t-forest"></span>
+                    <span class="font-medium">{{ followUpPending ? "Applying your follow-up" : "Analyzing your question" }}</span>
+                    <span class="text-ink-muted max-sm:hidden">Planning the analysis and preparing your results…</span>
+                </p>
+
+                <!-- Error: 422 = couldn't be planned (rephrase); else failure -->
+
+                <div v-if="error" role="alert" class="flex items-start gap-3 rounded-[14px] border px-4 py-3.5"
+                    :class="isClarificationError ? 'border-warn-ink/20 bg-warn-soft' : 'border-danger/20 bg-danger-soft'">
+                    <Icon :name="isClarificationError ? 'info' : 'error'" :size="16" class="mt-0.5"
+                        :class="isClarificationError ? 'text-warn-ink' : 'text-danger'" />
+                    <div class="min-w-0">
+                        <p class="text-data font-semibold" :class="isClarificationError ? 'text-warn-ink' : 'text-danger'">
+                            {{ isClarificationError ? "Couldn't answer that question" : "Analysis failed" }}
+                        </p>
+                        <p class="mt-0.5 break-words text-data text-ink">{{ error }}</p>
+                        <p v-if="keptPreviousResult && result" class="mt-1 text-caption font-medium text-warn-ink">
+                            The previous result below is unchanged - edit your follow-up and try again.
+                        </p>
+                        <p v-if="isClarificationError" class="mt-1 text-caption text-ink-muted">
+                            Try rephrasing with specific column names, e.g. which metric to measure and what to group it by.
+                        </p>
+                        <Button v-if="canRetry" size="sm" icon="refresh" class="mt-2.5"
+                            :disabled="loading || !question.trim()" @click="analyze">
+                            Try again
+                        </Button>
+                    </div>
+                </div>
+
+                <!-- No dataset: the shell's empty state goes here -->
+
+                <slot v-if="!datasetId" name="empty" />
+
+                <!-- First run: loading frame, or where the answer lands -->
+
+                <div v-else-if="!result && loading" role="status"
+                    class="flex min-h-[320px] flex-1 flex-col rounded-[16px] border border-[#e6decd] bg-surface shadow-panel">
+                    <div class="flex items-center gap-3 px-5 py-4">
+                        <span aria-hidden="true"
+                            class="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-forest/20 border-t-forest"></span>
                         <div>
+                            <p class="text-body font-semibold text-ink">
+                                {{ followUpPending ? "Applying your follow-up" : "Analyzing your question" }}
+                            </p>
+                            <p class="text-caption text-ink-muted">Planning the analysis and preparing your results…</p>
+                        </div>
+                    </div>
+                    <div aria-hidden="true" class="flex flex-1 items-end gap-[5%] px-8 pb-8 pt-6">
+                        <span v-for="height in [176, 132, 108, 80, 60]" :key="height"
+                            class="flex-1 animate-pulse rounded-t-md bg-sunken" :style="{ height: `${height}px` }"></span>
+                    </div>
+                </div>
 
-                            <span
-                                class="mb-[3px] block text-[10px] font-bold uppercase tracking-[0.6px] text-emerald-600">
-                                Analysis Result
+                <div v-else-if="!result && !error"
+                    class="flex min-h-[220px] flex-1 flex-col items-center justify-center gap-4 rounded-[16px] border border-dashed border-line-strong px-6 py-10 text-center">
+                    <div aria-hidden="true" class="flex h-14 items-end gap-1.5">
+                        <span v-for="(height, index) in [100, 74, 58, 40, 30]" :key="height" class="w-3 rounded-t-[3px]"
+                            :class="['bg-rank-1', 'bg-rank-2', 'bg-rank-3', 'bg-rank-4', 'bg-rank-5'][index]"
+                            :style="{ height: `${height}%`, opacity: 0.35 }"></span>
+                    </div>
+                    <div>
+                        <p class="text-body font-semibold text-ink">Your answer appears here</p>
+                        <p class="mt-1 max-w-[46ch] text-data text-ink-muted">
+                            Ask a question above, or start from one of the suggestions built from this dataset's columns.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- =================================================
+                     RESULT
+                ================================================== -->
+
+                <Transition enter-active-class="transition duration-300 ease-out-quiet"
+                    enter-from-class="translate-y-1 opacity-0" enter-to-class="translate-y-0 opacity-100">
+
+                    <section v-if="result"
+                        class="@container flex min-h-0 flex-col rounded-[16px] border border-[#e6decd] bg-surface shadow-[0_1px_2px_rgb(24_61_48/0.04),0_10px_30px_-18px_rgb(24_61_48/0.2)] transition-opacity duration-150"
+                        :class="[loading ? 'opacity-60' : '']" :aria-busy="loading ? 'true' : 'false'"
+                        aria-labelledby="analysis-result-title">
+
+                        <!-- Header -->
+
+                        <header class="flex flex-wrap items-start gap-x-4 gap-y-3 px-4 pt-4 sm:px-6 sm:pt-5">
+
+                            <span aria-hidden="true"
+                                class="grid shrink-0 place-items-center rounded-[10px] bg-[#e4eedd] text-forest"
+                                :class="isMobile ? 'h-9 w-9' : 'h-11 w-11'">
+                                <Icon name="bar-chart" :size="20" />
                             </span>
 
-                            <h3 class="m-0 text-[19px] font-bold tracking-[-0.25px] text-slate-900">
-
-                                {{
-                                    result.visualization?.title ||
-                                    "Analysis completed"
-                                }}
-
-                            </h3>
-
-                            <p v-if="result.question" class="mt-1 truncate text-xs text-slate-500"
-                                :title="result.question">
-                                Results for: {{ result.question }}
-                            </p>
-
-                            <p class="mt-1 text-xs text-slate-400">
-
-                                {{
-                                    result.data?.row_count ??
-                                    result.data?.rows?.length ??
-                                    0
-                                }}
-
-                                results returned.
-
-                            </p>
-
-                            <p v-if="result.data?.row_limit_reached"
-                                class="mt-1 text-xs font-medium text-amber-700">
-                                Row limit of {{ result.data.row_limit }} reached - any
-                                groups beyond it are not shown, and insights only state
-                                what the returned rows can support.
-                            </p>
-
-                        </div>
-
-                    </div>
-
-                    <div
-                        class="flex items-center gap-1.5 whitespace-nowrap rounded-full border border-emerald-200 bg-gradient-to-r from-emerald-50 to-teal-50 px-[12px] py-[7px] text-[11px] font-bold text-emerald-700 shadow-sm max-[700px]:self-start">
-
-                        <span class="text-emerald-500">
-                            ●
-                        </span>
-
-                        Analysis Complete
-
-                    </div>
-
-                </div>
-
-                <!-- How this was calculated: built from the executed plan.
-                     Text interpolation (never v-html) keeps column names and
-                     filter values as text. Absent/null explanation renders nothing. -->
-
-                <details v-if="planExplanation" open
-                    class="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 px-4 py-3">
-                    <summary class="cursor-pointer select-none text-xs font-bold text-slate-700">
-                        How this was calculated
-                        <span class="ml-1 font-normal text-slate-400">
-                            ({{ planExplanation.interpretedBy }})
-                        </span>
-                    </summary>
-
-                    <ul class="m-0 mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-slate-600">
-                        <li v-for="(step, index) in planExplanation.steps" :key="`step-${index}`"
-                            class="break-words">
-                            {{ step }}
-                        </li>
-                    </ul>
-
-                    <ul v-if="planExplanation.limitations.length"
-                        class="m-0 mt-2 list-none space-y-1 pl-0 text-xs leading-5 text-amber-700">
-                        <li v-for="(limitation, index) in planExplanation.limitations"
-                            :key="`limitation-${index}`" class="break-words">
-                            ⚠ {{ limitation }}
-                        </li>
-                    </ul>
-                </details>
-
-                <!-- AI Insights -->
-
-                <AnalyticsInsights v-if="result.insights?.insights?.length" :result="result" />
-
-                <!-- `result` is only set after a successful response, so
-                     this never shows while loading or after a failure. -->
-                <p v-else-if="result.insight_status === 'success'" class="mt-4 text-[11px] text-slate-400">
-                    No insights are supported by this result.
-                </p>
-
-                <p v-if="result.insight_status === 'unavailable'" :title="result.insight_error || undefined"
-                    class="mt-4 text-[11px] text-slate-400">
-                    Insights unavailable for this result.
-                </p>
-
-                <!-- Chart -->
-
-                <div v-if="
-                    hasRows &&
-                    result.visualization &&
-                    result.visualization.type !== 'table'
-                "
-                    class="mt-4 w-full overflow-hidden rounded-[16px] border border-indigo-100 bg-gradient-to-br from-white via-indigo-50/30 to-violet-50/40 p-[18px] shadow-[0_5px_18px_rgba(79,70,229,0.04)]">
-
-                    <div class="mb-4 flex items-center gap-2">
-
-                        <span
-                            class="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-100 to-indigo-100 text-blue-600">
-                            📊
-                        </span>
-
-                        <span class="text-[11px] font-bold uppercase tracking-[0.45px] text-indigo-700">
-                            Visualization
-                        </span>
-
-                    </div>
-
-                    <AnalyticsChart :result="result" />
-
-                </div>
-
-                <!-- Table -->
-
-                <div v-if="
-                    result.visualization?.type === 'table' ||
-                    (result.visualization && !hasRows)
-                "
-                    class="mt-4 overflow-hidden rounded-[16px] border border-indigo-100 bg-white shadow-[0_5px_18px_rgba(79,70,229,0.04)]">
-
-                    <div
-                        class="flex items-center justify-between gap-[15px] border-b border-indigo-100 bg-gradient-to-r from-violet-50 via-white to-blue-50 px-[18px] py-4">
-
-                        <div class="flex items-center gap-3">
-
-                            <div
-                                class="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-100 to-indigo-100 text-blue-600">
-
-                                <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-
-                                    <rect x="3" y="4" width="18" height="16" rx="2" />
-
-                                    <path d="M3 10h18M9 4v16M15 4v16" />
-
-                                </svg>
-
-                            </div>
-
-                            <div>
-
-                                <h4 class="m-0 text-sm font-bold text-slate-900">
-                                    Results
-                                </h4>
-
-                                <p class="mt-[3px] text-[11px] text-slate-400">
-                                    Data returned from your query
+                            <div class="min-w-[min(100%,280px)] flex-1">
+                                <h3 id="analysis-result-title" class="font-bold tracking-[-0.015em] text-ink"
+                                    :class="isMobile ? 'pt-1 text-lead' : 'text-[22px] leading-tight'">
+                                    {{ result.visualization?.title || "Analysis completed" }}
+                                </h3>
+                                <p v-if="resultDescription && !isMobile" class="mt-1 text-body text-ink-muted">
+                                    {{ resultDescription }}
                                 </p>
-
                             </div>
+
+                            <div v-if="!isMobile" class="flex shrink-0 items-center gap-2">
+                                <span v-if="resultSource"
+                                    class="inline-flex h-9 items-center rounded-[10px] bg-[#f0e9d9] px-4 text-data font-medium text-ink">
+                                    {{ resultSource }}
+                                </span>
+                                <Tooltip :content="rowInfo">
+                                    <span tabindex="0"
+                                        class="inline-flex h-9 items-center gap-2 rounded-[10px] px-3 text-data text-ink"
+                                        :class="result.data?.row_limit_reached ? 'bg-warn-soft text-warn-ink' : ''">
+                                        <span class="tabular-nums">{{ formatNumber(returnedRowCount) }}
+                                            {{ returnedRowCount === 1 ? "row" : "rows" }}</span>
+                                        <Icon :name="result.data?.row_limit_reached ? 'warning' : 'info'" :size="16"
+                                            :class="result.data?.row_limit_reached ? '' : 'text-ink-muted'" />
+                                        <span class="sr-only">{{ rowInfo }}</span>
+                                    </span>
+                                </Tooltip>
+                                <SegmentedControl v-if="canShowChart" v-model="resultView"
+                                    :items="RESULT_VIEWS" label="Result view" size="sm" />
+                                <Button v-if="inspectorDocked && !inspectorOpen" size="sm" icon="panel-right"
+                                    :aria-pressed="false" @click="inspectorOpen = true">
+                                    Findings<span v-if="insightCount" class="tabular-nums"> ({{ insightCount }})</span>
+                                </Button>
+                            </div>
+
+                        </header>
+
+                        <!-- Mobile: row limit + view switch under the title -->
+                        <div v-if="isMobile" class="flex flex-wrap items-center gap-2 px-4 pt-3">
+                            <span class="inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-caption"
+                                :class="result.data?.row_limit_reached ? 'bg-warn-soft text-warn-ink' : 'bg-[#f0e9d9] text-ink'">
+                                <Icon v-if="result.data?.row_limit_reached" name="warning" :size="14" />
+                                {{ formatNumber(returnedRowCount) }} rows{{ result.data?.row_limit_reached ? " · limit reached" : "" }}
+                            </span>
+                            <SegmentedControl v-if="canShowChart" v-model="resultView" :items="RESULT_VIEWS"
+                                label="Result view" size="sm" class="ml-auto" />
+                        </div>
+
+                        <!-- KPI tiles (desktop) -->
+                        <dl v-if="kpiTiles.length && !isMobile" class="grid grid-cols-2 gap-3 px-6 pt-5 @min-[760px]:grid-cols-4">
+                            <div v-for="tile in kpiTiles" :key="tile.key"
+                                class="flex min-w-0 items-center gap-3 rounded-[12px] border border-[#ebe3d2] bg-[#fbf8f0] px-3.5 py-3.5">
+                                <span aria-hidden="true" class="grid h-10 w-10 shrink-0 place-items-center rounded-[10px]"
+                                    :class="tile.tile">
+                                    <Icon :name="tile.icon" :size="20" />
+                                </span>
+                                <!-- The value scales with the tile's width (container
+                                     units), so the full number always fits. -->
+                                <div class="@container/kpi min-w-0 flex-1">
+                                    <dt class="line-clamp-2 text-data font-medium leading-snug text-ink">{{ tile.label }}</dt>
+                                    <dd class="whitespace-nowrap text-[clamp(14px,15cqi,21px)] font-bold leading-tight tracking-[-0.01em] tabular-nums text-ink"
+                                        :title="formatNumber(tile.value)">
+                                        {{ formatNumber(tile.value) }}
+                                    </dd>
+                                    <dd v-if="tile.sub" class="truncate text-caption text-ink-muted">{{ tile.sub }}</dd>
+                                </div>
+                            </div>
+                        </dl>
+
+                        <!-- Chart + plotted values / table -->
+
+                        <div class="flex min-h-0 flex-col px-4 pb-4 pt-4 sm:px-6 sm:pb-6"
+                            :class="isMobile ? '' : 'min-h-[340px] flex-1'">
+
+                            <div v-if="canShowChart && resultView === 'chart'" class="grid min-h-0 flex-1 gap-4"
+                                :class="showSideTable && !isMobile ? '@min-[760px]:grid-cols-[minmax(0,1fr)_300px]' : ''">
+
+                                <div class="flex min-h-[300px] flex-col rounded-[12px]"
+                                    :class="isMobile ? 'h-[280px]' : 'border border-[#efe8da] bg-[#fdfbf6] px-2 pb-2 pt-1'">
+                                    <AnalyticsChart :result="result" ranked bare />
+                                </div>
+
+                                <div v-if="showSideTable && !isMobile"
+                                    class="hidden self-start overflow-hidden rounded-[12px] bg-[#f6f1e5] @min-[760px]:block">
+                                    <table class="w-full text-left">
+                                        <caption class="sr-only">Plotted values</caption>
+                                        <thead>
+                                            <tr class="text-data font-semibold text-ink">
+                                                <th scope="col" class="px-4 py-3">{{ capitalize(summary.xColumn) }}</th>
+                                                <th scope="col" class="px-3 py-3 text-right">{{ capitalize(metricName) }}</th>
+                                                <th v-if="showShare" scope="col" class="px-4 py-3 text-right">
+                                                    <Tooltip content="Share of the total of the rows shown">
+                                                        <span tabindex="0">Share</span>
+                                                    </Tooltip>
+                                                </th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="bg-[#fbf8f0] text-data text-ink">
+                                            <tr v-for="(row, index) in summary.rows" :key="index" class="border-t border-[#ece5d6]">
+                                                <td class="max-w-[110px] truncate px-4 py-2.5" :title="String(row?.[summary.xColumn] ?? '')">
+                                                    {{ formatCell(row?.[summary.xColumn]) }}
+                                                </td>
+                                                <td class="px-3 py-2.5 text-right tabular-nums">{{ formatCell(row?.[summary.yColumn]) }}</td>
+                                                <td v-if="showShare" class="px-4 py-2.5 text-right tabular-nums">{{ shareFor(row) }}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Table: table results, and the Table view of chart results -->
+                            <div v-else-if="isTableResult || canShowChart"
+                                class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[12px] border border-[#ebe3d2]"
+                                :class="isMobile ? 'max-h-[420px]' : ''">
+
+                                <div class="min-h-0 flex-1 overflow-auto [scrollbar-width:thin]">
+                                    <table class="w-full min-w-[480px] border-separate border-spacing-0 text-left">
+                                        <thead class="sticky top-0 z-10">
+                                            <tr>
+                                                <th v-for="column in result.data?.columns || []" :key="column" scope="col"
+                                                    class="whitespace-nowrap border-b border-[#ebe3d2] bg-[#f6f1e5] px-4 py-2.5 text-data font-semibold text-ink"
+                                                    :class="tableRows.some((row) => typeof row?.[column] === 'number') ? 'text-right' : ''">
+                                                    {{ column }}
+                                                </th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="bg-[#fdfbf6] text-data">
+                                            <tr v-for="(row, index) in tableRows" :key="index"
+                                                class="transition-colors duration-150 hover:bg-canvas">
+                                                <td v-for="column in result.data?.columns || []" :key="column"
+                                                    class="whitespace-nowrap border-b border-[#efe8da] px-4 py-2.5 text-ink"
+                                                    :class="typeof row?.[column] === 'number' ? 'text-right tabular-nums' : ''">
+                                                    {{ formatCell(row?.[column]) }}
+                                                </td>
+                                            </tr>
+                                            <tr v-if="!result.data?.rows?.length">
+                                                <td :colspan="result.data?.columns?.length || 1" class="p-0">
+                                                    <EmptyState icon="table" title="No rows were returned." />
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <p class="shrink-0 border-t border-[#ebe3d2] bg-[#f8f4ea] px-4 py-2 text-caption text-ink-muted">
+                                    <span class="tabular-nums">{{ formatNumber(returnedRowCount) }}</span> rows
+                                    <template v-if="tableRowsHidden">
+                                        - showing the first <span class="tabular-nums">{{ formatNumber(tableRows.length) }}</span> of
+                                        <span class="tabular-nums">{{ formatNumber(result.data?.rows?.length) }}</span> returned rows.
+                                    </template>
+                                </p>
+                            </div>
+
+                            <!-- Nothing visualizable -->
+                            <EmptyState v-else-if="!result.visualization && !result.data?.rows?.length && !result.insights?.insights?.length"
+                                icon="sparkle" title="Analysis completed"
+                                description="The analysis did not return visualizable results." />
+
+                            <!-- Mobile: KPI summary 2 x 2 + View findings -->
+                            <template v-if="isMobile">
+                                <dl v-if="kpiTiles.length" class="mt-4 grid grid-cols-2 gap-2">
+                                    <div v-for="tile in kpiTiles" :key="tile.key"
+                                        class="min-w-0 rounded-[12px] border border-[#ebe3d2] bg-[#fbf8f0] px-3 py-2.5">
+                                        <dt class="flex items-center gap-1.5 truncate text-caption font-medium text-ink">
+                                            <span aria-hidden="true" class="grid h-5 w-5 place-items-center rounded-[6px]" :class="tile.tile">
+                                                <Icon :name="tile.icon" :size="14" />
+                                            </span>
+                                            {{ tile.label }}
+                                        </dt>
+                                        <dd class="mt-1 truncate text-lead font-bold tabular-nums text-ink">{{ formatCompactNumber(tile.value) }}</dd>
+                                        <dd v-if="tile.sub" class="truncate text-caption text-ink-muted">{{ tile.sub }}</dd>
+                                    </div>
+                                </dl>
+                                <button type="button"
+                                    class="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-[12px] bg-[#f1ebdd] text-body font-semibold text-ink transition-colors duration-150 hover:bg-[#ebe3d2]"
+                                    @click="viewFindings">
+                                    View findings
+                                    <Icon name="chevron-right" :size="16" />
+                                </button>
+                            </template>
 
                         </div>
 
-                        <span
-                            class="whitespace-nowrap rounded-full border border-violet-200 bg-gradient-to-r from-violet-50 to-indigo-50 px-[10px] py-[5px] text-[11px] font-bold text-violet-700">
+                    </section>
 
-                            {{
-                                result.data?.row_count ??
-                                result.data?.rows?.length ??
-                                0
-                            }}
-
-                            rows
-
-                        </span>
-
-                    </div>
-
-                    <div class="max-h-[520px] w-full overflow-x-auto overflow-y-auto">
-
-                        <table class="min-w-[600px] w-full border-collapse">
-
-                            <thead>
-
-                                <tr>
-
-                                    <th v-for="(column, columnIndex) in result.data?.columns || []" :key="column"
-                                        class="sticky top-0 z-10 whitespace-nowrap border-b border-indigo-100 px-4 py-[13px] text-left text-[11px] font-bold uppercase tracking-[0.35px]"
-                                        :class="[
-                                            columnIndex % 4 === 0
-                                                ? 'bg-violet-50 text-violet-700'
-                                                : '',
-                                            columnIndex % 4 === 1
-                                                ? 'bg-blue-50 text-blue-700'
-                                                : '',
-                                            columnIndex % 4 === 2
-                                                ? 'bg-fuchsia-50 text-fuchsia-700'
-                                                : '',
-                                            columnIndex % 4 === 3
-                                                ? 'bg-indigo-50 text-indigo-700'
-                                                : '',
-                                        ]">
-
-                                        {{ column }}
-
-                                    </th>
-
-                                </tr>
-
-                            </thead>
-
-                            <tbody>
-
-                                <tr v-for="(row, index) in tableRows" :key="index"
-                                    class="transition-colors duration-150 hover:bg-violet-50/50">
-
-                                    <td v-for="(column, columnIndex) in result.data?.columns || []" :key="column"
-                                        class="whitespace-nowrap border-b border-slate-100 px-4 py-[13px] text-left text-xs last:border-b-0"
-                                        :class="columnIndex % 2 === 0
-                                            ? 'text-slate-700'
-                                            : 'text-indigo-700'
-                                            ">
-
-                                        {{ formatCell(row?.[column]) }}
-
-                                    </td>
-
-                                </tr>
-
-                                <!-- FIXED: optional chaining syntax -->
-
-                                <tr v-if="
-                                    !result.data?.rows?.length
-                                ">
-
-                                    <td :colspan="result.data?.columns
-                                        ?.length || 1
-                                        " class="px-4 py-8 text-center text-xs text-slate-400">
-
-                                        <div
-                                            class="mx-auto mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-400">
-                                            ∅
-                                        </div>
-
-                                        No rows were returned.
-
-                                    </td>
-
-                                </tr>
-
-                            </tbody>
-
-                        </table>
-
-                    </div>
-
-                    <p v-if="tableRowsHidden"
-                        class="m-0 border-t border-slate-100 px-4 py-2.5 text-[11px] text-slate-500">
-                        Showing the first {{ tableRows.length }} of
-                        {{ result.data?.rows?.length }} returned rows.
-                    </p>
-
-                </div>
-
-                <!-- Empty visualization fallback -->
-
-                <div v-if="
-                    !result.visualization &&
-                    !result.data?.rows?.length &&
-                    !result.insights?.insights?.length
-                "
-                    class="rounded-[16px] border border-violet-100 bg-gradient-to-br from-violet-50/50 via-white to-indigo-50/50 px-5 py-8 text-center">
-
-                    <div
-                        class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-violet-100 to-indigo-100 text-2xl text-violet-500">
-
-                        ✦
-
-                    </div>
-
-                    <p class="mt-3 text-sm font-bold text-slate-700">
-
-                        Analysis completed
-
-                    </p>
-
-                    <p class="mt-1 text-xs text-slate-400">
-
-                        The analysis did not return
-                        visualizable results.
-
-                    </p>
-
-                </div>
+                </Transition>
 
             </div>
 
-        </div>
+            <!-- =====================================================
+                 RIGHT COLUMN: findings / calculation + next questions
+            ====================================================== -->
+
+            <template v-if="result" #inspector>
+
+                <div v-if="inspectorDocked" class="flex flex-col gap-4 pb-6 pl-1 pr-6 pt-[124px]">
+
+                    <Tabs v-model="inspectorTab" :items="INSPECTOR_TABS" label="Result details"
+                        class="overflow-hidden rounded-[16px] border border-[#e6decd] bg-surface shadow-panel [&>div:first-child]:px-4">
+                        <template #end>
+                            <Tooltip content="Hide panel">
+                                <button type="button" aria-label="Hide findings panel"
+                                    class="grid h-8 w-8 place-items-center rounded-control text-ink-muted transition-colors hover:bg-sunken hover:text-ink"
+                                    @click="inspectorOpen = false">
+                                    <Icon name="panel-right" :size="16" />
+                                </button>
+                            </Tooltip>
+                        </template>
+
+                        <TabPanel value="findings" class="py-2">
+                            <AnalyticsInsights v-if="result.insights?.insights?.length" :result="result" />
+                            <!-- `result` is only set after a successful response, so
+                                 these never show while loading or after a failure. -->
+                            <p v-else-if="result.insight_status === 'success'" class="px-5 py-3 text-data text-ink-muted">
+                                No insights are supported by this result.
+                            </p>
+                            <p v-if="result.insight_status === 'unavailable'" :title="result.insight_error || undefined"
+                                class="px-5 py-3 text-data text-ink-muted">
+                                Insights unavailable for this result.
+                            </p>
+                        </TabPanel>
+
+                        <!-- Built from the executed plan. Text interpolation (never
+                             v-html) keeps column names and filter values as text. -->
+                        <TabPanel v-if="planExplanation" value="calculation" class="px-5 py-4">
+                            <p class="text-caption text-ink-muted">
+                                How this result was produced ({{ planExplanation.interpretedBy }}).
+                            </p>
+                            <ol class="mt-4">
+                                <li v-for="(step, index) in planExplanation.steps" :key="`step-${index}`"
+                                    class="relative flex gap-3 pb-4 last:pb-0">
+                                    <span v-if="index < planExplanation.steps.length - 1" aria-hidden="true"
+                                        class="absolute bottom-0 left-[13px] top-7 w-px bg-line"></span>
+                                    <span aria-hidden="true"
+                                        class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#e4eedd] text-caption font-semibold text-forest">
+                                        {{ index + 1 }}
+                                    </span>
+                                    <span class="min-w-0 break-words pt-1 text-data text-ink">{{ step }}</span>
+                                </li>
+                            </ol>
+                            <ul v-if="planExplanation.limitations.length"
+                                class="mt-5 space-y-1.5 rounded-control border border-warn-ink/15 bg-warn-soft px-3 py-2.5 text-caption text-warn-ink">
+                                <li v-for="(limitation, index) in planExplanation.limitations" :key="`limitation-${index}`"
+                                    class="flex items-start gap-1.5 break-words">
+                                    <Icon name="warning" :size="14" class="mt-px" />
+                                    <span>{{ limitation }}</span>
+                                </li>
+                            </ul>
+                        </TabPanel>
+                    </Tabs>
+
+                    <section v-if="nextQuestions.length" aria-labelledby="next-questions-title"
+                        class="rounded-[16px] border border-[#e6decd] bg-surface px-4 pb-3 pt-4 shadow-panel">
+                        <h4 id="next-questions-title" class="px-1 text-lead font-semibold text-ink">Next questions</h4>
+                        <ul class="mt-2">
+                            <li v-for="item in nextQuestions" :key="item.key">
+                                <button type="button" :disabled="loading"
+                                    class="flex w-full items-start gap-3 rounded-[10px] px-1 py-2 text-left text-data text-ink transition-colors duration-150 hover:bg-sunken/60 disabled:opacity-50"
+                                    @click="chooseNextQuestion(item)">
+                                    <span aria-hidden="true"
+                                        class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#f1ebdd] text-ink-muted">
+                                        <Icon name="arrow-right" :size="14" />
+                                    </span>
+                                    <span class="pt-1">{{ item.label }}</span>
+                                </button>
+                            </li>
+                        </ul>
+                    </section>
+                </div>
+
+                <!-- Stacked (mobile / tablet): accessible accordions -->
+                <div v-else id="analyze-findings" class="scroll-mt-4 px-4 pb-6 pt-1 sm:px-6">
+                    <AccordionRoot v-model="stackedSections" type="multiple"
+                        class="overflow-hidden rounded-[16px] border border-[#e6decd] bg-surface shadow-panel">
+
+                        <AccordionItem value="findings" class="border-b border-line last:border-b-0">
+                            <AccordionHeader as="h4">
+                                <AccordionTrigger
+                                    class="group flex min-h-12 w-full items-center gap-2.5 px-4 text-left text-body font-semibold text-ink hover:bg-sunken/50">
+                                    Findings
+                                    <span v-if="insightCount" class="text-caption font-normal tabular-nums text-ink-muted">{{ insightCount }}</span>
+                                    <Icon name="chevron-down" :size="16"
+                                        class="ml-auto text-ink-muted transition-transform duration-150 group-data-[state=open]:rotate-180" />
+                                </AccordionTrigger>
+                            </AccordionHeader>
+                            <AccordionContent class="pb-2">
+                                <AnalyticsInsights v-if="result.insights?.insights?.length" :result="result" />
+                                <p v-else-if="result.insight_status === 'success'" class="px-4 pb-2 text-data text-ink-muted">
+                                    No insights are supported by this result.
+                                </p>
+                                <p v-if="result.insight_status === 'unavailable'" :title="result.insight_error || undefined"
+                                    class="px-4 pb-2 text-data text-ink-muted">
+                                    Insights unavailable for this result.
+                                </p>
+                            </AccordionContent>
+                        </AccordionItem>
+
+                        <AccordionItem v-if="planExplanation" value="calculation" class="border-b border-line last:border-b-0">
+                            <AccordionHeader as="h4">
+                                <AccordionTrigger
+                                    class="group flex min-h-12 w-full items-center gap-2.5 px-4 text-left text-body font-semibold text-ink hover:bg-sunken/50">
+                                    Calculation
+                                    <Icon name="chevron-down" :size="16"
+                                        class="ml-auto text-ink-muted transition-transform duration-150 group-data-[state=open]:rotate-180" />
+                                </AccordionTrigger>
+                            </AccordionHeader>
+                            <AccordionContent class="px-4 pb-4">
+                                <p class="mb-3 text-caption text-ink-muted">{{ planExplanation.interpretedBy }}</p>
+                                <ol class="space-y-2.5">
+                                    <li v-for="(step, index) in planExplanation.steps" :key="`step-${index}`" class="flex gap-3">
+                                        <span aria-hidden="true"
+                                            class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[#e4eedd] text-caption font-semibold text-forest">
+                                            {{ index + 1 }}
+                                        </span>
+                                        <span class="min-w-0 break-words pt-0.5 text-data text-ink">{{ step }}</span>
+                                    </li>
+                                </ol>
+                                <ul v-if="planExplanation.limitations.length" class="mt-3 space-y-1 text-caption text-warn-ink">
+                                    <li v-for="(limitation, index) in planExplanation.limitations" :key="`limitation-${index}`"
+                                        class="flex items-start gap-1.5 break-words">
+                                        <Icon name="warning" :size="14" class="mt-px" />
+                                        <span>{{ limitation }}</span>
+                                    </li>
+                                </ul>
+                            </AccordionContent>
+                        </AccordionItem>
+
+                        <AccordionItem v-if="nextQuestions.length" value="next">
+                            <AccordionHeader as="h4">
+                                <AccordionTrigger
+                                    class="group flex min-h-12 w-full items-center gap-2.5 px-4 text-left text-body font-semibold text-ink hover:bg-sunken/50">
+                                    Next questions
+                                    <Icon name="chevron-down" :size="16"
+                                        class="ml-auto text-ink-muted transition-transform duration-150 group-data-[state=open]:rotate-180" />
+                                </AccordionTrigger>
+                            </AccordionHeader>
+                            <AccordionContent class="px-3 pb-3">
+                                <button v-for="item in nextQuestions" :key="item.key" type="button" :disabled="loading"
+                                    class="flex w-full items-start gap-3 rounded-[10px] px-1 py-2 text-left text-data text-ink hover:bg-sunken/60"
+                                    @click="chooseNextQuestion(item)">
+                                    <Icon name="arrow-right" :size="16" class="mt-0.5 shrink-0 text-ink-muted" />
+                                    {{ item.label }}
+                                </button>
+                            </AccordionContent>
+                        </AccordionItem>
+
+                    </AccordionRoot>
+                </div>
+
+            </template>
+
+        </InspectorFrame>
 
     </section>
 </template>

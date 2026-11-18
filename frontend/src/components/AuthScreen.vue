@@ -7,6 +7,9 @@ import {
     validateEmail,
     validatePassword,
 } from "../services/auth.js";
+import Button from "./ui/Button.vue";
+import Icon from "./ui/Icon.vue";
+import BrandMark from "./workspace/BrandMark.vue";
 
 // =========================================================
 // STATE
@@ -19,6 +22,18 @@ const mode = ref("login");
 const email = ref("");
 const password = ref("");
 const touched = ref({ email: false, password: false });
+// Presentation only: shows the typed password in the field. Reset on
+// every mode switch and submit, so it never stays on unexpectedly.
+const showPassword = ref(false);
+
+// What the product does - the four workspace sections, as shown in the
+// app's own navigation.
+const CAPABILITIES = [
+    { icon: "sparkle", title: "Analyze", text: "Ask questions in plain language and see how each answer was calculated." },
+    { icon: "table", title: "Data", text: "Browse rows and inspect every column." },
+    { icon: "columns", title: "Schema", text: "Review types and analytical roles." },
+    { icon: "shield-check", title: "Quality", text: "Find missing values, duplicates and outliers." },
+];
 
 const auth = authStore.state;
 
@@ -56,6 +71,7 @@ function switchMode(next) {
     }
     mode.value = next;
     password.value = "";
+    showPassword.value = false;
     touched.value = { email: false, password: false };
     authStore.clearMessages();
 }
@@ -71,6 +87,7 @@ async function submit() {
     const ok = await action(email.value, password.value);
 
     password.value = "";
+    showPassword.value = false;
     touched.value = { ...touched.value, password: false };
 
     if (!ok && auth.notice) {
@@ -81,116 +98,173 @@ async function submit() {
 </script>
 
 <template>
-    <div class="flex min-h-screen items-center justify-center bg-[#f6f7fb] px-4 py-10 text-[#172033] selection:bg-violet-100 selection:text-violet-800">
+    <div class="min-h-dvh bg-canvas text-ink lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,640px)_1fr]">
 
-        <div class="w-full max-w-[400px]">
+        <!-- =====================================================
+             BRAND PANEL
+             Desktop: a full-height forest panel. Mobile: a compact
+             forest band above the form. Same surface as the workspace
+             sidebar, so signing in already looks like the product.
+        ====================================================== -->
 
-            <!-- Brand -->
+        <aside
+            class="theme-forest relative overflow-hidden bg-forest text-on-forest lg:flex lg:min-h-dvh lg:flex-col lg:justify-between lg:px-12 lg:py-10 xl:px-16">
 
-            <div class="mb-7 flex items-center justify-center gap-3">
-
-                <div
-                    class="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-violet-600 via-indigo-600 to-blue-600 text-lg font-bold text-white shadow-[0_8px_22px_rgba(99,102,241,0.25)]">
-                    <span class="relative z-10">✦</span>
-                </div>
-
-                <div>
-                    <p class="text-[15px] font-bold tracking-[-0.25px] text-slate-900">
-                        AI Data Intelligence Platform
-                    </p>
-                    <p class="mt-0.5 text-[11px] text-slate-400">
-                        Interactive data analytics workspace
-                    </p>
-                </div>
-
+            <div aria-hidden="true"
+                class="pointer-events-none absolute inset-0 bg-[linear-gradient(160deg,transparent_30%,var(--color-forest-deep)_100%)]">
             </div>
 
-            <!-- Card -->
+            <!-- Contour lines: a quiet terrain/data motif. Decorative. -->
+            <svg aria-hidden="true" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid slice"
+                class="pointer-events-none absolute -bottom-24 -right-40 h-[560px] w-[560px] text-forest-line opacity-80 max-lg:-top-40 max-lg:h-[420px] max-lg:w-[420px]"
+                fill="none" stroke="currentColor" stroke-width="1.25">
+                <path d="M300 90c96 4 190 66 206 168 18 112-60 236-196 246S86 432 82 316 196 86 300 90Z" />
+                <path d="M300 140c72 3 146 52 158 128 14 86-46 180-150 188S132 412 128 324s92-186 172-184Z" />
+                <path d="M300 190c50 2 100 36 108 90 10 60-32 126-104 132s-128-38-130-100 70-124 126-122Z" />
+                <path d="M300 240c30 1 60 22 64 54 6 36-20 76-62 80s-78-24-80-60 44-76 78-74Z" />
+                <path d="M300 286c12 0 24 9 26 22 2 15-8 31-25 33s-32-10-33-25 18-31 32-30Z" />
+            </svg>
 
-            <div class="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_10px_30px_rgba(15,23,42,0.06)] sm:p-7">
+            <div class="relative px-5 pb-7 pt-6 sm:px-8 lg:p-0">
+                <BrandMark tone="forest" />
+            </div>
 
-                <div class="mb-6 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist">
+            <div class="relative hidden max-w-[460px] lg:block">
+                <p class="text-hero font-semibold text-on-forest">
+                    Turn a CSV into answers you can verify.
+                </p>
+                <ul class="mt-10 space-y-5">
+                    <li v-for="item in CAPABILITIES" :key="item.title" class="flex gap-4">
+                        <span aria-hidden="true"
+                            class="grid h-9 w-9 shrink-0 place-items-center rounded-control border border-forest-line bg-forest-deep/40 text-gold">
+                            <Icon :name="item.icon" :size="16" />
+                        </span>
+                        <span>
+                            <span class="block text-body font-semibold text-on-forest">{{ item.title }}</span>
+                            <span class="block text-data text-on-forest-muted">{{ item.text }}</span>
+                        </span>
+                    </li>
+                </ul>
+            </div>
 
+            <p class="relative hidden items-center gap-2 text-caption text-on-forest-muted lg:flex">
+                <Icon name="shield-check" :size="14" class="text-gold" />
+                Sessions use a secure HTTP-only cookie. Passwords are never stored in the browser.
+            </p>
+
+        </aside>
+
+        <!-- =====================================================
+             FORM
+        ====================================================== -->
+
+        <main class="relative flex justify-center px-4 pb-12 sm:px-8 lg:items-center lg:py-12">
+
+            <div
+                class="-mt-3 w-full max-w-[420px] rounded-panel border border-line bg-surface p-6 shadow-raised sm:p-8 lg:mt-0 lg:border-transparent lg:bg-transparent lg:p-0 lg:shadow-none">
+
+                <h1 class="text-display font-semibold text-ink">
+                    {{ isRegister ? 'Create your account' : 'Welcome back' }}
+                </h1>
+                <p class="mt-1.5 text-body text-ink-muted">
+                    {{ isRegister ? 'Register to start analyzing your datasets.' : 'Sign in to continue to your datasets.' }}
+                </p>
+
+                <!-- Mode switch -->
+
+                <div class="mt-7 grid grid-cols-2 gap-1 rounded-control border border-line bg-sunken p-1" role="tablist"
+                    aria-label="Sign in or create an account">
                     <button v-for="tab in [{ id: 'login', label: 'Sign in' }, { id: 'register', label: 'Create account' }]"
                         :key="tab.id" type="button" role="tab" :aria-selected="mode === tab.id"
                         :disabled="auth.pending" @click="switchMode(tab.id)" :class="mode === tab.id
-                            ? 'bg-white text-slate-900 shadow-sm'
-                            : 'text-slate-500 hover:text-slate-700'"
-                        class="rounded-lg px-3 py-2 text-[12px] font-semibold transition disabled:cursor-not-allowed">
+                            ? 'bg-surface text-ink shadow-panel'
+                            : 'text-ink-muted hover:text-ink'"
+                        class="h-9 rounded-[6px] px-3 text-data font-medium transition-colors duration-150 disabled:opacity-70">
                         {{ tab.label }}
                     </button>
-
                 </div>
 
-                <h1 class="text-[18px] font-bold tracking-[-0.3px] text-slate-900">
-                    {{ isRegister ? 'Create your account' : 'Welcome back' }}
-                </h1>
-                <p class="mt-1 text-[12px] text-slate-500">
-                    {{ isRegister ? 'Register to start analyzing your datasets.' : 'Sign in to access your datasets.' }}
-                </p>
+                <!-- Messages -->
 
                 <p v-if="auth.notice" role="status"
-                    class="mt-5 rounded-xl border border-emerald-100 bg-emerald-50 px-3.5 py-2.5 text-[12px] font-medium text-emerald-700">
-                    {{ auth.notice }}
+                    class="mt-5 flex items-start gap-2.5 rounded-control border border-success/20 bg-success-soft px-3.5 py-2.5 text-data text-success">
+                    <Icon name="check" :size="16" class="mt-0.5" />
+                    <span>{{ auth.notice }}</span>
                 </p>
 
                 <p v-if="auth.error" role="alert"
-                    class="mt-5 rounded-xl border border-red-100 bg-red-50 px-3.5 py-2.5 text-[12px] font-medium text-red-600">
-                    {{ auth.error }}
+                    class="mt-5 flex items-start gap-2.5 rounded-control border border-danger/20 bg-danger-soft px-3.5 py-2.5 text-data text-danger">
+                    <Icon name="error" :size="16" class="mt-0.5" />
+                    <span>{{ auth.error }}</span>
                 </p>
 
-                <form class="mt-5 space-y-4" novalidate @submit.prevent="submit">
+                <!-- Form -->
+
+                <form class="mt-6 space-y-5" novalidate @submit.prevent="submit">
 
                     <div>
-                        <label for="auth-email" class="mb-1.5 block text-[11px] font-semibold text-slate-600">
+                        <label for="auth-email" class="mb-1.5 block text-data font-medium text-ink">
                             Email
                         </label>
                         <input id="auth-email" v-model="email" type="email" autocomplete="username" inputmode="email"
                             maxlength="254" :disabled="auth.pending" :aria-invalid="Boolean(emailError)"
-                            aria-describedby="auth-email-error" @blur="touched.email = true"
-                            class="w-full rounded-xl border bg-white px-3.5 py-2.5 text-[13px] text-slate-900 outline-none transition placeholder:text-slate-400 focus:ring-4 disabled:bg-slate-50"
+                            :aria-describedby="emailError ? 'auth-email-error' : undefined" @blur="touched.email = true"
+                            class="h-11 w-full rounded-control border bg-surface px-3.5 text-body text-ink shadow-[inset_0_1px_1px_rgb(24_61_48/0.04)] transition-[border-color,box-shadow] duration-150 placeholder:text-ink-subtle focus-visible:outline-none disabled:bg-sunken disabled:text-ink-muted"
                             :class="emailError
-                                ? 'border-red-300 focus:border-red-400 focus:ring-red-100'
-                                : 'border-slate-200 focus:border-violet-400 focus:ring-violet-100'"
+                                ? 'border-danger focus-visible:ring-[3px] focus-visible:ring-danger/15'
+                                : 'border-line-strong hover:border-forest/40 focus-visible:border-forest focus-visible:ring-[3px] focus-visible:ring-forest/15'"
                             placeholder="you@company.com" />
-                        <p v-if="emailError" id="auth-email-error" class="mt-1.5 text-[11px] text-red-600">
+                        <p v-if="emailError" id="auth-email-error"
+                            class="mt-1.5 flex items-center gap-1.5 text-caption text-danger">
+                            <Icon name="error" :size="14" />
                             {{ emailError }}
                         </p>
                     </div>
 
                     <div>
-                        <label for="auth-password" class="mb-1.5 block text-[11px] font-semibold text-slate-600">
+                        <label for="auth-password" class="mb-1.5 block text-data font-medium text-ink">
                             Password
                         </label>
-                        <input id="auth-password" v-model="password" type="password"
-                            :autocomplete="isRegister ? 'new-password' : 'current-password'" maxlength="256"
-                            :disabled="auth.pending" :aria-invalid="Boolean(passwordError)"
-                            aria-describedby="auth-password-hint" @blur="touched.password = true"
-                            class="w-full rounded-xl border bg-white px-3.5 py-2.5 text-[13px] text-slate-900 outline-none transition focus:ring-4 disabled:bg-slate-50"
-                            :class="passwordError
-                                ? 'border-red-300 focus:border-red-400 focus:ring-red-100'
-                                : 'border-slate-200 focus:border-violet-400 focus:ring-violet-100'" />
-                        <p id="auth-password-hint" class="mt-1.5 text-[11px]"
-                            :class="passwordError ? 'text-red-600' : 'text-slate-400'">
+                        <div class="relative">
+                            <input id="auth-password" v-model="password" :type="showPassword ? 'text' : 'password'"
+                                :autocomplete="isRegister ? 'new-password' : 'current-password'" maxlength="256"
+                                :disabled="auth.pending" :aria-invalid="Boolean(passwordError)"
+                                aria-describedby="auth-password-hint" @blur="touched.password = true"
+                                class="h-11 w-full rounded-control border bg-surface pl-3.5 pr-11 text-body text-ink shadow-[inset_0_1px_1px_rgb(24_61_48/0.04)] transition-[border-color,box-shadow] duration-150 focus-visible:outline-none disabled:bg-sunken disabled:text-ink-muted"
+                                :class="passwordError
+                                    ? 'border-danger focus-visible:ring-[3px] focus-visible:ring-danger/15'
+                                    : 'border-line-strong hover:border-forest/40 focus-visible:border-forest focus-visible:ring-[3px] focus-visible:ring-forest/15'" />
+                            <button type="button" :disabled="auth.pending"
+                                :aria-label="showPassword ? 'Hide password' : 'Show password'" :aria-pressed="showPassword"
+                                class="absolute inset-y-0 right-0 grid w-11 place-items-center rounded-r-control text-ink-muted transition-colors duration-150 hover:text-ink"
+                                @click="showPassword = !showPassword">
+                                <Icon :name="showPassword ? 'eye-off' : 'eye'" :size="16" />
+                            </button>
+                        </div>
+                        <p id="auth-password-hint" class="mt-1.5 flex min-h-4 items-center gap-1.5 text-caption"
+                            :class="passwordError ? 'text-danger' : 'text-ink-muted'">
+                            <Icon v-if="passwordError" name="error" :size="14" />
                             {{ passwordError || (isRegister ? `At least ${MIN_PASSWORD_LENGTH} characters.` : '') }}
                         </p>
                     </div>
 
-                    <button type="submit" :disabled="!canSubmit"
-                        class="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_20px_rgba(99,102,241,0.25)] transition hover:from-violet-700 hover:to-indigo-700 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-200 disabled:cursor-not-allowed disabled:opacity-60">
-                        <span v-if="auth.pending"
-                            class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
-                            aria-hidden="true"></span>
+                    <Button type="submit" variant="primary" :loading="auth.pending" :disabled="!canSubmit"
+                        class="h-11 w-full text-body">
                         {{ auth.pending
                             ? (isRegister ? 'Creating account…' : 'Signing in…')
                             : (isRegister ? 'Create account' : 'Sign in') }}
-                    </button>
+                    </Button>
 
                 </form>
 
+                <p class="mt-6 flex items-start gap-2 text-caption text-ink-muted lg:hidden">
+                    <Icon name="shield-check" :size="14" class="mt-px text-forest" />
+                    Sessions use a secure HTTP-only cookie. Passwords are never stored in the browser.
+                </p>
+
             </div>
 
-        </div>
+        </main>
 
     </div>
 </template>

@@ -89,6 +89,26 @@ export function onDatasetMissing(listener) {
     return () => datasetMissingListeners.delete(listener);
 }
 
+// Listeners notified whenever a fresh response is STORED in the cache -
+// e.g. after a user-requested refresh (force: true). Lets a second view
+// of the same data (the context bar's quality/profile figures) follow a
+// refresh made elsewhere without sending its own request. Receives
+// (url, data); cache hits and in-flight sharing do not notify.
+const cachedResponseListeners = new Set();
+
+export function onCachedResponse(listener) {
+    cachedResponseListeners.add(listener);
+    return () => cachedResponseListeners.delete(listener);
+}
+
+// The cache keys used by the dataset-scoped reads below, exported so a
+// subscriber can match notifications without re-deriving URLs.
+export const datasetUrls = {
+    profile: (datasetId) => `/dataset/${datasetId}/profile`,
+    quality: (datasetId) => `/dataset/${datasetId}/quality`,
+    metadata: (datasetId) => `/dataset/${datasetId}/metadata`,
+};
+
 // `datasetId` is passed only for `/dataset/{id}/...` requests, so a
 // 404 from any other endpoint is never treated as a deleted dataset.
 // `force` skips the cached copy (a user-requested refresh); an
@@ -114,6 +134,7 @@ async function cachedGet(url, datasetId, { force = false } = {}) {
             if (inFlight.get(url) === promise) {
                 cache.set(url, response.data);
                 inFlight.delete(url);
+                cachedResponseListeners.forEach((listener) => listener(url, response.data));
             }
             return response.data;
         })
@@ -179,7 +200,7 @@ function requireDatasetId(datasetId) {
 
 export async function getDatasetProfile(datasetId, options) {
     requireDatasetId(datasetId);
-    return cachedGet(`/dataset/${datasetId}/profile`, datasetId, options);
+    return cachedGet(datasetUrls.profile(datasetId), datasetId, options);
 }
 
 export async function getDatasetPreview(datasetId, options) {
@@ -189,12 +210,12 @@ export async function getDatasetPreview(datasetId, options) {
 
 export async function getDatasetMetadata(datasetId, options) {
     requireDatasetId(datasetId);
-    return cachedGet(`/dataset/${datasetId}/metadata`, datasetId, options);
+    return cachedGet(datasetUrls.metadata(datasetId), datasetId, options);
 }
 
 export async function getDatasetQuality(datasetId, options) {
     requireDatasetId(datasetId);
-    return cachedGet(`/dataset/${datasetId}/quality`, datasetId, options);
+    return cachedGet(datasetUrls.quality(datasetId), datasetId, options);
 }
 
 

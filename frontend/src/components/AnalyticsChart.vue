@@ -1,5 +1,6 @@
 <script setup>
-import { computed } from "vue";
+import { useElementSize } from "@vueuse/core";
+import { computed, ref, watch } from "vue";
 import VChart from "vue-echarts";
 import { use } from "echarts/core";
 
@@ -18,6 +19,26 @@ import {
 } from "echarts/components";
 
 import { CanvasRenderer } from "echarts/renderers";
+
+import {
+    axisLabelStyle,
+    axisLineStyle,
+    baseTextStyle,
+    dataZoomSliderStyle,
+    emphasisShadow,
+    getChartTheme,
+    legendTextStyle,
+    splitLineStyle,
+    tooltipStyle,
+} from "../services/chartTheme";
+import {
+    extractCategories,
+    formatCompactNumber,
+    formatNumber,
+    summarizeResult,
+} from "../services/chartSummary";
+import EmptyState from "./ui/EmptyState.vue";
+import Icon from "./ui/Icon.vue";
 
 use([
     BarChart,
@@ -40,78 +61,63 @@ const props = defineProps({
         type: Object,
         required: true,
     },
+    // Bar charts: color each bar by its rank (darkest = largest value)
+    // instead of one flat series color. Presentation only.
+    ranked: {
+        type: Boolean,
+        default: false,
+    },
+    // Hide the footer line (value count / axes) when the host already
+    // shows that context.
+    bare: {
+        type: Boolean,
+        default: false,
+    },
 });
+
+// Rank of every value, largest first; NULLs get no rank.
+function rankColors(values, ramp) {
+    const order = values
+        .map((value, index) => ({ value, index }))
+        .filter((entry) => entry.value !== null)
+        .sort((a, b) => b.value - a.value);
+    const colors = new Array(values.length).fill(null);
+    order.forEach((entry, rank) => {
+        colors[entry.index] = ramp[Math.min(rank, ramp.length - 1)];
+    });
+    return colors;
+}
 
 // =========================================================
 // BACKEND RESULT
 // =========================================================
 
-const rows = computed(() => {
-    return Array.isArray(props.result?.data?.rows)
-        ? props.result.data.rows
-        : [];
-});
+// Workspace Phase 2: data extraction and the metric summary come from
+// services/chartSummary.js (moved there unchanged, and unit-tested), so
+// the result header's KPI row and this chart share one implementation.
+// The names below are the same ones chartOption has always used.
+const summary = computed(() => summarizeResult(props.result));
 
-const visualization = computed(() => {
-    return props.result?.visualization || null;
-});
+// ECharts measures its element once, at init. A result that arrives
+// while the Analyze tab is hidden (display: none) would init at 0x0
+// (console warning). So the chart is created the first time its box
+// has a size, and kept from then on (autoresize already ignores 0x0
+// resizes when the tab is hidden again).
+const chartBox = ref(null);
+const { width: boxWidth, height: boxHeight } = useElementSize(chartBox);
+const chartReady = ref(false);
+watch([boxWidth, boxHeight], ([width, height]) => {
+    if (width > 0 && height > 0) chartReady.value = true;
+}, { immediate: true });
 
-const visualizationType = computed(() => {
-    return visualization.value?.type || null;
-});
-
-const visualizationTitle = computed(() => {
-    return (
-        visualization.value?.title ||
-        "Analysis Result"
-    );
-});
-
-const rowCount = computed(() => {
-    return (
-        props.result?.data?.row_count ??
-        rows.value.length
-    );
-});
-
-const encoding = computed(() => {
-    return visualization.value?.encoding || {};
-});
-
-const xColumn = computed(() => {
-    return encoding.value?.x || null;
-});
-
-const yColumn = computed(() => {
-    return encoding.value?.y || null;
-});
-
-// =========================================================
-// CHART STATE
-// =========================================================
-
-const supportedChartTypes = [
-    "bar",
-    "line",
-    "pie",
-    "scatter",
-];
-
-const isSupportedChart = computed(() => {
-    return supportedChartTypes.includes(
-        visualizationType.value
-    );
-});
-
-const hasChartData = computed(() => {
-    return (
-        rows.value.length > 0 &&
-        !!visualization.value &&
-        !!xColumn.value &&
-        !!yColumn.value &&
-        isSupportedChart.value
-    );
-});
+const rows = computed(() => summary.value.rows);
+const visualization = computed(() => summary.value.visualization);
+const visualizationType = computed(() => summary.value.visualizationType);
+const visualizationTitle = computed(() => visualization.value?.title || "Analysis Result");
+const rowCount = computed(() => props.result?.data?.row_count ?? rows.value.length);
+const xColumn = computed(() => summary.value.xColumn);
+const yColumn = computed(() => summary.value.yColumn);
+const hasChartData = computed(() => summary.value.hasChartData);
 
 const chartLabel = computed(() => {
     if (!visualizationType.value) {
@@ -126,174 +132,11 @@ const chartLabel = computed(() => {
     );
 });
 
-// =========================================================
-// DATA EXTRACTION
-// =========================================================
-
-const categories = computed(() => {
-    return rows.value.map((row) => {
-        const value = row?.[xColumn.value];
-
-        if (
-            value === null ||
-            value === undefined ||
-            value === ""
-        ) {
-            return "Unknown";
-        }
-
-        return String(value);
-    });
-});
-
-const numericValues = computed(() => {
-    return rows.value.map((row) => {
-        const value = row?.[yColumn.value];
-
-        if (
-            value === null ||
-            value === undefined ||
-            value === ""
-        ) {
-            return null;
-        }
-
-        const number = Number(value);
-
-        return Number.isFinite(number)
-            ? number
-            : null;
-    });
-});
-
-const validNumericValues = computed(() => {
-    return numericValues.value.filter(
-        (value) =>
-            value !== null &&
-            Number.isFinite(value)
-    );
-});
-
-// =========================================================
-// METRIC SUMMARY
-// =========================================================
-
-// Each value is already one group's aggregate. Adding them up is only
-// a dataset total for additive aggregations, and only when no groups
-// were cut off by the row limit; for mean/median/min/max a "Total" of
-// group values has no meaning.
-const aggregation = computed(
-    () => props.result?.plan?.aggregation || null,
-);
-
-const rowLimitReached = computed(
-    () => props.result?.data?.row_limit_reached === true,
-);
-
-const isAdditive = computed(() =>
-    ["sum", "count"].includes(aggregation.value),
-);
-
-const totalLabel = computed(() => {
-    if (!isAdditive.value) {
-        return null;
-    }
-
-    return rowLimitReached.value ? "Total (shown)" : "Total";
-});
-
-const metricLabel = computed(() => {
-    const metric = props.result?.plan?.metric;
-
-    if (aggregation.value && metric) {
-        return `${aggregation.value} of ${metric}`;
-    }
-
-    return yColumn.value;
-});
-
-const totalValue = computed(() => {
-    return validNumericValues.value.reduce(
-        (sum, value) => sum + value,
-        0
-    );
-});
-
-const averageValue = computed(() => {
-    if (!validNumericValues.value.length) {
-        return null;
-    }
-
-    return (
-        totalValue.value /
-        validNumericValues.value.length
-    );
-});
-
-const minimumValue = computed(() => {
-    if (!validNumericValues.value.length) {
-        return null;
-    }
-
-    return Math.min(
-        ...validNumericValues.value
-    );
-});
-
-const maximumValue = computed(() => {
-    if (!validNumericValues.value.length) {
-        return null;
-    }
-
-    return Math.max(
-        ...validNumericValues.value
-    );
-});
-
-// =========================================================
-// FORMATTERS
-// =========================================================
-
-function formatNumber(value) {
-    if (
-        value === null ||
-        value === undefined ||
-        value === ""
-    ) {
-        return "—";
-    }
-
-    const number = Number(value);
-
-    if (!Number.isFinite(number)) {
-        return String(value);
-    }
-
-    return new Intl.NumberFormat("en-US", {
-        maximumFractionDigits: 2,
-    }).format(number);
-}
-
-function formatCompactNumber(value) {
-    if (
-        value === null ||
-        value === undefined ||
-        value === ""
-    ) {
-        return "—";
-    }
-
-    const number = Number(value);
-
-    if (!Number.isFinite(number)) {
-        return String(value);
-    }
-
-    return new Intl.NumberFormat("en-US", {
-        notation: "compact",
-        maximumFractionDigits: 1,
-    }).format(number);
-}
+const categories = computed(() => extractCategories(rows.value, xColumn.value));
+const numericValues = computed(() => summary.value.numericValues);
+const validNumericValues = computed(() => summary.value.validNumericValues);
+const rowLimitReached = computed(() => summary.value.rowLimitReached);
+const metricLabel = computed(() => summary.value.metricLabel);
 
 function escapeHtml(value) {
     if (value === null || value === undefined) {
@@ -327,24 +170,11 @@ function formatCategory(value) {
 // =========================================================
 // COMMON ECHARTS STYLES
 // =========================================================
-
-const baseTextStyle = {
-    fontFamily:
-        "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-};
-
-const tooltipStyle = {
-    backgroundColor: "rgba(23, 32, 51, 0.97)",
-    borderWidth: 0,
-    borderRadius: 10,
-    padding: [10, 12],
-    textStyle: {
-        color: "#ffffff",
-        fontSize: 12,
-    },
-    extraCssText:
-        "box-shadow: 0 10px 30px rgba(15,23,42,0.16);",
-};
+//
+// Phase 5: presentation (colors, fonts, axes, tooltip) comes from the
+// design tokens via services/chartTheme.js. Only presentation keys
+// changed in chartOption below; every data key (series data, NULL
+// filtering, connectNulls, zoom thresholds, formatters) is unchanged.
 
 // =========================================================
 // CHART OPTION
@@ -356,6 +186,8 @@ const chartOption = computed(() => {
     }
 
     const type = visualizationType.value;
+    const theme = getChartTheme();
+    const palette = theme.palette.length ? theme.palette : undefined;
 
     // =====================================================
     // PIE
@@ -366,10 +198,12 @@ const chartOption = computed(() => {
             animation: true,
             animationDuration: 550,
 
-            textStyle: baseTextStyle,
+            color: palette,
+
+            textStyle: baseTextStyle(theme),
 
             tooltip: {
-                ...tooltipStyle,
+                ...tooltipStyle(theme),
                 trigger: "item",
 
                 formatter(params) {
@@ -399,10 +233,7 @@ const chartOption = computed(() => {
                 bottom: 4,
                 left: "center",
 
-                textStyle: {
-                    color: "#667085",
-                    fontSize: 11,
-                },
+                textStyle: legendTextStyle(theme),
 
                 itemWidth: 9,
                 itemHeight: 9,
@@ -421,14 +252,16 @@ const chartOption = computed(() => {
 
                     minAngle: 3,
 
+                    // 2px surface-colored gap between slices.
                     itemStyle: {
-                        borderColor: "#ffffff",
-                        borderWidth: 3,
-                        borderRadius: 6,
+                        borderColor: theme.surface || undefined,
+                        borderWidth: 2,
+                        borderRadius: 4,
                     },
 
                     label: {
-                        color: "#475467",
+                        color: theme.ink || undefined,
+                        fontFamily: theme.fontSans || undefined,
                         fontSize: 11,
 
                         formatter(params) {
@@ -457,8 +290,7 @@ const chartOption = computed(() => {
 
                         itemStyle: {
                             shadowBlur: 18,
-                            shadowColor:
-                                "rgba(15, 23, 42, 0.16)",
+                            shadowColor: emphasisShadow(theme),
                         },
                     },
 
@@ -485,14 +317,20 @@ const chartOption = computed(() => {
     const shouldEnableZoom =
         categories.value.length > 10;
 
+    // Value labels on bars only while they stay legible (few bars);
+    // presentation only - the same numbers the tooltip shows.
+    const showValueLabels = isBar && categories.value.length <= 12;
+
     return {
         animation: true,
         animationDuration: 550,
 
-        textStyle: baseTextStyle,
+        color: palette,
+
+        textStyle: baseTextStyle(theme),
 
         tooltip: {
-            ...tooltipStyle,
+            ...tooltipStyle(theme),
 
             trigger: isScatter
                 ? "item"
@@ -547,7 +385,8 @@ const chartOption = computed(() => {
         grid: {
             left: "2%",
             right: "2%",
-            top: 55,
+            // Room above the tallest bar for its value label.
+            top: showValueLabels ? 30 : 16,
 
             bottom: shouldEnableZoom
                 ? 105
@@ -565,19 +404,14 @@ const chartOption = computed(() => {
 
             boundaryGap: isBar,
 
-            axisLine: {
-                lineStyle: {
-                    color: "#e4e7ec",
-                },
-            },
+            axisLine: axisLineStyle(theme),
 
             axisTick: {
                 show: false,
             },
 
             axisLabel: {
-                color: "#667085",
-                fontSize: 11,
+                ...axisLabelStyle(theme),
                 margin: 12,
 
                 rotate:
@@ -603,8 +437,7 @@ const chartOption = computed(() => {
             },
 
             axisLabel: {
-                color: "#667085",
-                fontSize: 11,
+                ...axisLabelStyle(theme),
 
                 formatter(value) {
                     return formatCompactNumber(
@@ -613,12 +446,7 @@ const chartOption = computed(() => {
                 },
             },
 
-            splitLine: {
-                lineStyle: {
-                    color: "#edf0f5",
-                    type: "dashed",
-                },
-            },
+            splitLine: splitLineStyle(theme),
         },
 
         ...(shouldEnableZoom
@@ -637,23 +465,7 @@ const chartOption = computed(() => {
                         bottom: 22,
                         height: 16,
 
-                        borderColor:
-                            "#e4e7ec",
-
-                        backgroundColor:
-                            "#f8fafc",
-
-                        fillerColor:
-                            "rgba(124,58,237,0.12)",
-
-                        handleStyle: {
-                            color: "#7c3aed",
-                        },
-
-                        textStyle: {
-                            color: "#667085",
-                            fontSize: 10,
-                        },
+                        ...dataZoomSliderStyle(theme),
                     },
                 ],
             }
@@ -663,7 +475,15 @@ const chartOption = computed(() => {
             {
                 type,
 
-                data: numericValues.value,
+                data: isBar && props.ranked && theme.rankRamp?.length
+                    ? (() => {
+                        const colors = rankColors(numericValues.value, theme.rankRamp);
+                        return numericValues.value.map((value, index) => ({
+                            value,
+                            itemStyle: colors[index] ? { color: colors[index] } : undefined,
+                        }));
+                    })()
+                    : numericValues.value,
 
                 smooth: isLine,
 
@@ -673,25 +493,41 @@ const chartOption = computed(() => {
                     ? "circle"
                     : undefined,
 
+                // Markers >= 8px; thin 2px lines; 4px rounded bar ends.
                 symbolSize: isLine
-                    ? 7
+                    ? 8
                     : isScatter
                         ? 9
                         : undefined,
 
                 barMaxWidth: isBar
-                    ? 42
+                    ? 64
+                    : undefined,
+
+                barCategoryGap: isBar ? "28%" : undefined,
+
+                label: showValueLabels
+                    ? {
+                        show: true,
+                        position: "top",
+                        distance: 6,
+                        color: theme.ink || undefined,
+                        fontFamily: theme.fontSans || undefined,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        formatter: (params) => formatCompactNumber(params.value),
+                    }
                     : undefined,
 
                 itemStyle: {
                     borderRadius: isBar
-                        ? [7, 7, 0, 0]
+                        ? [4, 4, 0, 0]
                         : undefined,
                 },
 
                 lineStyle: isLine
                     ? {
-                        width: 3,
+                        width: 2,
                     }
                     : undefined,
 
@@ -706,8 +542,7 @@ const chartOption = computed(() => {
 
                     itemStyle: {
                         shadowBlur: 12,
-                        shadowColor:
-                            "rgba(79, 70, 229, 0.16)",
+                        shadowColor: emphasisShadow(theme),
                     },
                 },
             },
@@ -717,171 +552,39 @@ const chartOption = computed(() => {
 </script>
 
 <template>
-    <section
-        class="mt-1 w-full overflow-hidden rounded-2xl border border-[#e9eaf0] bg-white shadow-[0_5px_15px_rgba(15,23,42,0.025),0_12px_28px_rgba(15,23,42,0.035)]">
-        <!-- =================================================
-             HEADER
-        ================================================== -->
+    <!-- Workspace Phase 2: the chart is the drawing surface only. Its
+         title, type, result count and the aggregation-aware KPI row
+         are rendered by the result header (AnalyticsBuilder, via
+         services/chartSummary.js). It fills the height its container
+         gives it (min 280px); autoresize follows width and height. -->
+    <div class="flex min-h-0 flex-1 flex-col">
 
-        <div
-            class="flex items-start justify-between gap-4 border-b border-[#edf0f5] bg-gradient-to-b from-white to-[#fcfcfe] px-5 py-4 max-[650px]:flex-col">
-            <div class="min-w-0">
-                <div class="mb-1.5 flex items-center gap-2">
-                    <span
-                        class="h-2 w-2 shrink-0 rounded-full bg-[#7c3aed] shadow-[0_0_0_4px_rgba(124,58,237,0.10)]"></span>
-
-                    <span class="text-[10px] font-bold uppercase tracking-[0.8px] text-[#7c3aed]">
-                        {{ chartLabel }}
-                    </span>
-                </div>
-
-                <h3 class="m-0 text-[17px] font-bold tracking-[-0.2px] text-[#172033]">
-                    {{ visualizationTitle }}
-                </h3>
-
-                <p v-if="hasChartData" class="mt-1 text-[11px] text-[#98a2b3]">
-                    {{ metricLabel }} by
-                    {{ xColumn }}
-                </p>
-            </div>
-
-            <div class="flex shrink-0 items-center gap-2">
-                <span class="rounded-lg bg-[#f5f3ff] px-2.5 py-1.5 text-[10px] font-bold text-[#6d28d9]"
-                    :title="rowLimitReached ? 'Row limit reached - more groups may exist' : undefined">
-                    {{ rowCount }} results{{ rowLimitReached ? " (limit)" : "" }}
-                </span>
-            </div>
+        <!-- The chart is absolutely positioned inside the flex-grown box:
+             a percentage height would not resolve there, and ECharts
+             measures its element once at init (0px = warning + a resize). -->
+        <div v-if="hasChartData" ref="chartBox" class="relative min-h-[280px] flex-1"
+            role="img" :aria-label="`${chartLabel} chart: ${metricLabel} by ${xColumn}. Switch to Table for the values.`">
+            <VChart v-if="chartReady" :option="chartOption" autoresize class="absolute inset-x-1 bottom-0 top-2" />
         </div>
 
-        <!-- =================================================
-             METRIC SUMMARY
-        ================================================== -->
+        <EmptyState v-else icon="bar-chart" title="No chart available"
+            description="The analysis did not return enough visualization data to render a useful chart." />
 
-        <div v-if="
-            hasChartData &&
-            visualizationType !== 'pie' &&
-            validNumericValues.length
-        " class="grid grid-cols-4 border-b border-[#edf0f5] max-[700px]:grid-cols-2">
-            <!-- Total (additive aggregations) / group count otherwise -->
-            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b">
-                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    {{ totalLabel || "Groups" }}
-                </p>
-
-                <p v-if="totalLabel" class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="formatNumber(totalValue)">
-                    {{ formatCompactNumber(totalValue) }}
-                </p>
-
-                <!-- Every returned group, including ones whose aggregate is NULL. -->
-                <p v-else class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]"
-                    :title="validNumericValues.length < rows.length
-                        ? `${formatNumber(validNumericValues.length)} with a value`
-                        : undefined">
-                    {{ formatNumber(rows.length) }}
-                </p>
-            </div>
-
-            <!-- Average -->
-            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-b max-[700px]:border-r-0">
-                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    Avg per group
-                </p>
-
-                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(averageValue)">
-                    {{ formatCompactNumber(averageValue) }}
-                </p>
-            </div>
-
-            <!-- Minimum -->
-            <div class="border-r border-[#edf0f5] px-4 py-3 max-[700px]:border-r">
-                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    Minimum
-                </p>
-
-                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(minimumValue)">
-                    {{ formatCompactNumber(minimumValue) }}
-                </p>
-            </div>
-
-            <!-- Maximum -->
-            <div class="px-4 py-3">
-                <p class="m-0 text-[10px] font-semibold uppercase tracking-[0.5px] text-[#98a2b3]">
-                    Maximum
-                </p>
-
-                <p class="mt-1 m-0 truncate text-[17px] font-bold text-[#172033]" :title="formatNumber(maximumValue)">
-                    {{ formatCompactNumber(maximumValue) }}
-                </p>
-            </div>
-        </div>
-
-        <!-- =================================================
-             CHART
-        ================================================== -->
-
-        <div v-if="hasChartData" class="h-[440px] w-full px-2 pb-2 pt-1 max-[700px]:h-[390px] max-[450px]:h-[330px]">
-            <VChart :option="chartOption" autoresize class="h-full w-full" />
-        </div>
-
-        <!-- =================================================
-             EMPTY / INVALID STATE
-        ================================================== -->
-
-        <div v-else class="flex min-h-[300px] items-center justify-center px-6 py-12">
-            <div class="max-w-sm text-center">
-                <div
-                    class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#f5f3ff] text-[#7c3aed]">
-                    <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path d="M4 19V5" stroke-linecap="round" />
-
-                        <path d="M4 19h16" stroke-linecap="round" />
-
-                        <path d="m7 15 3-4 3 2 4-6" stroke-linecap="round" stroke-linejoin="round" />
-                    </svg>
-                </div>
-
-                <h3 class="m-0 text-sm font-bold text-[#172033]">
-                    No chart available
-                </h3>
-
-                <p class="mt-2 text-xs leading-5 text-[#98a2b3]">
-                    The analysis did not return enough
-                    visualization data to render a useful
-                    chart.
-                </p>
-            </div>
-        </div>
-
-        <!-- =================================================
-             FOOTER
-        ================================================== -->
-
-        <div v-if="hasChartData"
-            class="flex items-center justify-between gap-4 border-t border-[#edf0f5] bg-[#fcfcfd] px-5 py-2.5 text-[10px] text-[#98a2b3] max-[500px]:items-start max-[500px]:flex-col">
+        <p v-if="hasChartData && !bare"
+            class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-line px-1 pt-2 text-caption text-ink-muted">
             <span>
-                Showing
-                <strong class="font-semibold text-[#667085]">
-                    {{ validNumericValues.length }}
-                </strong>
-                numeric values
+                <span class="font-medium tabular-nums text-ink">{{ validNumericValues.length }}</span> numeric values
+                <span v-if="rowLimitReached" class="text-warn-ink">(row limit reached - more groups may exist)</span>
             </span>
+            <span class="flex items-center gap-1.5">
+                <Icon name="arrow-right" :size="14" /> X
+                <span class="font-mono text-ink">{{ xColumn }}</span>
+            </span>
+            <span class="flex items-center gap-1.5">
+                <Icon name="arrow-up" :size="14" /> Y
+                <span class="font-mono text-ink">{{ yColumn }}</span>
+            </span>
+        </p>
 
-            <div class="flex items-center gap-4 max-[500px]:flex-col max-[500px]:items-start max-[500px]:gap-1">
-                <span>
-                    X:
-                    <strong class="font-semibold text-[#667085]">
-                        {{ xColumn }}
-                    </strong>
-                </span>
-
-                <span>
-                    Y:
-                    <strong class="font-semibold text-[#667085]">
-                        {{ yColumn }}
-                    </strong>
-                </span>
-            </div>
-        </div>
-    </section>
+    </div>
 </template>

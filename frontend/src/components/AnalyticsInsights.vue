@@ -1,6 +1,9 @@
 <script setup>
 import { computed } from "vue";
 
+import Icon from "./ui/Icon.vue";
+import StatusChip from "./ui/StatusChip.vue";
+
 const props = defineProps({
     result: {
         type: Object,
@@ -59,83 +62,73 @@ const rowLimitReached = computed(
 // INSIGHT METADATA
 // =========================================================
 
+// Presentation only (Phase 5): labels, descriptions and branching are
+// unchanged. `icon` is now an Icon.vue name instead of a glyph, and
+// every type shares one restrained forest/sage treatment - the type is
+// identified by its icon and label, never by color, and no type is
+// colored as good or bad.
 function getInsightMeta(type) {
     const metadata = {
         highest: {
             label: "Highest",
-            icon: "↑",
+            icon: "crown",
             description: "Peak value identified",
             classes: {
-                wrapper:
-                    "border-emerald-100 bg-gradient-to-br from-emerald-50/70 to-white",
-                icon:
-                    "bg-emerald-100 text-emerald-600",
-                badge:
-                    "bg-emerald-100 text-emerald-700",
-                accent: "bg-emerald-500",
+                wrapper: "",
+                icon: "bg-[#f4e8cc] text-[#b58a2c]",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         },
 
         lowest: {
             label: "Lowest",
-            icon: "↓",
+            icon: "bar-chart",
             description: "Minimum value identified",
             classes: {
-                wrapper:
-                    "border-rose-100 bg-gradient-to-br from-rose-50/70 to-white",
-                icon:
-                    "bg-rose-100 text-rose-600",
-                badge:
-                    "bg-rose-100 text-rose-700",
-                accent: "bg-rose-500",
+                wrapper: "",
+                icon: "bg-[#e6eee1] text-forest",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         },
 
         trend: {
             label: "Trend",
-            icon: "↗",
+            icon: "trend-up",
             description:
                 "Pattern detected in the data",
             classes: {
-                wrapper:
-                    "border-blue-100 bg-gradient-to-br from-blue-50/70 to-white",
-                icon:
-                    "bg-blue-100 text-blue-600",
-                badge:
-                    "bg-blue-100 text-blue-700",
-                accent: "bg-blue-500",
+                wrapper: "",
+                icon: "bg-[#e6eee1] text-forest",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         },
 
         difference: {
             label: "Difference",
-            icon: "↔",
+            icon: "compare",
             description:
                 "Difference between observed values",
             classes: {
-                wrapper:
-                    "border-amber-100 bg-gradient-to-br from-amber-50/70 to-white",
-                icon:
-                    "bg-amber-100 text-amber-600",
-                badge:
-                    "bg-amber-100 text-amber-700",
-                accent: "bg-amber-500",
+                wrapper: "",
+                icon: "bg-[#e6eee1] text-forest",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         },
 
         coverage: {
             label: "Coverage",
-            icon: "◌",
+            icon: "target",
             description:
                 "Data availability check",
             classes: {
-                wrapper:
-                    "border-violet-100 bg-gradient-to-br from-violet-50/70 to-white",
-                icon:
-                    "bg-violet-100 text-violet-600",
-                badge:
-                    "bg-violet-100 text-violet-700",
-                accent: "bg-violet-500",
+                wrapper: "",
+                icon: "bg-[#e6eee1] text-forest",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         },
     };
@@ -143,17 +136,14 @@ function getInsightMeta(type) {
     return (
         metadata[type] || {
             label: "Insight",
-            icon: "✦",
+            icon: "sparkle",
             description:
                 "Observation",
             classes: {
-                wrapper:
-                    "border-slate-100 bg-gradient-to-br from-slate-50/70 to-white",
-                icon:
-                    "bg-slate-100 text-slate-600",
-                badge:
-                    "bg-slate-100 text-slate-700",
-                accent: "bg-slate-500",
+                wrapper: "",
+                icon: "bg-[#e6eee1] text-forest",
+                badge: "bg-sunken text-ink-muted",
+                accent: "bg-sage",
             },
         }
     );
@@ -463,348 +453,120 @@ function getEvidenceColumn(
 </script>
 
 <template>
-    <section v-if="hasInsights"
-        class="mt-6 overflow-hidden rounded-[20px] border border-[#e7e5f2] bg-white shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
-        <!-- =====================================================
-             HEADER
-        ====================================================== -->
+    <!-- Rendered inside the Findings tab / accordion of the Analyze
+         workspace, which provides the heading. Each finding: an icon
+         tile for its kind, the statement, its short description, and
+         the evidence it rests on one click away. -->
+    <div v-if="hasInsights">
 
-        <div class="border-b border-[#edf0f5] bg-gradient-to-r from-[#faf9ff] via-white to-[#faf9ff] px-5 py-5">
-            <div class="flex items-center justify-between gap-4 max-[600px]:items-start">
-                <div class="flex min-w-0 items-center gap-3">
-                    <div
-                        class="flex h-11 w-11 shrink-0 items-center justify-center rounded-[13px] bg-gradient-to-br from-[#ede9fe] to-[#e0e7ff] text-lg text-[#6d28d9] shadow-[0_4px_12px_rgba(124,58,237,0.10)]">
-                        ✦
-                    </div>
+        <p v-if="rowLimitReached" role="note"
+            class="mx-4 mb-1 mt-2 flex items-start gap-2 rounded-control bg-warn-soft px-3 py-2 text-caption text-warn-ink">
+            <Icon name="warning" :size="14" class="mt-px" />
+            Result hit its row limit - only facts that hold for the full grouping are shown.
+        </p>
 
-                    <div class="min-w-0">
-                        <div class="flex items-center gap-2">
-                            <h4 class="m-0 truncate text-[17px] font-bold tracking-[-0.2px] text-[#172033]">
-                                {{ isComputed ? "Insights" : "AI Insights" }}
-                            </h4>
+        <ol>
+            <li v-for="(insight, index) in insights" :key="`${insight.type || 'insight'}-${index}`">
+                <article class="flex gap-3.5 px-4 py-3">
 
-                            <span v-if="allEvidenceBacked"
-                                class="hidden rounded-full bg-[#f3efff] px-2 py-1 text-[9px] font-bold uppercase tracking-[0.4px] text-[#6d28d9] sm:inline-flex">
-                                Evidence-backed
-                            </span>
-                        </div>
-
-                        <p class="mt-1 mb-0 text-[11px] leading-5 text-[#98a2b3]">
-                            {{
-                                isComputed
-                                    ? "Calculated directly from the rows in this result"
-                                    : "Key observations generated from your analysis"
-                            }}
-                        </p>
-
-                        <p v-if="rowLimitReached" class="mt-1 mb-0 text-[11px] leading-5 text-amber-700">
-                            Result hit its row limit - only facts that hold for
-                            the full grouping are shown.
-                        </p>
-                    </div>
-                </div>
-
-                <div
-                    class="flex shrink-0 items-center gap-2 rounded-full border border-[#e9e3ff] bg-[#f8f7ff] px-3 py-[7px] text-[10px] font-bold text-[#6d28d9]">
-                    <span class="h-[6px] w-[6px] rounded-full bg-[#7c3aed]"></span>
-
-                    {{ insightCount }}
-
-                    {{
-                        insightCount === 1
-                            ? "insight"
-                            : "insights"
-                    }}
-                </div>
-            </div>
-        </div>
-
-        <!-- =====================================================
-             INSIGHTS
-        ====================================================== -->
-
-        <div class="grid grid-cols-1 gap-3 p-5">
-            <article v-for="(
-insight, index
-                ) in insights" :key="`${insight.type || 'insight'}-${index}`"
-                class="relative overflow-hidden rounded-[15px] border p-4 transition-all duration-200 hover:-translate-y-[1px] hover:shadow-[0_8px_22px_rgba(15,23,42,0.06)]"
-                :class="getInsightMeta(
-                    insight.type,
-                ).classes.wrapper
-                    ">
-                <!-- Accent -->
-
-                <div class="absolute left-0 top-0 h-full w-[3px]" :class="getInsightMeta(
-                    insight.type,
-                ).classes.accent
-                    "></div>
-
-                <!-- =================================================
-                     INSIGHT HEADER
-                ================================================== -->
-
-                <div class="flex items-start gap-3">
-                    <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-[11px] text-base font-bold"
-                        :class="getInsightMeta(
-                            insight.type,
-                        ).classes.icon
-                            ">
-                        {{
-                            getInsightMeta(
-                                insight.type,
-                            ).icon
-                        }}
-                    </div>
+                    <span class="grid h-10 w-10 shrink-0 place-items-center rounded-[10px]"
+                        :class="getInsightMeta(insight.type).classes.icon"
+                        :title="`${getInsightMeta(insight.type).label}: ${getInsightMeta(insight.type).description}`">
+                        <Icon :name="getInsightMeta(insight.type).icon" :size="20" />
+                        <span class="sr-only">{{ getInsightMeta(insight.type).label }}</span>
+                    </span>
 
                     <div class="min-w-0 flex-1">
-                        <div class="mb-1.5 flex flex-wrap items-center gap-2">
-                            <span class="rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.45px]"
-                                :class="getInsightMeta(
-                                    insight.type,
-                                ).classes.badge
-                                    ">
-                                {{
-                                    getInsightMeta(
-                                        insight.type,
-                                    ).label
-                                }}
-                            </span>
-
-                            <span class="text-[10px] text-[#98a2b3]">
-                                {{
-                                    getInsightMeta(
-                                        insight.type,
-                                    ).description
-                                }}
-                            </span>
-                        </div>
-
-                        <h5 class="m-0 text-[14px] font-bold leading-[1.45] text-[#172033]">
-                            {{
-                                insight.title ||
-                                "Untitled insight"
-                            }}
+                        <h5 class="text-body font-semibold leading-snug text-ink">
+                            {{ insight.title || "Untitled insight" }}
                         </h5>
-
-                        <p v-if="
-                            insight.description
-                        " class="mt-1.5 mb-0 text-[12px] leading-[1.7] text-[#667085]">
-                            {{
-                                insight.description
-                            }}
+                        <p v-if="insight.description" class="mt-0.5 text-data text-ink-muted">
+                            {{ insight.description }}
                         </p>
-                    </div>
-                </div>
 
-                <!-- =================================================
-                     EVIDENCE
-                ================================================== -->
-
-                <div v-if="
-                    insight.evidence
-                " class="mt-4 border-t border-black/[0.05] pt-3">
-                    <!-- =================================================
-                         COVERAGE
-                    ================================================== -->
-
-                    <div v-if="
-                        insight.type ===
-                        'coverage' &&
-                        insight.evidence
-                            .observed_periods !==
-                        undefined
-                    " class="rounded-[11px] bg-white/80 p-3.5">
-                        <div class="mb-3 flex items-center justify-between gap-3">
-                            <div>
-                                <div class="text-[10px] font-bold uppercase tracking-[0.45px] text-[#98a2b3]">
-                                    Data coverage
-                                </div>
-
-                                <div class="mt-1 text-[12px] font-semibold text-[#475467]">
-                                    {{
-                                        getCoverageSummary(
-                                            insight.evidence,
-                                        )
-                                    }}
-                                </div>
-                            </div>
-
-                            <span class="rounded-full px-2.5 py-1 text-[9px] font-bold" :class="getCoverageStatus(
-                                insight.evidence,
-                            ).classes
-                                ">
-                                {{
-                                    getCoverageStatus(
-                                        insight.evidence,
-                                    ).label
-                                }}
-                            </span>
-                        </div>
-
-                        <div class="h-2 overflow-hidden rounded-full bg-[#e9e7f2]">
-                            <div class="h-full rounded-full bg-gradient-to-r from-[#7c3aed] to-[#6366f1] transition-all duration-500"
-                                :style="{
-                                    width:
-                                        getCoveragePercentage(
-                                            insight.evidence,
-                                        ) +
-                                        '%',
-                                }"></div>
-                        </div>
-
-                        <div v-if="
-                            hasMissingPeriods(
-                                insight.evidence,
-                            )
-                        " class="mt-3">
-                            <div class="mb-1.5 text-[10px] font-semibold text-[#667085]">
-                                Missing periods
-                            </div>
-
-                            <div class="flex flex-wrap gap-1.5">
-                                <span v-for="period in insight
-                                    .evidence
-                                    .missing_periods" :key="period"
-                                    class="rounded-md border border-[#e9e3ff] bg-[#f8f7ff] px-2 py-1 text-[9px] font-medium text-[#6d28d9]">
-                                    {{ period }}
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- =================================================
-                         MULTI-ROW EVIDENCE
-                    ================================================== -->
-
-                    <div v-else-if="
-                        getEvidenceRows(
-                            insight.evidence,
-                        ).length > 1
-                    " class="rounded-[11px] bg-white/80 p-3.5">
-                        <div class="mb-3 flex items-center justify-between">
-                            <div class="text-[10px] font-bold uppercase tracking-[0.45px] text-[#98a2b3]">
-                                Supporting data
-                            </div>
-
-                            <span class="text-[9px] font-semibold text-[#98a2b3]">
-                                {{
-                                    getEvidenceRows(
-                                        insight.evidence,
-                                    ).length
-                                }}
-                                points
-                            </span>
-                        </div>
-
-                        <div class="flex items-center gap-2 overflow-x-auto pb-1">
-                            <template v-for="(
-row,
-                                        rowIndex
-                                ) in getEvidenceRows(
-                                            insight.evidence,
-                                        )" :key="rowIndex">
-                                <div
-                                    class="min-w-[125px] rounded-[10px] border border-[#edf0f5] bg-white px-3 py-2.5 shadow-[0_2px_8px_rgba(15,23,42,0.025)]">
-                                    <div class="truncate text-[9px] font-medium text-[#98a2b3]">
-                                        {{
-                                            getEvidenceLabel(
-                                                row,
-                                                insight.evidence,
-                                            )
-                                        }}
-                                    </div>
-
-                                    <div class="mt-1 text-[12px] font-bold text-[#172033]">
-                                        {{
-                                            formatValue(
-                                                getEvidenceValue(
-                                                    row,
-                                                    insight.evidence,
-                                                ),
-                                            )
-                                        }}
-                                    </div>
-                                </div>
-
-                                <span v-if="
-                                    rowIndex <
-                                    getEvidenceRows(
-                                        insight.evidence,
-                                    ).length -
-                                    1
-                                " class="shrink-0 text-[16px] text-[#c4b5fd]">
-                                    →
-                                </span>
-                            </template>
-                        </div>
-                    </div>
-
-                    <!-- =================================================
-                         SINGLE ROW EVIDENCE
-                    ================================================== -->
-
-                    <div v-else-if="
-                        getEvidenceRows(
-                            insight.evidence,
-                        ).length === 1
-                    "
-                        class="flex items-center justify-between gap-5 rounded-[11px] bg-white/80 p-3.5 max-[550px]:items-start max-[550px]:flex-col">
-                        <div class="min-w-0">
-                            <div class="text-[9px] font-bold uppercase tracking-[0.45px] text-[#98a2b3]">
+                        <!-- EVIDENCE (collapsed) -->
+                        <details v-if="insight.evidence" class="group/evidence mt-1.5">
+                            <summary
+                                class="inline-flex cursor-pointer list-none items-center gap-1 rounded-[4px] text-caption font-medium text-forest hover:underline [&::-webkit-details-marker]:hidden">
+                                <Icon name="chevron-right" :size="14"
+                                    class="transition-transform duration-150 group-open/evidence:rotate-90" />
                                 Evidence
-                            </div>
+                            </summary>
 
-                            <div class="mt-1 truncate text-[11px] font-semibold text-[#475467]">
-                                {{
-                                    getEvidenceLabel(
-                                        getEvidenceRows(
-                                            insight.evidence,
-                                        )[0],
-                                        insight.evidence,
-                                    )
-                                }}
-                            </div>
-                        </div>
+                            <div class="mt-2 rounded-control border border-line bg-canvas/70 px-3 py-2.5">
 
-                        <div class="shrink-0 text-right max-[550px]:text-left">
-                            <div class="text-[9px] font-bold uppercase tracking-[0.45px] text-[#98a2b3]">
-                                {{
-                                    getEvidenceColumn(
-                                        insight.evidence,
-                                    )
-                                }}
-                            </div>
+                                <!-- COVERAGE -->
+                                <div v-if="insight.type === 'coverage' && insight.evidence.observed_periods !== undefined">
+                                    <div class="mb-2 flex items-center justify-between gap-2">
+                                        <p class="text-caption tabular-nums text-ink">{{ getCoverageSummary(insight.evidence) }}</p>
+                                        <StatusChip :tone="{
+                                            Complete: 'success',
+                                            'Mostly complete': 'warning',
+                                            Incomplete: 'error',
+                                        }[getCoverageStatus(insight.evidence).label] || 'neutral'"
+                                            :label="getCoverageStatus(insight.evidence).label" />
+                                    </div>
+                                    <div class="h-1.5 overflow-hidden rounded-full bg-sunken" role="progressbar"
+                                        :aria-valuenow="Math.round(getCoveragePercentage(insight.evidence))"
+                                        aria-valuemin="0" aria-valuemax="100" aria-label="Data coverage">
+                                        <div class="h-full rounded-full bg-forest"
+                                            :style="{ width: getCoveragePercentage(insight.evidence) + '%' }"></div>
+                                    </div>
+                                    <div v-if="hasMissingPeriods(insight.evidence)" class="mt-2">
+                                        <p class="mb-1 text-caption text-ink-muted">Missing periods</p>
+                                        <div class="flex flex-wrap gap-1">
+                                            <span v-for="period in insight.evidence.missing_periods" :key="period"
+                                                class="rounded-[4px] border border-line bg-surface px-1.5 py-0.5 font-mono text-caption text-ink">
+                                                {{ period }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
 
-                            <div class="mt-1 text-[15px] font-bold tracking-[-0.2px] text-[#172033]">
-                                {{
-                                    formatEvidenceValue(
-                                        getEvidenceValue(
-                                            getEvidenceRows(
-                                                insight.evidence,
-                                            )[0],
-                                            insight.evidence,
-                                        ),
-                                    )
-                                }}
+                                <!-- MULTI-ROW EVIDENCE -->
+                                <div v-else-if="getEvidenceRows(insight.evidence).length > 1">
+                                    <p class="mb-1 text-caption text-ink-muted">
+                                        Supporting data · <span class="tabular-nums">{{ getEvidenceRows(insight.evidence).length }}</span> points
+                                    </p>
+                                    <dl class="max-h-40 overflow-y-auto text-caption [scrollbar-width:thin]">
+                                        <div v-for="(row, rowIndex) in getEvidenceRows(insight.evidence)" :key="rowIndex"
+                                            class="flex items-baseline justify-between gap-3 py-0.5">
+                                            <dt class="min-w-0 truncate text-ink-muted">{{ getEvidenceLabel(row, insight.evidence) }}</dt>
+                                            <dd class="shrink-0 font-medium tabular-nums text-ink">
+                                                {{ formatValue(getEvidenceValue(row, insight.evidence)) }}
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </div>
+
+                                <!-- SINGLE ROW EVIDENCE -->
+                                <div v-else-if="getEvidenceRows(insight.evidence).length === 1"
+                                    class="flex items-baseline justify-between gap-3">
+                                    <p class="min-w-0 truncate text-caption text-ink-muted">
+                                        {{ getEvidenceLabel(getEvidenceRows(insight.evidence)[0], insight.evidence) }}
+                                        <span class="font-mono">· {{ getEvidenceColumn(insight.evidence) }}</span>
+                                    </p>
+                                    <p class="shrink-0 text-data font-semibold tabular-nums text-ink">
+                                        {{ formatEvidenceValue(getEvidenceValue(getEvidenceRows(insight.evidence)[0], insight.evidence)) }}
+                                    </p>
+                                </div>
+
+                                <!-- GENERIC EVIDENCE FALLBACK -->
+                                <pre v-else
+                                    class="m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-caption text-ink-muted">{{ JSON.stringify(insight.evidence, null, 2) }}</pre>
+
                             </div>
-                        </div>
+                        </details>
                     </div>
 
-                    <!-- =================================================
-                         GENERIC EVIDENCE FALLBACK
-                    ================================================== -->
+                </article>
+            </li>
+        </ol>
 
-                    <div v-else class="rounded-[11px] bg-white/80 p-3.5">
-                        <div class="mb-2 text-[10px] font-bold uppercase tracking-[0.45px] text-[#98a2b3]">
-                            Supporting evidence
-                        </div>
+        <p class="flex items-start gap-1.5 border-t border-line/70 px-4 pb-1 pt-2.5 text-caption text-ink-muted">
+            <Icon v-if="allEvidenceBacked" name="check-circle" :size="14" class="mt-px text-success" />
+            <span>{{ isComputed ? "Calculated directly from the rows in this result" : "Generated from your analysis" }}{{ allEvidenceBacked ? " · evidence-backed" : "" }}</span>
+        </p>
 
-                        <pre
-                            class="m-0 max-h-[180px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[#fafbfc] p-3 text-[10px] leading-5 text-[#667085]">
-        {{ JSON.stringify(insight.evidence, null, 2) }}</pre>
-                    </div>
-                </div>
-            </article>
-        </div>
-    </section>
+    </div>
 </template>
