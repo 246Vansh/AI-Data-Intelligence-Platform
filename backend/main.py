@@ -1,12 +1,33 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+# =========================================================
+# ENVIRONMENT (.env) - MUST RUN BEFORE ANY backend.* IMPORT
+# =========================================================
+#
+# Some modules read settings once, at import time:
+#   backend/jobs.py           ANALYSIS_JOB_WORKERS, ANALYSIS_JOB_RETENTION
+#                             (and creates the shared job pool)
+#   backend/routes/dataset.py MAX_UPLOAD_BYTES
+# Previously .env was only loaded as a side effect of importing
+# ai.planner, which happens AFTER those modules - so these values were
+# silently ignored when set in .env. Loading it here, first, fixes that.
+#
+# The path is resolved from this file (repo root / .env), not the
+# working directory. override=False keeps OS environment variables
+# taking precedence over .env, exactly as before. A missing .env is
+# fine: defaults apply.
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(ENV_FILE, override=False)
 
 from backend.auth.config import load_auth_settings
 from backend.auth.routes import router as auth_router
