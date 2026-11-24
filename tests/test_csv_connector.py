@@ -288,7 +288,13 @@ def test_upload_malformed_csv_cleans_up(isolated_registry):
 
 
 def test_upload_registration_failure_removes_parquet(isolated_registry, monkeypatch):
+    # Ingestion succeeds, so a real Parquet file exists when storage
+    # selection fails. That is a server-side failure (generic 500, see
+    # commit 2c38108), and the orphaned Parquet file must be removed.
+    ingested = []
+
     def _failing_storage(result):
+        ingested.append((result.dataset_id, result.parquet_path, os.path.exists(result.parquet_path)))
         raise RuntimeError("storage build failed")
 
     monkeypatch.setattr(dataset_manager_module, "select_storage_for_ingestion", _failing_storage)
@@ -296,7 +302,22 @@ def test_upload_registration_failure_removes_parquet(isolated_registry, monkeypa
 
     response = _upload()
 
-    assert response.status_code == 400
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "The dataset could not be saved due to a server error. Please try again later."
+    }
+    assert "storage build failed" not in response.text
+    assert "RuntimeError" not in response.text
+
+    # The failure really happened after a Parquet file was written...
+    assert len(ingested) == 1
+    dataset_id, parquet_path, existed_at_failure = ingested[0]
+    assert existed_at_failure
+
+    # ...and nothing from it survives: no registry entry, no temp
+    # upload file, no Parquet file, no manifest.
     assert isolated_registry.list() == []
     assert _leftover_tmp_files() == before
+    assert not os.path.exists(parquet_path)
     assert glob.glob(os.path.join(dataset_route.PARQUET_STORAGE_ROOT, "*.parquet")) == []
+    assert not os.path.exists(manifest_path_for(dataset_id, dataset_route.PARQUET_STORAGE_ROOT))

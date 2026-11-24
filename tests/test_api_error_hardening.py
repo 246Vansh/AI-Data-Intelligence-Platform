@@ -11,7 +11,10 @@ Verifies, at the FastAPI route level:
     stored or echoed back.
 """
 
+import glob
 import logging
+import os
+import tempfile
 
 import pandas as pd
 import pytest
@@ -90,6 +93,15 @@ def _upload(filename: str = "sample.csv", content: bytes = VALID_CSV):
         "/api/dataset/upload",
         files={"file": (filename, content, "text/csv")},
     )
+
+
+UPLOAD_SERVER_ERROR_DETAIL = (
+    "The dataset could not be saved due to a server error. Please try again later."
+)
+
+
+def _leftover_upload_tmp_files():
+    return set(glob.glob(os.path.join(tempfile.gettempdir(), "dataset_upload_*")))
 
 
 def _assert_not_leaked(response):
@@ -204,15 +216,26 @@ def test_clarification_still_returns_422_with_message(
 def test_upload_unexpected_error_is_generic_and_logged(
     upload_registry, monkeypatch, caplog
 ):
+    # Since the upload error classification in commit 2c38108, only pyarrow's
+    # ArrowInvalid (an unparseable CSV) is a 400. Any other failure is
+    # a server-side error: a generic 500 whose detail never carries the
+    # internal exception message, which is logged server-side instead.
     monkeypatch.setattr("data_engine.connectors.csv_connector.ingest_to_parquet", _raise_secret)
+    tmp_before = _leftover_upload_tmp_files()
 
     with caplog.at_level(logging.ERROR, logger=dataset_route.logger.name):
         response = _upload()
 
-    assert response.status_code == 400
+    assert response.status_code == 500
+    assert response.json() == {"detail": UPLOAD_SERVER_ERROR_DETAIL}
     _assert_not_leaked(response)
+    assert "RuntimeError" not in response.text
     assert SECRET in caplog.text
+
+    # No partial state survives the failure.
     assert upload_registry.list() == []
+    assert _leftover_upload_tmp_files() == tmp_before
+    assert glob.glob(os.path.join(dataset_route.PARQUET_STORAGE_ROOT, "*.parquet")) == []
 
 
 @pytest.mark.parametrize(
