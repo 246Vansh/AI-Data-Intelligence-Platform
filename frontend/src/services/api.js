@@ -67,16 +67,34 @@ export function clearDatasetCache() {
 // Drops every cached / in-flight entry scoped to one dataset_id
 // (the `/dataset/{id}/...` URLs), leaving other datasets' entries
 // untouched.
-export function evictDatasetCache(datasetId) {
+//
+// The default (drop everything) is what deletion, a 404 and session
+// loss need. Re-selecting a dataset passes keepInFlight instead: its
+// cached responses are dropped (so they are re-verified), but requests
+// still in flight stay shared, so selecting A -> B -> A while A's
+// request is still running does not send a second, identical request
+// (on the server each duplicate would hold an analysis-pool worker
+// while waiting for the first to finish). An in-flight request for a
+// deleted dataset still 404s on its own and then evicts everything
+// through cachedGet below.
+export function evictDatasetCache(datasetId, { keepInFlight = false } = {}) {
     const prefix = `/dataset/${datasetId}/`;
+    const stores = keepInFlight ? [cache] : [cache, inFlight];
 
-    for (const store of [cache, inFlight]) {
+    for (const store of stores) {
         for (const url of store.keys()) {
             if (url.startsWith(prefix)) {
                 store.delete(url);
             }
         }
     }
+}
+
+// The cached response for `url`, or undefined. Never sends a request
+// and never joins one in flight - for views that only show data another
+// view already fetched (the context bar's quality pill).
+export function getCachedResponse(url) {
+    return cache.has(url) ? cache.get(url) : undefined;
 }
 
 // Listeners notified when a dataset-scoped request comes back 404,
@@ -111,8 +129,10 @@ export const datasetUrls = {
 
 // `datasetId` is passed only for `/dataset/{id}/...` requests, so a
 // 404 from any other endpoint is never treated as a deleted dataset.
-// `force` skips the cached copy (a user-requested refresh); an
-// identical request already in flight is still shared.
+// `force` skips THIS browser cache only (a user-requested reload); an
+// identical request already in flight is still shared. It does not make
+// the server recompute anything: the backend keeps its own per-dataset
+// result cache (profile, quality, metadata) and answers from it.
 async function cachedGet(url, datasetId, { force = false } = {}) {
     if (force) {
         cache.delete(url);

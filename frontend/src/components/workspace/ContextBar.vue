@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { datasetUrls, getDatasetProfile, getDatasetQuality, onCachedResponse } from "../../services/api";
+import { datasetUrls, getCachedResponse, onCachedResponse } from "../../services/api";
 import Button from "../ui/Button.vue";
 import Icon from "../ui/Icon.vue";
 import Menu from "../ui/Menu.vue";
@@ -16,16 +16,24 @@ import AccountMenu from "./AccountMenu.vue";
 //
 // The selected dataset's vital signs, visible from every workspace tab.
 //
-// No new requests: it calls the same cached functions, with the same
-// URLs, as the Overview and Quality panels (api.js cachedGet shares
-// in-flight requests and responses), so the profile and the quality
-// audit are each fetched once per dataset. Dashboard keys this
-// component by refreshKey, so it reloads when the dataset changes, and
-// it follows refreshes made in those panels via onCachedResponse.
+// This bar sends NO requests of its own. Selecting a dataset must not
+// start expensive server-side builds (they run on the bounded analysis
+// worker pool and hold the dataset's locks, delaying the user's own
+// questions):
 //
-// Values shown are only what those responses (and the dataset list)
-// contain: name, rows, columns, memory, duplicate rows, quality status.
-// A failed request simply leaves its figure out.
+// - name, rows and columns come from the dataset list entry (the
+//   `dataset` prop - the backend's dataset summary), never /profile;
+// - the quality audit only runs when the user opens the Quality
+//   workspace (see useQualityAudit). This bar reads an audit already in
+//   the browser cache; until there is one it shows a neutral
+//   "Not audited" pill that opens Quality.
+//
+// Dashboard keys this component by refreshKey, so it reloads when the
+// dataset changes, and it follows an audit stored later (the Quality
+// panel's load or Refresh) via onCachedResponse.
+//
+// (The memory pill was dropped with /profile: uploads are always
+// disk-backed DuckDB datasets, which report 0 bytes, so it never showed.)
 
 const props = defineProps({
     datasetId: { type: String, default: "" },
@@ -76,41 +84,21 @@ const PLANNED_TOOLS = [
     { icon: "bell", label: "Notifications" },
 ];
 
-const profile = ref(null);
 const quality = ref(null);
 
-async function load() {
-    const requestedId = props.datasetId;
-    if (!requestedId) {
-        return;
+// Cache lookup only - no request (see the header comment).
+onMounted(() => {
+    if (props.datasetId) {
+        quality.value = getCachedResponse(datasetUrls.quality(props.datasetId)) ?? null;
     }
+});
 
-    const [profileResult, qualityResult] = await Promise.allSettled([
-        getDatasetProfile(requestedId),
-        getDatasetQuality(requestedId),
-    ]);
-
-    if (requestedId !== props.datasetId) {
-        return;
-    }
-
-    profile.value = profileResult.status === "fulfilled" ? profileResult.value : null;
-    quality.value = qualityResult.status === "fulfilled" ? qualityResult.value : null;
-}
-
-onMounted(load);
-
-// Follow refreshes made elsewhere (Quality's "Refresh audit", Overview's
-// "Refresh"): when the cache stores a new response for THIS dataset's
-// profile or quality URL, show it. No request is sent from here.
+// Follow an audit stored elsewhere (the Quality panel's load or its
+// Refresh): when the cache stores a new response for THIS dataset's
+// quality URL, show it. No request is sent from here.
 const stopFollowingRefreshes = onCachedResponse((url, data) => {
-    if (!props.datasetId) {
-        return;
-    }
-    if (url === datasetUrls.quality(props.datasetId)) {
+    if (props.datasetId && url === datasetUrls.quality(props.datasetId)) {
         quality.value = data;
-    } else if (url === datasetUrls.profile(props.datasetId)) {
-        profile.value = data;
     }
 });
 
@@ -121,17 +109,8 @@ function formatCount(value) {
     return Number.isFinite(number) ? number.toLocaleString() : null;
 }
 
-const rows = computed(() => formatCount(profile.value?.rows ?? props.dataset?.rows));
-const columns = computed(() => formatCount(profile.value?.columns ?? props.dataset?.columns));
-
-// Same conversion DatasetOverview uses (bytes -> MB, 2 decimals). Shown
-// only when the backend reports a positive size: disk-backed (DuckDB /
-// Parquet) datasets report 0 bytes, and "0.00 MB" as a vital sign would
-// read as an empty dataset.
-const memory = computed(() => {
-    const bytes = Number(profile.value?.memory_usage_bytes);
-    return Number.isFinite(bytes) && bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(2)} MB` : null;
-});
+const rows = computed(() => formatCount(props.dataset?.rows));
+const columns = computed(() => formatCount(props.dataset?.columns));
 
 const qualityStatus = computed(() => quality.value?.status || null);
 
@@ -166,6 +145,10 @@ const qualityPill = computed(() => {
     const tone = quality.value?.status === "invalid" ? "error" : BAND_TONE[scoreBand(qualityScore.value)] || "neutral";
     return QUALITY_PILL[tone] || QUALITY_PILL.neutral;
 });
+
+// No audit in the browser cache yet: a neutral pill that opens Quality,
+// where the audit is requested.
+const NOT_AUDITED_TOOLTIP = "Quality not checked yet. Open Quality to run the audit.";
 </script>
 
 <template>
@@ -210,10 +193,6 @@ const qualityPill = computed(() => {
                     <dt class="order-last">columns</dt>
                     <dd class="tabular-nums">{{ columns }}</dd>
                 </div>
-                <div v-if="memory" :class="PILL">
-                    <dt class="sr-only">Memory</dt>
-                    <dd class="tabular-nums">{{ memory }}</dd>
-                </div>
             </dl>
 
             <!-- Quality: opens the Quality section -->
@@ -223,6 +202,14 @@ const qualityPill = computed(() => {
                     :class="qualityPill.classes" @click="emit('open-quality')">
                     <Icon :name="qualityPill.icon" :size="16" :class="qualityPill.iconClass" />
                     Quality: {{ qualityScore === null ? qualityLabel.split(' · ')[0] : `${qualityScore}%` }}
+                </button>
+            </Tooltip>
+            <Tooltip v-else-if="datasetId" :content="NOT_AUDITED_TOOLTIP">
+                <button type="button" aria-label="Data quality: not audited. Open Quality"
+                    class="ml-0.5 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[10px] border px-3 text-data font-semibold transition-[filter] duration-150 hover:brightness-[0.98]"
+                    :class="QUALITY_PILL.neutral.classes" @click="emit('open-quality')">
+                    <Icon :name="QUALITY_PILL.neutral.icon" :size="16" :class="QUALITY_PILL.neutral.iconClass" />
+                    Quality: Not audited
                 </button>
             </Tooltip>
         </template>
@@ -285,15 +272,17 @@ const qualityPill = computed(() => {
                 <dt class="order-last">columns</dt>
                 <dd class="tabular-nums">{{ columns }}</dd>
             </div>
-            <div v-if="memory" :class="PILL">
-                <dt class="sr-only">Memory</dt>
-                <dd class="tabular-nums">{{ memory }}</dd>
-            </div>
             <button v-if="qualityStatus" type="button"
                 class="inline-flex h-8 items-center gap-1.5 rounded-[10px] border px-3 text-data font-semibold"
                 :class="qualityPill.classes" @click="emit('open-quality')">
                 <Icon :name="qualityPill.icon" :size="16" :class="qualityPill.iconClass" />
                 Quality: {{ qualityScore === null ? qualityLabel.split(' · ')[0] : `${qualityScore}%` }}
+            </button>
+            <button v-else-if="datasetId" type="button" aria-label="Data quality: not audited. Open Quality"
+                class="inline-flex h-8 items-center gap-1.5 rounded-[10px] border px-3 text-data font-semibold"
+                :class="QUALITY_PILL.neutral.classes" @click="emit('open-quality')">
+                <Icon :name="QUALITY_PILL.neutral.icon" :size="16" :class="QUALITY_PILL.neutral.iconClass" />
+                Quality: Not audited
             </button>
         </dl>
     </template>

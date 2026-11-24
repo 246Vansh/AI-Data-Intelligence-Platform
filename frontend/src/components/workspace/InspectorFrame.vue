@@ -62,9 +62,15 @@ watch(frameWidth, (width) => {
         <SplitterGroup direction="horizontal" :auto-save-id="storageKey" :storage="splitterStorage"
             :keyboard-resize-by="1" :class="stacked ? '' : 'min-h-0 flex-1'">
 
+            <!-- Reka sets an inline `overflow: hidden` on every
+                 SplitterPanel, which beats any overflow class on the panel
+                 itself - so the canvas scrolls in this inner wrapper.
+                 Stacked, the page scrolls instead (no fixed height). -->
             <SplitterPanel id="canvas" key="canvas" :order="1" :min-size="45" class="min-w-0"
-                :class="stacked ? '' : 'h-full overflow-y-auto [scrollbar-width:thin]'">
-                <slot />
+                :class="stacked ? '' : 'h-full'">
+                <div data-canvas-scroll :class="stacked ? '' : 'h-full overflow-y-auto [scrollbar-width:thin]'">
+                    <slot />
+                </div>
             </SplitterPanel>
 
             <template v-if="slots.inspector && !stacked && !collapsed && laidOut">

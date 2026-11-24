@@ -275,9 +275,18 @@ watch(selectedDatasetId, (newId, oldId) => {
 
 // Evicts the dataset's cached GETs before the selection changes, so the
 // remounted panels re-verify it with the server instead of reusing
-// responses cached before it may have been deleted elsewhere.
+// responses cached before it may have been deleted elsewhere - the
+// quality audit included: selecting a dataset sends no request any more
+// (every panel loads on demand), so nothing would re-verify a kept
+// audit. Re-opening Quality re-requests it; the server answers from its
+// own cache without recomputing.
+//
+// Requests still in flight stay shared (keepInFlight), so re-selecting a
+// dataset whose metadata/audit is still running never sends a duplicate.
+// Such a request still 404s on its own for a deleted dataset, which
+// evicts everything through api.js.
 function selectDataset(datasetId) {
-    evictDatasetCache(datasetId);
+    evictDatasetCache(datasetId, { keepInFlight: true });
 
     if (analysisMode.value === ANALYSIS_MODES.SINGLE) {
         selectDatasetSingle(datasetId);
@@ -633,7 +642,8 @@ watch(
                 <!-- DATA -->
 
                 <TabPanel value="data" :class="isMobile ? '' : 'h-full'">
-                    <DataPreview :key="`preview-${refreshKey}`" :dataset-id="selectedDatasetId" />
+                    <DataPreview :key="`preview-${refreshKey}`" :dataset-id="selectedDatasetId"
+                        :active="workspaceTab === 'data'" />
                 </TabPanel>
 
                 <!-- SCHEMA -->
@@ -641,7 +651,7 @@ watch(
                 <TabPanel value="schema">
                     <div class="w-full max-w-[1400px] px-4 pb-6 pt-5 sm:px-6 lg:px-9 lg:pt-7">
                         <DatasetMetadata :key="`metadata-${refreshKey}`" :dataset-id="selectedDatasetId"
-                            @question-selected="handleQuestionSelected" />
+                            :active="workspaceTab === 'schema'" @question-selected="handleQuestionSelected" />
                     </div>
                 </TabPanel>
 
@@ -649,7 +659,8 @@ watch(
 
                 <TabPanel value="quality">
                     <div class="w-full max-w-[1400px] px-4 pb-6 pt-5 sm:px-6 lg:px-9 lg:pt-7">
-                        <DataQuality :key="`quality-${refreshKey}`" :dataset-id="selectedDatasetId" />
+                        <DataQuality :key="`quality-${refreshKey}`" :dataset-id="selectedDatasetId"
+                            :active="workspaceTab === 'quality'" />
                     </div>
                 </TabPanel>
 

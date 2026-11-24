@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, h, onBeforeUnmount, ref, watch, nextTick } from "vue";
 
 import AnalyticsInsights from "./AnalyticsInsights.vue";
 import AnalyticsChartFallback from "./AnalyticsChartFallback.vue";
@@ -26,12 +26,12 @@ import Tooltip from "./ui/Tooltip.vue";
 import { useBreakpoints } from "@vueuse/core";
 import { AccordionContent, AccordionHeader, AccordionItem, AccordionRoot, AccordionTrigger } from "reka-ui";
 
+import { useSuggestionMetadata } from "../composables/useSuggestionMetadata";
 import { useUiPreference } from "../composables/useUiPreference";
 import { formatCompactNumber, formatNumber, summarizeResult } from "../services/chartSummary";
 
 import {
     analyzeDataset,
-    getDatasetMetadata,
     getApiErrorMessage,
     isRequestCancelled,
 } from "../services/api";
@@ -74,12 +74,10 @@ const props = defineProps({
 const question = ref("");
 
 const loading = ref(false);
-const metadataLoading = ref(false);
 
 const error = ref(null);
 const errorStatus = ref(null);
 const result = ref(null);
-const metadataError = ref(null);
 
 // Incremented on every analyze() call and whenever the question is
 // replaced/cleared, so a response from a superseded request can never
@@ -172,8 +170,6 @@ const canRetry = computed(() => {
 const hasRows = computed(
     () => (result.value?.data?.rows?.length ?? 0) > 0,
 );
-
-const metadata = ref(null);
 
 // =========================================================
 // DATASET METADATA
@@ -346,54 +342,26 @@ function formatCell(value) {
 }
 
 // =========================================================
-// LOAD DATASET METADATA
+// SUGGESTION METADATA (on demand)
 // =========================================================
+//
+// /metadata feeds only the suggestion chips and "next question" ideas.
+// It is requested ONLY by the "Suggest questions" button - never on
+// selection, focus or submit, because its first build holds the
+// dataset's locks on the server and would delay the user's question.
+// A copy already cached by the Data or Schema tab is reused with no
+// request. See useSuggestionMetadata.
 
-async function loadMetadata() {
-    // Captured so a response that resolves after the user has
-    // already switched datasets can be detected and ignored below,
-    // instead of overwriting state for the newly selected dataset.
-    const requestedDatasetId = props.datasetId;
-
-    // No dataset selected - see DatasetOverview.vue's loadProfile()
-    // for why this must not fall back to the legacy no-id endpoint.
-    if (!requestedDatasetId) {
-        metadata.value = null;
-        metadataError.value = null;
-        metadataLoading.value = false;
-        return;
-    }
-
-    try {
-        metadataLoading.value = true;
-        metadataError.value = null;
-
-        const response = await getDatasetMetadata(requestedDatasetId);
-
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        metadata.value = response;
-    } catch (err) {
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        console.error(
-            "Failed to load dataset metadata:",
-            err,
-        );
-
-        metadataError.value =
-            getApiErrorMessage(err) ||
-            "Unable to load dataset metadata.";
-    } finally {
-        if (requestedDatasetId === props.datasetId) {
-            metadataLoading.value = false;
-        }
-    }
-}
+const {
+    data: metadata,
+    loading: metadataLoading,
+    error: metadataError,
+    showSuggestButton,
+    requestSuggestions,
+} = useSuggestionMetadata({
+    datasetId: () => props.datasetId,
+    analysisMode: () => props.analysisMode,
+});
 
 // =========================================================
 // ANALYZE
@@ -566,14 +534,6 @@ watch(
         immediate: true,
     },
 );
-
-// =========================================================
-// INITIALIZE
-// =========================================================
-
-onMounted(() => {
-    loadMetadata();
-});
 
 // =========================================================
 // WORKSPACE PRESENTATION (Phase 2)
@@ -1031,6 +991,12 @@ watch(planExplanation, (explanation) => {
 
                 <!-- Suggestions (real columns; the chip shows a short label,
                      the full question is what gets filled in) -->
+
+                <button v-if="showSuggestButton" type="button" :disabled="loading" @click="requestSuggestions"
+                    class="flex h-9 w-fit shrink-0 items-center gap-1.5 rounded-full border border-dashed border-[#e3dbca] bg-surface px-4 text-data font-medium text-ink transition-colors duration-150 hover:border-forest/35 hover:bg-forest-soft disabled:opacity-50">
+                    <Icon name="sparkle" :size="14" class="text-forest" />
+                    Suggest questions
+                </button>
 
                 <div v-if="datasetId && exampleQuestions.length"
                     class="-mx-4 flex items-center gap-2.5 overflow-x-auto px-4 [scrollbar-width:none] sm:mx-0 sm:flex-wrap sm:px-0">

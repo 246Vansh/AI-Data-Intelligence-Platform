@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
+import { useDatasetResource } from "../composables/useDatasetResource";
 import { getDatasetMetadata, getApiErrorMessage } from "../services/api";
 import Button from "./ui/Button.vue";
 import EmptyState from "./ui/EmptyState.vue";
@@ -12,64 +13,38 @@ const props = defineProps({
         type: String,
         default: "",
     },
+    // True while the Schema workspace is the visible tab (see Dashboard).
+    active: {
+        type: Boolean,
+        default: false,
+    },
 });
 
-const metadata = ref(null);
-const loading = ref(true);
-const refreshing = ref(false);
-const error = ref(null);
+// Requested the first time the Schema tab is shown for this dataset,
+// not when the panel mounts (it is mounted, hidden, from page load) -
+// see useDatasetResource. /metadata is the same cached request the Data
+// tab and the Analyze suggestions use (api.js cachedGet), so if either
+// already loaded it, opening Schema sends nothing. Refresh bypasses the
+// browser cache only; the server answers from its own cached metadata.
+const metadataResource = useDatasetResource({
+    datasetId: () => props.datasetId,
+    active: () => props.active,
+    fetch: (id, options) => getDatasetMetadata(id, options),
+    errorMessage: (err) => getApiErrorMessage(err) || "Unable to load dataset metadata.",
+});
+
+const metadata = metadataResource.data;
+const refreshing = metadataResource.refreshing;
+const error = metadataResource.error;
+// Also true before the first activation's request starts.
+const loading = computed(() =>
+    Boolean(props.datasetId) && (metadataResource.loading.value || !metadataResource.settled.value),
+);
 const searchQuery = ref("");
 const copiedQuestion = ref(null);
 
-async function loadMetadata(options = {}) {
-    const isRefresh = options.refresh === true;
-
-    // Captured so a response that resolves after the user has
-    // already switched datasets can be detected and ignored below.
-    const requestedDatasetId = props.datasetId;
-
-    // No dataset selected - see DatasetOverview.vue's loadProfile()
-    // for why this must not fall back to the legacy no-id endpoint.
-    if (!requestedDatasetId) {
-        metadata.value = null;
-        error.value = null;
-        loading.value = false;
-        refreshing.value = false;
-        return;
-    }
-
-    try {
-        if (isRefresh) {
-            refreshing.value = true;
-        } else {
-            loading.value = true;
-        }
-
-        error.value = null;
-
-        const response = await getDatasetMetadata(requestedDatasetId, { force: isRefresh });
-
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        metadata.value = response;
-    } catch (err) {
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        console.error("Dataset metadata error:", err);
-
-        error.value =
-            getApiErrorMessage(err) ||
-            "Unable to load dataset metadata.";
-    } finally {
-        if (requestedDatasetId === props.datasetId) {
-            loading.value = false;
-            refreshing.value = false;
-        }
-    }
+function loadMetadata(options = {}) {
+    return metadataResource.load(options);
 }
 
 const columns = computed(() => {
@@ -448,9 +423,6 @@ function missingPercent(column) {
     return `${((missing / rows) * 100).toFixed(1)}%`;
 }
 
-onMounted(() => {
-    loadMetadata();
-});
 </script>
 
 <template>

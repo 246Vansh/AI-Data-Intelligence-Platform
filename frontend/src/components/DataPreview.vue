@@ -1,14 +1,14 @@
 <script setup>
 import { useBreakpoints } from "@vueuse/core";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
+import { useDatasetResource } from "../composables/useDatasetResource";
 import { useUiPreference } from "../composables/useUiPreference";
 import {
     datasetUrls,
     getApiErrorMessage,
     getDatasetMetadata,
     getDatasetPreview,
-    getDatasetProfile,
     onCachedResponse,
 } from "../services/api";
 import { COLUMN_KINDS, describeColumns, kindSummary } from "../services/columnInsight";
@@ -29,12 +29,14 @@ import InspectorFrame from "./workspace/InspectorFrame.vue";
 // inspector beside it (docked from 1024px, collapsible, resizable) or,
 // on phones, a Rows / Columns view with a bottom sheet per column.
 //
-// Data sources are unchanged: the preview request is this component's
-// own (as before). Column details come from the dataset's /profile and
-// /metadata responses, which the Context Bar and the Analyze/Schema
-// panels already request - api.js cachedGet() shares those requests and
-// responses, so this component adds no network traffic of its own for
-// them. It also follows their refreshes (onCachedResponse).
+// Data sources: the preview request is this component's own. Column
+// details come from the dataset's /metadata response - shared through
+// api.js cachedGet() with the Schema tab and the Analyze suggestions -
+// and never from /profile, whose full-row duplicate scan is the most
+// expensive query the app runs and is not shown here. /metadata carries
+// the same per-column figures (type, missing and distinct counts, from
+// the same scan) and the row count; see services/columnInsight.js.
+// Nothing is requested until the Data tab is first shown.
 
 const PREVIEW_ROW_LIMIT = 10;
 // Phone record view: fields shown per record before "Show all".
@@ -45,123 +47,71 @@ const props = defineProps({
         type: String,
         default: "",
     },
+    // True while the Data workspace is the visible tab (see Dashboard).
+    active: {
+        type: Boolean,
+        default: false,
+    },
 });
 
 // ---------------------------------------------------------
-// Preview (unchanged behaviour)
+// Preview + column metadata: requested on first activation
 // ---------------------------------------------------------
+//
+// Both are requested the first time the Data tab is shown for this
+// dataset (see useDatasetResource), not when the panel mounts - the
+// panel is mounted, hidden, from page load. Returning to the tab reuses
+// them. /metadata is the same cached request the Schema tab and the
+// Analyze suggestions use, so whichever runs first is the only one sent.
 
-const dataset = ref(null);
-const loading = ref(true);
-const refreshing = ref(false);
-const error = ref(null);
+const previewResource = useDatasetResource({
+    datasetId: () => props.datasetId,
+    active: () => props.active,
+    fetch: (id, options) => getDatasetPreview(id, options),
+    errorMessage: (err) => getApiErrorMessage(err) || "Unable to load the dataset preview.",
+});
+
+// A failure here only means fewer details in the column inspector; the
+// Schema tab reports metadata errors itself.
+const metadataResource = useDatasetResource({
+    datasetId: () => props.datasetId,
+    active: () => props.active,
+    fetch: (id, options) => getDatasetMetadata(id, options),
+});
+
+const dataset = previewResource.data;
+const error = previewResource.error;
+const refreshing = previewResource.refreshing;
+// Also true before the first activation's request starts, so the
+// panel never renders an empty table for a dataset that has rows.
+const loading = computed(() =>
+    Boolean(props.datasetId) && (previewResource.loading.value || !previewResource.settled.value),
+);
 const searchQuery = ref("");
 
-async function loadPreview(options = {}) {
-    const isRefresh = options.refresh === true;
-
-    // Captured so a response that resolves after the user has
-    // already switched datasets can be detected and ignored below.
-    const requestedDatasetId = props.datasetId;
-
-    // No dataset selected - see DatasetOverview.vue's loadProfile()
-    // for why this must not fall back to the legacy no-id endpoint.
-    if (!requestedDatasetId) {
-        dataset.value = null;
-        error.value = null;
-        loading.value = false;
-        refreshing.value = false;
-        return;
-    }
-
-    try {
-        if (isRefresh) {
-            refreshing.value = true;
-        } else {
-            loading.value = true;
-        }
-
-        error.value = null;
-
-        const response = await getDatasetPreview(requestedDatasetId, { force: isRefresh });
-
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        dataset.value = response;
-    } catch (err) {
-        if (requestedDatasetId !== props.datasetId) {
-            return;
-        }
-
-        console.error("Dataset preview error:", err);
-
-        error.value =
-            getApiErrorMessage(err) ||
-            "Unable to load the dataset preview.";
-    } finally {
-        if (requestedDatasetId === props.datasetId) {
-            loading.value = false;
-            refreshing.value = false;
-        }
-    }
-}
-
-// ---------------------------------------------------------
-// Column context: cached /profile + /metadata (no new requests)
-// ---------------------------------------------------------
-
-const profile = ref(null);
-const metadata = ref(null);
-
-async function loadColumnContext() {
-    const requestedId = props.datasetId;
-    if (!requestedId) {
-        return;
-    }
-
-    const [profileResult, metadataResult] = await Promise.allSettled([
-        getDatasetProfile(requestedId),
-        getDatasetMetadata(requestedId),
-    ]);
-
-    if (requestedId !== props.datasetId) {
-        return;
-    }
-
-    // A failure only means fewer details in the inspector; the
-    // Context Bar / Schema tab report those errors themselves.
-    profile.value = profileResult.status === "fulfilled" ? profileResult.value : null;
-    metadata.value = metadataResult.status === "fulfilled" ? metadataResult.value : null;
-}
+// Follows a newer /metadata response stored elsewhere (the Schema tab's
+// Refresh). No request is sent from here.
+const metadataOverride = ref(null);
+const metadata = computed(() => metadataOverride.value ?? metadataResource.data.value);
 
 const stopFollowingRefreshes = onCachedResponse((url, data) => {
-    if (!props.datasetId) {
-        return;
-    }
-    if (url === datasetUrls.profile(props.datasetId)) {
-        profile.value = data;
-    } else if (url === datasetUrls.metadata(props.datasetId)) {
-        metadata.value = data;
+    if (props.datasetId && url === datasetUrls.metadata(props.datasetId)) {
+        metadataOverride.value = data;
     }
 });
 
 onBeforeUnmount(stopFollowingRefreshes);
 
-// Refresh: the preview, plus the dataset profile the removed Overview
-// panel used to refresh (the Context Bar follows it).
+// Refresh reloads the preview rows from the server (bypassing the
+// browser cache; the preview is a fresh query every time). Column
+// details are left as they are - a dataset never changes after upload -
+// unless they failed to load, in which case they are requested again.
 function refresh() {
-    loadPreview({ refresh: true });
-    if (props.datasetId) {
-        getDatasetProfile(props.datasetId, { force: true }).catch(() => { });
+    previewResource.refresh();
+    if (metadataResource.error.value) {
+        metadataResource.load();
     }
 }
-
-onMounted(() => {
-    loadPreview();
-    loadColumnContext();
-});
 
 // ---------------------------------------------------------
 // Rows and columns
@@ -200,10 +150,10 @@ const filteredRows = computed(() => {
 
 const totalRowCount = computed(() => Math.min(sourceRows.value.length, PREVIEW_ROW_LIMIT));
 
-// The whole dataset's row count, from the profile this panel already
+// The whole dataset's row count, from the /metadata this panel already
 // loads (no extra request); null when unknown.
 const datasetRowCount = computed(() => {
-    const rows = Number(profile.value?.rows);
+    const rows = Number(metadata.value?.row_count);
     return Number.isFinite(rows) && rows > 0 ? rows.toLocaleString() : null;
 });
 const visibleRowCount = computed(() => filteredRows.value.length);
@@ -213,18 +163,17 @@ const columns = computed(() =>
     describeColumns({
         columns: previewColumns.value,
         rows: sourceRows.value.slice(0, PREVIEW_ROW_LIMIT),
-        profile: profile.value,
         metadata: metadata.value,
     }),
 );
 
 const typeSummary = computed(() => kindSummary(columns.value));
 
-// Only when the profile is available: how many columns have any
+// Only when the column metadata is available: how many columns have any
 // missing value across the whole dataset (a count of columns, taken
-// from the profile's own missing counts).
+// from the backend's own missing counts).
 const columnsWithMissing = computed(() => {
-    if (!profile.value) return null;
+    if (!metadata.value) return null;
     const known = columns.value.filter((column) => column.missingCount !== null);
     return known.length ? known.filter((column) => column.missingCount > 0).length : null;
 });
@@ -368,6 +317,7 @@ function recordFields(number) {
                             </button>
                         </div>
                         <Button v-if="dataset" icon="refresh" :loading="refreshing" class="h-10 rounded-[10px] bg-surface px-4"
+                            title="Reload the preview rows from the server"
                             @click="refresh">
                             Refresh
                         </Button>
@@ -396,7 +346,7 @@ function recordFields(number) {
                             <p class="text-data font-semibold text-danger">Unable to load preview</p>
                             <p class="mt-0.5 break-words text-data text-ink">{{ error }}</p>
                         </div>
-                        <Button size="sm" icon="refresh" @click="loadPreview()">Retry</Button>
+                        <Button size="sm" icon="refresh" @click="previewResource.load()">Retry</Button>
                     </div>
                 </div>
 
@@ -585,6 +535,7 @@ function recordFields(number) {
                     <span class="text-ink-muted"> · first {{ PREVIEW_ROW_LIMIT }} rows</span>
                 </p>
                 <Button v-if="dataset" size="sm" icon="refresh" :loading="refreshing" aria-label="Refresh preview"
+                    title="Reload the preview rows from the server"
                     @click="refresh">
                     <span class="sr-only">Refresh</span>
                 </Button>
@@ -612,7 +563,7 @@ function recordFields(number) {
             <div v-else-if="error" role="alert" class="flex flex-col items-start gap-2 rounded-control bg-danger-soft px-4 py-3">
                 <p class="text-data font-semibold text-danger">Unable to load preview</p>
                 <p class="break-words text-data text-ink">{{ error }}</p>
-                <Button size="sm" icon="refresh" @click="loadPreview()">Retry</Button>
+                <Button size="sm" icon="refresh" @click="previewResource.load()">Retry</Button>
             </div>
 
             <EmptyState v-else-if="!dataset" icon="table" title="No dataset selected"

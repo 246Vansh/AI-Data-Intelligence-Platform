@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
-import { getDatasetQuality, getApiErrorMessage } from "../services/api";
+import { ref, computed } from "vue";
+import { useQualityAudit } from "../composables/useQualityAudit";
 import { healthScore as computeHealthScore, scoreBand, severityCounts } from "../services/qualityScore";
 import Button from "./ui/Button.vue";
 import EmptyState from "./ui/EmptyState.vue";
@@ -14,11 +14,24 @@ const props = defineProps({
         type: String,
         default: null,
     },
+    // True while the Quality workspace is the visible tab. The panel is
+    // mounted (hidden) from page load, so the audit is requested on the
+    // first activation instead of on mount - see useQualityAudit.
+    active: {
+        type: Boolean,
+        default: false,
+    },
 });
 
-const loading = ref(true);
-const error = ref(null);
-const qualityData = ref(null);
+const {
+    data: qualityData,
+    loading,
+    error,
+    refresh: refreshQuality,
+} = useQualityAudit({
+    datasetId: () => props.datasetId,
+    active: () => props.active,
+});
 // Severity filter for the issue list (as before the redesign).
 const activeFilter = ref("all");
 
@@ -89,33 +102,12 @@ function severityStyle(issue) {
     return SEVERITY_STYLE[issue.severity] || SEVERITY_STYLE.info;
 }
 
-// Phase 6: `refresh` bypasses the client cache (api.js cachedGet), the
-// same pattern as DatasetOverview/DataPreview/DatasetMetadata. Without
-// it the Refresh button re-read the cached response and never re-ran
-// the audit. Initial load is unchanged (cached).
-async function fetchQuality(options = {}) {
-    loading.value = true;
-    error.value = null;
-
-    try {
-        const data = await getDatasetQuality(props.datasetId, {
-            force: options.refresh === true,
-        });
-        qualityData.value = data;
-    } catch (err) {
-        error.value = getApiErrorMessage(err);
-    } finally {
-        loading.value = false;
-    }
-}
-
-onMounted(() => {
-    if (props.datasetId) {
-        fetchQuality();
-    } else {
-        loading.value = false;
-    }
-});
+// Refresh (also the retry after an error) bypasses the BROWSER cache
+// (api.js cachedGet) and asks the server again, the same pattern as
+// DatasetOverview/DataPreview/DatasetMetadata. It does not re-run the
+// audit: the server keeps each dataset's audit in its own cache and
+// returns that. A dataset never changes after upload, so the cached
+// audit stays valid.
 </script>
 
 <template>
@@ -128,7 +120,8 @@ onMounted(() => {
                 <p class="mt-1 text-body text-ink-muted">Automated checks for integrity, consistency and distribution.</p>
             </div>
             <Button v-if="datasetId" icon="refresh" :loading="loading" class="h-10 rounded-[10px] bg-surface px-4"
-                @click="fetchQuality({ refresh: true })">
+                title="Reload the audit results from the server"
+                @click="refreshQuality">
                 Refresh
             </Button>
         </header>
@@ -140,7 +133,9 @@ onMounted(() => {
         </div>
 
         <!-- Loading -->
-        <div v-else-if="loading" role="status"
+        <!-- Also before the first activation's request has started, so
+             the results below never render without an audit. -->
+        <div v-else-if="loading || (!qualityData && !error)" role="status"
             class="flex h-48 items-center justify-center gap-3 rounded-[16px] border border-[#e6decd] bg-surface text-data text-ink-muted">
             <span aria-hidden="true" class="h-5 w-5 animate-spin rounded-full border-2 border-forest/20 border-t-forest"></span>
             Auditing dataset quality…

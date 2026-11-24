@@ -3,11 +3,13 @@
 // =========================================================
 //
 // Pure helpers that merge what the app ALREADY has for a dataset - the
-// preview payload, the cached /profile response and the cached
-// /metadata response - into one per-column description for the Data
-// workspace's column inspector. Nothing here computes a new statistic:
-// every figure is copied from a backend response, or left null when
-// that response is missing or does not carry it.
+// preview payload and the cached /metadata response (and a /profile
+// response, if a caller has one) - into one per-column description for
+// the Data workspace's column inspector. Nothing here computes a new
+// statistic: every figure is copied from a backend response, or left
+// null when that response is missing or does not carry it. The one
+// derived figure, the missing percentage, uses the backend profile's
+// own formula on backend counts (see missingPercentage).
 //
 // Backend vocabulary (data_engine): profile/metadata `data_type` is
 // one of "integer" | "float" | "numeric" | "datetime" | "boolean" |
@@ -59,11 +61,36 @@ function finiteOrNull(value) {
     return value !== null && value !== undefined && value !== "" && Number.isFinite(number) ? number : null;
 }
 
+// The backend profile's own formula (data_engine/profiling/*:
+// round(missing_count / row_count * 100, 2), 0 for an empty dataset),
+// applied to the /metadata figures, which come from the same per-column
+// scan. Lets the Data workspace show missing percentages without
+// requesting /profile (whose full-row duplicate scan is the most
+// expensive query the app runs and is not shown anywhere).
+export function missingPercentage(missingCount, totalRows) {
+    const missing = finiteOrNull(missingCount);
+    const rows = finiteOrNull(totalRows);
+    if (missing === null || rows === null) {
+        return null;
+    }
+    if (rows <= 0) {
+        return 0;
+    }
+    return Math.round((missing / rows) * 100 * 100) / 100;
+}
+
 // One entry per preview column, in preview order.
+//
+// The Data workspace passes `metadata` only. `profile` is still
+// accepted, and wins where it has a figure, so a caller that has one
+// gets exactly the backend's numbers - but nothing requires it: every
+// field it supplied (data_type, missing_count, unique_values, the row
+// count) is also in /metadata, computed by the same per-column scan,
+// and missing_percentage is derived with the profile's own formula.
 export function describeColumns({ columns = [], rows = [], profile = null, metadata = null } = {}) {
     const details = profile?.column_details || {};
     const meta = metadata?.columns || {};
-    const totalRows = finiteOrNull(profile?.rows);
+    const totalRows = finiteOrNull(profile?.rows ?? metadata?.row_count);
 
     return columns.map((name) => {
         const detail = details[name] || {};
@@ -71,6 +98,7 @@ export function describeColumns({ columns = [], rows = [], profile = null, metad
         const dataType = detail.data_type ?? info.data_type ?? null;
         const role = info.role ?? null;
         const previewValues = rows.map((row) => row?.[name]);
+        const missingCount = finiteOrNull(detail.missing_count ?? profile?.missing_values?.[name] ?? info.missing_count);
 
         return {
             name,
@@ -78,8 +106,8 @@ export function describeColumns({ columns = [], rows = [], profile = null, metad
             dataType,
             role,
             totalRows,
-            missingCount: finiteOrNull(detail.missing_count ?? profile?.missing_values?.[name] ?? info.missing_count),
-            missingPercentage: finiteOrNull(detail.missing_percentage),
+            missingCount,
+            missingPercentage: finiteOrNull(detail.missing_percentage) ?? missingPercentage(missingCount, totalRows),
             uniqueValues: finiteOrNull(detail.unique_values ?? info.unique_values),
             sampleValues: Array.isArray(info.sample_values) ? info.sample_values : [],
             previewMissing: previewValues.filter(isMissing).length,
