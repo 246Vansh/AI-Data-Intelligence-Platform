@@ -163,3 +163,37 @@ def test_recovery_preserves_dataset_id_and_created_at(tmp_path):
     recovered = fresh_registry.get("ds-fixed-id")
     assert recovered.dataset_id == original.dataset_id == "ds-fixed-id"
     assert recovered.created_at == original.created_at
+
+
+# R2 (backend performance audit) ---------------------------------
+
+
+def test_recovered_and_uploaded_datasets_get_duckdb_resource_settings(tmp_path, monkeypatch):
+    # Restore and upload both open storage through
+    # DuckDBStorage.from_parquet, so both must carry the same DuckDB
+    # settings - including a valid environment override.
+    monkeypatch.setenv("DUCKDB_THREADS", "1")
+    monkeypatch.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "3GiB")
+
+    registry = DatasetRegistry()
+    manager = DatasetManager(registry=registry)
+    original = manager.register_ingested_dataset(
+        _ingest(tmp_path, dataset_id="ds-r2"), filename="d.csv", owner_id="dev-user"
+    )
+
+    fresh_registry = DatasetRegistry()
+    _recover_datasets(storage_root=str(tmp_path), registry=fresh_registry)
+    recovered = fresh_registry.get("ds-r2")
+
+    def setting(storage, name):
+        return storage.execute_one(f"SELECT current_setting('{name}')")[0]
+
+    try:
+        for storage in (original.storage, recovered.storage):
+            assert setting(storage, "threads") == 1
+            assert setting(storage, "max_temp_directory_size") == "3.0 GiB"
+            assert setting(storage, "enable_external_file_cache") is True
+            assert setting(storage, "preserve_insertion_order") is True
+    finally:
+        original.storage.close()
+        recovered.storage.close()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -11,6 +13,8 @@ import duckdb
 import pandas as pd
 
 from data_engine.storage.base import DatasetStorage, StorageClosedError
+
+logger = logging.getLogger(__name__)
 
 # Step 30: every DuckDBStorage connection gets an explicit memory_limit
 # and a private, per-instance temp_directory, so a heavy full-table
@@ -43,6 +47,114 @@ def _read_duckdb_memory_limit() -> str:
 
 def _read_duckdb_temp_root() -> str:
     return os.environ.get("DUCKDB_TEMP_ROOT") or tempfile.gettempdir()
+
+
+# R2 (backend performance audit): every instance is its own DuckDB
+# database, so DuckDB's defaults apply per dataset - 4 threads each
+# (2 concurrent heavy scans = 8 threads on a 4-core host, plus 3 idle
+# worker threads held by every registered dataset), and a spill cap of
+# 90% of free disk each (two scans could together claim far more disk
+# than exists). With ANALYSIS_JOB_WORKERS=2, 2 threads per instance
+# matches 4 cores and gives each thread 512MB of the 1GB memory_limit;
+# a 10GiB cap per instance bounds worst-case concurrent spill to
+# ~20GiB and turns a runaway spill into a failed query instead of a
+# full disk. Overridable via DUCKDB_THREADS /
+# DUCKDB_MAX_TEMP_DIRECTORY_SIZE. An invalid override logs a warning
+# and falls back to the default - it never stops a dataset opening.
+#
+# The cap covers DuckDB's own spill files only, not files a query
+# writes itself (e.g. the duplicate-row COPY partitions below).
+# enable_external_file_cache and preserve_insertion_order are left at
+# DuckDB's defaults on purpose: the cache holds only file metadata for
+# local Parquet, and preview / metadata samples rely on insertion order
+# (`LIMIT` without `ORDER BY`).
+_DEFAULT_DUCKDB_THREADS = 2
+# Overrides above this are rejected: with 2 analysis workers, more than
+# the host's 4 cores per instance only oversubscribes the CPU.
+_MAX_DUCKDB_THREADS = 4
+_DEFAULT_DUCKDB_MAX_TEMP_DIRECTORY_SIZE = "10GiB"
+
+# Canonical spelling for every size unit DuckDB accepts (case-
+# insensitive). KB/MB/GB/TB are decimal in DuckDB; KiB..TiB binary.
+_SIZE_UNITS = {
+    "b": ("B", 1),
+    "kb": ("KB", 1000),
+    "mb": ("MB", 1000**2),
+    "gb": ("GB", 1000**3),
+    "tb": ("TB", 1000**4),
+    "kib": ("KiB", 1024),
+    "mib": ("MiB", 1024**2),
+    "gib": ("GiB", 1024**3),
+    "tib": ("TiB", 1024**4),
+}
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*$")
+
+
+def _read_duckdb_threads() -> int:
+    raw = os.environ.get("DUCKDB_THREADS")
+
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_DUCKDB_THREADS
+
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+
+    if not 1 <= value <= _MAX_DUCKDB_THREADS:
+        logger.warning(
+            "Ignoring invalid DUCKDB_THREADS=%r (must be an integer from 1 "
+            "to %d); using %d.",
+            raw,
+            _MAX_DUCKDB_THREADS,
+            _DEFAULT_DUCKDB_THREADS,
+        )
+        return _DEFAULT_DUCKDB_THREADS
+
+    return value
+
+
+def _normalize_size(raw: str) -> str | None:
+    """
+    `raw` as a DuckDB size string (e.g. "10 gib" -> "10GiB"), or None
+    when it is not a number plus a known unit, or is under one byte. A
+    zero cap would make DuckDB disable spilling entirely, so it is
+    rejected here and never reaches DuckDB.
+    """
+    match = _SIZE_RE.match(raw)
+    if match is None:
+        return None
+
+    number, unit = match.groups()
+    canonical = _SIZE_UNITS.get(unit.lower())
+    if canonical is None:
+        return None
+
+    unit_name, multiplier = canonical
+    if float(number) * multiplier < 1:
+        return None
+
+    return f"{number}{unit_name}"
+
+
+def _read_duckdb_max_temp_directory_size() -> str:
+    raw = os.environ.get("DUCKDB_MAX_TEMP_DIRECTORY_SIZE")
+
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_DUCKDB_MAX_TEMP_DIRECTORY_SIZE
+
+    normalized = _normalize_size(raw)
+
+    if normalized is None:
+        logger.warning(
+            "Ignoring invalid DUCKDB_MAX_TEMP_DIRECTORY_SIZE=%r (must be a "
+            "positive size such as '10GiB'); using %s.",
+            raw,
+            _DEFAULT_DUCKDB_MAX_TEMP_DIRECTORY_SIZE,
+        )
+        return _DEFAULT_DUCKDB_MAX_TEMP_DIRECTORY_SIZE
+
+    return normalized
 
 
 # Step 38: DuckDBStorage.distinct_row_count() computes the exact
@@ -106,15 +218,31 @@ def _configure_connection_and_temp_dir(
     unique ``table_name`` every instance already uses, so it can never
     collide with another instance's spill files. Returns the created
     directory's path so the caller can remove it again in close().
+
+    R2: also sets ``threads`` and ``max_temp_directory_size`` (see the
+    defaults above). If any setting fails, the directory created here
+    is removed before the error propagates - the caller never learned
+    its path, so it could not clean it up. Closing the connection
+    stays the caller's job.
     """
     memory_limit = str(_read_duckdb_memory_limit()).replace("'", "''")
+    threads = _read_duckdb_threads()
+    max_temp_directory_size = _read_duckdb_max_temp_directory_size()
     temp_dir = os.path.join(_read_duckdb_temp_root(), f"duckdb_spill_{table_name}")
     os.makedirs(temp_dir, exist_ok=True)
 
     escaped_temp_dir = temp_dir.replace("'", "''")
 
-    connection.execute(f"PRAGMA memory_limit='{memory_limit}'")
-    connection.execute(f"PRAGMA temp_directory='{escaped_temp_dir}'")
+    try:
+        connection.execute(f"PRAGMA memory_limit='{memory_limit}'")
+        connection.execute(f"PRAGMA temp_directory='{escaped_temp_dir}'")
+        # Both values are validated above: an int >= 1, and a size
+        # built only from digits and a known unit - nothing to escape.
+        connection.execute(f"SET threads={threads}")
+        connection.execute(f"SET max_temp_directory_size='{max_temp_directory_size}'")
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
     return temp_dir
 
@@ -262,17 +390,30 @@ class DuckDBStorage(DatasetStorage):
         # independent layer of isolation.
         self._table_name = f"dataset_{uuid.uuid4().hex}"
 
-        # Step 30: explicit memory_limit + private spill directory,
-        # applied before any table exists on this connection.
-        self._temp_dir = _configure_connection_and_temp_dir(
-            self._connection, self._table_name
-        )
+        # None until the helper returns: if the helper itself fails it
+        # has already removed its own directory.
+        self._temp_dir = None
 
-        self._connection.register("_source_df", dataframe)
-        self._connection.execute(
-            f'CREATE TABLE "{self._table_name}" AS SELECT * FROM _source_df'
-        )
-        self._connection.unregister("_source_df")
+        try:
+            # Step 30 / R2: explicit memory_limit, threads, spill cap
+            # and private spill directory, applied before any table
+            # exists on this connection.
+            self._temp_dir = _configure_connection_and_temp_dir(
+                self._connection, self._table_name
+            )
+
+            self._connection.register("_source_df", dataframe)
+            self._connection.execute(
+                f'CREATE TABLE "{self._table_name}" AS SELECT * FROM _source_df'
+            )
+            self._connection.unregister("_source_df")
+        except Exception:
+            # Same cleanup as from_parquet(): the instance never reaches
+            # a caller, so nobody else would close it.
+            self._connection.close()
+            if self._temp_dir is not None:
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+            raise
 
         self._columns = list(dataframe.columns)
 
@@ -336,20 +477,25 @@ class DuckDBStorage(DatasetStorage):
         instance._table_name = f"dataset_{uuid.uuid4().hex}"
         instance._parquet_path = parquet_path
 
-        # Step 30: explicit memory_limit + private spill directory,
-        # applied before the view exists on this connection - same
-        # helper, same guarantees as the DataFrame-backed constructor.
-        instance._temp_dir = _configure_connection_and_temp_dir(
-            instance._connection, instance._table_name
-        )
-
         # DuckDB DDL (CREATE VIEW) cannot be a prepared statement, so
         # the path can't be passed as a bound parameter here the way
         # the old CREATE TABLE ... AS SELECT statement did - it is
         # escaped and inlined into the view definition instead.
         escaped_parquet_path = str(parquet_path).replace("'", "''")
 
+        # None until the helper returns: if the helper itself fails it
+        # has already removed its own directory.
+        instance._temp_dir = None
+
         try:
+            # Step 30 / R2: explicit memory_limit, threads, spill cap
+            # and private spill directory, applied before the view
+            # exists on this connection - same helper, same guarantees
+            # as the DataFrame-backed constructor.
+            instance._temp_dir = _configure_connection_and_temp_dir(
+                instance._connection, instance._table_name
+            )
+
             instance._connection.execute(
                 f'CREATE VIEW "{instance._table_name}" AS '
                 f"SELECT * FROM read_parquet('{escaped_parquet_path}')"
@@ -369,7 +515,8 @@ class DuckDBStorage(DatasetStorage):
             # Not yet returned to anyone, so nobody else will close it:
             # release the connection and spill directory here.
             instance._connection.close()
-            shutil.rmtree(instance._temp_dir, ignore_errors=True)
+            if instance._temp_dir is not None:
+                shutil.rmtree(instance._temp_dir, ignore_errors=True)
             raise
 
         instance._row_count = row_count

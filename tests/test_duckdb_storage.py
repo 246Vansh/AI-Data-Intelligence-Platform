@@ -814,6 +814,271 @@ def test_close_is_idempotent_and_safe_even_if_temp_directory_already_gone():
     assert not os.path.exists(temp_dir)
 
 
+# =========================================================
+# R2: DUCKDB RESOURCE CONFIGURATION (threads +
+# max_temp_directory_size)
+#
+# Every instance is its own DuckDB database, so these settings apply
+# per dataset. Pins: the defaults land on both constructors, valid env
+# overrides apply, invalid ones log a warning and fall back (never
+# blocking a dataset from opening), a zero cap never reaches DuckDB,
+# the cache / insertion-order defaults stay untouched, and a failed
+# configuration in from_parquet leaks neither connection nor spill dir.
+# =========================================================
+
+
+_R2_ENV_VARS = ("DUCKDB_THREADS", "DUCKDB_MAX_TEMP_DIRECTORY_SIZE")
+
+
+@pytest.fixture
+def r2_env(monkeypatch):
+    for name in _R2_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def _expected_size_setting(value: str) -> str:
+    """What DuckDB itself normalizes a max_temp_directory_size to."""
+    probe = duckdb.connect(":memory:")
+    try:
+        probe.execute(f"SET max_temp_directory_size='{value}'")
+        return probe.execute(
+            "SELECT current_setting('max_temp_directory_size')"
+        ).fetchone()[0]
+    finally:
+        probe.close()
+
+
+def _settings(storage) -> dict:
+    names = (
+        "threads",
+        "max_temp_directory_size",
+        "memory_limit",
+        "enable_external_file_cache",
+        "preserve_insertion_order",
+    )
+    return {
+        name: storage.connection.execute(f"SELECT current_setting('{name}')").fetchone()[0]
+        for name in names
+    }
+
+
+def _parquet_storage(tmp_path, name="r2.parquet"):
+    path = tmp_path / name
+    _make_dataframe().to_parquet(path)
+    return DuckDBStorage.from_parquet(str(path))
+
+
+class _RecordingConnection:
+    """Delegates to a real connection, recording every execute() SQL."""
+
+    def __init__(self, real, log):
+        self._real = real
+        self._log = log
+
+    def execute(self, query, *args, **kwargs):
+        self._log.append(query)
+        return self._real.execute(query, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def recorded_connections(monkeypatch):
+    """Every connection DuckDBStorage opens, plus the SQL run on it."""
+    real_connect = duckdb.connect
+    record = {"connections": [], "sql": []}
+
+    def connect(*args, **kwargs):
+        real = real_connect(*args, **kwargs)
+        record["connections"].append(real)
+        return _RecordingConnection(real, record["sql"])
+
+    monkeypatch.setattr(duckdb_storage_module.duckdb, "connect", connect)
+    return record
+
+
+@pytest.mark.parametrize("constructor", ["dataframe", "parquet"])
+def test_r2_defaults_apply_to_both_constructors(r2_env, tmp_path, constructor):
+    storage = (
+        DuckDBStorage(_make_dataframe())
+        if constructor == "dataframe"
+        else _parquet_storage(tmp_path)
+    )
+    try:
+        settings = _settings(storage)
+
+        assert settings["threads"] == duckdb_storage_module._DEFAULT_DUCKDB_THREADS == 2
+        assert settings["max_temp_directory_size"] == _expected_size_setting("10GiB")
+        # Unchanged by R2.
+        assert settings["memory_limit"] == _expected_memory_limit_setting("1GB")
+    finally:
+        storage.close()
+
+
+def test_r2_leaves_file_cache_and_insertion_order_enabled(r2_env, tmp_path):
+    storage = _parquet_storage(tmp_path)
+    try:
+        settings = _settings(storage)
+        assert settings["enable_external_file_cache"] is True
+        assert settings["preserve_insertion_order"] is True
+    finally:
+        storage.close()
+
+
+def test_r2_valid_environment_overrides_apply(r2_env, tmp_path):
+    r2_env.setenv("DUCKDB_THREADS", "1")
+    r2_env.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", " 512 mib ")
+
+    storage = _parquet_storage(tmp_path)
+    try:
+        settings = _settings(storage)
+        assert settings["threads"] == 1
+        assert settings["max_temp_directory_size"] == _expected_size_setting("512MiB")
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize(
+    "raw, normalized",
+    [
+        ("10GiB", "10GiB"),
+        ("10 gib", "10GiB"),
+        ("1.5GiB", "1.5GiB"),
+        ("500MB", "500MB"),
+        ("1TB", "1TB"),
+        ("2048B", "2048B"),
+    ],
+)
+def test_r2_size_normalization_accepts_duckdb_size_values(raw, normalized):
+    assert duckdb_storage_module._normalize_size(raw) == normalized
+    # And DuckDB accepts exactly what is passed on.
+    _expected_size_setting(normalized)
+
+
+@pytest.mark.parametrize("bad", ["0", "-3", "abc", "2.5", "1e2"])
+def test_r2_invalid_threads_fall_back_with_warning(r2_env, tmp_path, caplog, bad):
+    r2_env.setenv("DUCKDB_THREADS", bad)
+
+    with caplog.at_level("WARNING", logger=duckdb_storage_module.__name__):
+        storage = _parquet_storage(tmp_path)
+
+    try:
+        assert _settings(storage)["threads"] == 2
+        assert "DUCKDB_THREADS" in caplog.text
+        assert repr(bad) in caplog.text
+    finally:
+        storage.close()
+
+
+def test_r2_threads_upper_bound_4_is_accepted(r2_env, tmp_path, caplog):
+    r2_env.setenv("DUCKDB_THREADS", "4")
+
+    with caplog.at_level("WARNING", logger=duckdb_storage_module.__name__):
+        storage = _parquet_storage(tmp_path)
+
+    try:
+        assert _settings(storage)["threads"] == 4
+        assert "DUCKDB_THREADS" not in caplog.text
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("out_of_range", ["5", "64", "-1"])
+def test_r2_threads_outside_1_to_4_fall_back_with_warning(
+    r2_env, tmp_path, caplog, out_of_range
+):
+    r2_env.setenv("DUCKDB_THREADS", out_of_range)
+
+    with caplog.at_level("WARNING", logger=duckdb_storage_module.__name__):
+        storage = _parquet_storage(tmp_path)
+
+    try:
+        assert _settings(storage)["threads"] == 2
+        assert f"DUCKDB_THREADS={out_of_range!r}" in caplog.text
+        assert "1 to 4" in caplog.text
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0GB", "0", "0B", "0.0GiB", "0.5B", "-1GB", "abc", "10", "10XB", "1e3MB", "GiB"],
+)
+def test_r2_invalid_temp_size_falls_back_with_warning(r2_env, tmp_path, caplog, bad):
+    r2_env.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", bad)
+
+    with caplog.at_level("WARNING", logger=duckdb_storage_module.__name__):
+        storage = _parquet_storage(tmp_path)
+
+    try:
+        assert _settings(storage)["max_temp_directory_size"] == _expected_size_setting("10GiB")
+        assert "DUCKDB_MAX_TEMP_DIRECTORY_SIZE" in caplog.text
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("zero", ["0GB", "0GiB", "0", "0B", "0.0TB"])
+def test_r2_zero_temp_cap_never_reaches_duckdb(r2_env, tmp_path, recorded_connections, zero):
+    # A zero cap would make DuckDB disable spilling entirely.
+    r2_env.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", zero)
+
+    storage = _parquet_storage(tmp_path)
+    try:
+        cap_statements = [
+            sql for sql in recorded_connections["sql"] if "max_temp_directory_size" in sql
+        ]
+        assert cap_statements == ["SET max_temp_directory_size='10GiB'"]
+    finally:
+        storage.close()
+
+
+def test_r2_each_dataset_connection_keeps_its_own_settings(r2_env, tmp_path):
+    r2_env.setenv("DUCKDB_THREADS", "1")
+    r2_env.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "1GiB")
+    storage_a = _parquet_storage(tmp_path, "a.parquet")
+
+    r2_env.setenv("DUCKDB_THREADS", "3")
+    r2_env.setenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "2GiB")
+    storage_b = _parquet_storage(tmp_path, "b.parquet")
+
+    try:
+        assert _settings(storage_a)["threads"] == 1
+        assert _settings(storage_b)["threads"] == 3
+        assert _settings(storage_a)["max_temp_directory_size"] == _expected_size_setting("1GiB")
+        assert _settings(storage_b)["max_temp_directory_size"] == _expected_size_setting("2GiB")
+    finally:
+        storage_a.close()
+        storage_b.close()
+
+
+def test_r2_configuration_failure_leaks_no_connection_or_spill_dir(
+    r2_env, tmp_path, monkeypatch, recorded_connections
+):
+    spill_root = tmp_path / "spill"
+    spill_root.mkdir()
+    r2_env.setenv("DUCKDB_TEMP_ROOT", str(spill_root))
+
+    parquet_path = tmp_path / "ok.parquet"
+    _make_dataframe().to_parquet(parquet_path)
+
+    # memory_limit is not validated by R2, so an unparseable value is a
+    # real way for configuration to fail inside DuckDB.
+    monkeypatch.setattr(
+        duckdb_storage_module, "_read_duckdb_memory_limit", lambda: "not-a-size"
+    )
+
+    with pytest.raises(duckdb.Error):
+        DuckDBStorage.from_parquet(str(parquet_path))
+
+    assert os.listdir(spill_root) == []
+
+    [connection] = recorded_connections["connections"]
+    with pytest.raises(duckdb.ConnectionException):
+        connection.execute("SELECT 1")
+
+
 def test_duplicate_row_sql_is_unchanged_by_memory_governance():
     """
     Step 30 must not touch the duplicate-row detection query itself -
@@ -979,3 +1244,26 @@ def test_distinct_row_count_no_longer_runs_a_single_full_table_select_distinct()
     assert "PARTITION_BY" in source
     assert "hash(" in source
     assert "SELECT DISTINCT *" in source  # still exact, just per-partition
+
+
+def test_r2_dataframe_constructor_configuration_failure_leaks_nothing(
+    r2_env, tmp_path, monkeypatch, recorded_connections
+):
+    spill_root = tmp_path / "spill"
+    spill_root.mkdir()
+    r2_env.setenv("DUCKDB_TEMP_ROOT", str(spill_root))
+
+    # Same real DuckDB-side configuration failure as the from_parquet
+    # test above.
+    monkeypatch.setattr(
+        duckdb_storage_module, "_read_duckdb_memory_limit", lambda: "not-a-size"
+    )
+
+    with pytest.raises(duckdb.Error):
+        DuckDBStorage(_make_dataframe())
+
+    assert os.listdir(spill_root) == []
+
+    [connection] = recorded_connections["connections"]
+    with pytest.raises(duckdb.ConnectionException):
+        connection.execute("SELECT 1")
