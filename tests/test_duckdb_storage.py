@@ -506,9 +506,12 @@ def test_duckdb_storage_instances_are_isolated():
 
     # Writing/reading through one instance never becomes visible on
     # the other.
+    # (Counted with a live query: row_count() is fixed at construction,
+    # since datasets never change after upload - only this diagnostic
+    # write through the raw connection can change a table.)
     storage_a.connection.execute(f'DELETE FROM "{storage_a.table_name}"')
-    assert storage_a.row_count() == 0
-    assert storage_b.row_count() == 3
+    assert storage_a.execute_one(f'SELECT COUNT(*) FROM "{storage_a.table_name}"')[0] == 0
+    assert storage_b.execute_one(f'SELECT COUNT(*) FROM "{storage_b.table_name}"')[0] == 3
 
     # Instance A cannot see instance B's table at all.
     with pytest.raises(Exception):

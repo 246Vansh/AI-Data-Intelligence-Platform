@@ -164,11 +164,13 @@ class DuckDBStorage(DatasetStorage):
 
     Thread-safety: every instance also owns a private ``RLock``
     guarding its connection. Every method that touches the connection
-    (``relation``, ``to_dataframe``, ``row_count``, ``column_count``,
-    ``column_names``, ``schema_info``, ``execute_df``, ``execute_one``,
-    the ``connection`` property) and ``close()`` itself all acquire it
-    before doing anything. That makes ``close()`` and any in-flight
-    read mutually exclusive on *this* instance: a read already holding
+    (``relation``, ``to_dataframe``, ``schema_info``, ``execute_df``,
+    ``execute_one``, the ``connection`` property) and ``close()`` itself
+    all acquire it before doing anything. ``row_count``,
+    ``column_count`` and ``column_names`` return values fixed at
+    construction and never touch the connection, so they don't wait for
+    the lock (``row_count`` still raises once closed). That makes
+    ``close()`` and any in-flight read mutually exclusive on *this* instance: a read already holding
     the lock keeps a concurrent ``close()`` waiting until it finishes,
     and once ``close()`` has run, any later read finds ``_closed`` set
     and raises before it ever touches the (by then invalid) connection,
@@ -274,8 +276,13 @@ class DuckDBStorage(DatasetStorage):
 
         self._columns = list(dataframe.columns)
 
+        # Fixed at construction - see row_count().
+        self._row_count = len(dataframe)
+
     @classmethod
-    def from_parquet(cls, parquet_path: str) -> "DuckDBStorage":
+    def from_parquet(
+        cls, parquet_path: str, row_count: int | None = None
+    ) -> "DuckDBStorage":
         """
         Build a DuckDBStorage instance as a zero-copy VIEW over a
         Parquet file on disk, via DuckDB's own native ``read_parquet``
@@ -298,7 +305,19 @@ class DuckDBStorage(DatasetStorage):
         consumer (execute_plan_duckdb, profiling, to_dataframe/
         row_count/column_count/column_names/schema_info) keeps working
         unmodified: DuckDB queries a view exactly like a table.
+
+        ``row_count``: the file's row count when the caller already
+        knows it (ingestion counts every row it writes - see
+        ``select_storage_for_ingestion``). When omitted (startup
+        recovery), it is counted once here, from the Parquet footer,
+        before the instance is shared with any other thread. Either
+        way ``row_count()`` never queries or locks afterwards.
         """
+        if row_count is not None and (
+            isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0
+        ):
+            raise ValueError("row_count must be a non-negative integer.")
+
         instance = cls.__new__(cls)
 
         instance._lock = threading.RLock()
@@ -329,12 +348,31 @@ class DuckDBStorage(DatasetStorage):
         # the old CREATE TABLE ... AS SELECT statement did - it is
         # escaped and inlined into the view definition instead.
         escaped_parquet_path = str(parquet_path).replace("'", "''")
-        instance._connection.execute(
-            f'CREATE VIEW "{instance._table_name}" AS '
-            f"SELECT * FROM read_parquet('{escaped_parquet_path}')"
-        )
 
-        instance._columns = list(instance._connection.table(instance._table_name).columns)
+        try:
+            instance._connection.execute(
+                f'CREATE VIEW "{instance._table_name}" AS '
+                f"SELECT * FROM read_parquet('{escaped_parquet_path}')"
+            )
+
+            instance._columns = list(
+                instance._connection.table(instance._table_name).columns
+            )
+
+            if row_count is None:
+                row_count = int(
+                    instance._connection.execute(
+                        f'SELECT COUNT(*) FROM "{instance._table_name}"'
+                    ).fetchone()[0]
+                )
+        except Exception:
+            # Not yet returned to anyone, so nobody else will close it:
+            # release the connection and spill directory here.
+            instance._connection.close()
+            shutil.rmtree(instance._temp_dir, ignore_errors=True)
+            raise
+
+        instance._row_count = row_count
 
         return instance
 
@@ -644,9 +682,18 @@ class DuckDBStorage(DatasetStorage):
             return self._connection.table(self._table_name).to_df()
 
     def row_count(self) -> int:
-        with self._lock:
-            self._raise_if_closed()
-            return self._connection.table(self._table_name).shape[0]
+        """
+        The dataset's row count, fixed when this instance was built
+        (dataset contents never change after upload).
+
+        Deliberately does NOT take the instance lock: it never touches
+        the connection, so it must not wait behind a long scan holding
+        that lock - dataset listing and upload responses read it. It
+        still raises StorageClosedError once closed, like every other
+        read, so a deleted dataset is reported as gone.
+        """
+        self._raise_if_closed()
+        return self._row_count
 
     def column_count(self) -> int:
         return len(self._columns)

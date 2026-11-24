@@ -20,9 +20,10 @@ def select_storage_for_ingestion(result: IngestionResult) -> DatasetStorage:
 
     Always DuckDBStorage today, built straight from the Parquet file
     via ``DuckDBStorage.from_parquet`` - no Pandas DataFrame of the
-    full dataset is created to get there.
+    full dataset is created to get there. Ingestion already counted
+    every row it wrote, so that count is reused rather than re-queried.
     """
-    return DuckDBStorage.from_parquet(result.parquet_path)
+    return DuckDBStorage.from_parquet(result.parquet_path, row_count=result.row_count)
 
 
 def storage_reference_for_ingestion(result: IngestionResult) -> StorageReference:
