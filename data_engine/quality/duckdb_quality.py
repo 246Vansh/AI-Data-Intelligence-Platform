@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 from typing import Any
 
 from data_engine.dataset import Dataset
@@ -29,6 +30,16 @@ _NUMERIC_TYPE_TOKENS = (
 )
 
 
+# R3: number of numeric columns whose exact Q1/Q3 are computed per
+# quartile query. Exact quantile_cont buffers every non-null value of
+# its column for the whole scan, so one query spanning every numeric
+# column holds all of those buffers at once; batching caps how many are
+# live together, mirroring DuckDBStorage._COLUMN_STATISTICS_BATCH_SIZE
+# (data_engine/storage/duckdb_storage.py). Results are unchanged - each
+# column's quantile state depends only on that column's own values.
+_QUANTILE_BATCH_SIZE = 4
+
+
 def _is_numeric_duckdb_type(duckdb_type: str) -> bool:
     upper = str(duckdb_type).upper()
 
@@ -40,6 +51,101 @@ def _is_numeric_duckdb_type(duckdb_type: str) -> bool:
 
 def _quote_identifier(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+# DECIMAL quartiles come back from DuckDB as decimal.Decimal (same
+# scale as the column), so their IQR bounds are computed in exact
+# Decimal arithmetic rather than via float. Python's default Decimal
+# context rounds to 28 significant digits, fewer than DECIMAL(38, s)
+# can hold, hence a local context with ample precision: q - 1.5 * iqr
+# needs at most ~40 significant digits for any DECIMAL(38, s) input.
+_DECIMAL_BOUND_PRECISION = 80
+_DECIMAL_IQR_MULTIPLIER = Decimal("1.5")
+
+
+def _iqr_bounds(q1: Any, q3: Any) -> tuple[Any, Any] | None:
+    """
+    Return (q1 - 1.5 * iqr, q3 + 1.5 * iqr), or None when the IQR is 0.
+
+    Float quartiles (every non-DECIMAL numeric type) use exactly the
+    original float arithmetic; Decimal quartiles (DECIMAL columns) use
+    exact Decimal arithmetic.
+
+    Decimal bounds are then snapped onto the column's own scale -
+    lower rounded up, upper rounded down. Every stored value v is a
+    multiple of 10**-scale, so ``v < L`` iff ``v < ceil(L)`` and
+    ``v > U`` iff ``v > floor(U)``: the outlier count is identical,
+    while the bound keeps the column's scale instead of the extra
+    digit `1.5 *` adds, so it fits DECIMAL(38, scale) whenever it is
+    within that type's range (see _sql_numeric_literal()).
+    DuckDB returns DECIMAL quartiles at the column's scale, so the
+    quartiles' own exponent is that scale.
+    """
+    if isinstance(q1, Decimal) or isinstance(q3, Decimal):
+        with localcontext() as context:
+            context.prec = _DECIMAL_BOUND_PRECISION
+            q1, q3 = Decimal(q1), Decimal(q3)
+            iqr = q3 - q1
+
+            if iqr == 0:
+                return None
+
+            spread = _DECIMAL_IQR_MULTIPLIER * iqr
+            quantum = Decimal(1).scaleb(
+                min(q1.as_tuple().exponent, q3.as_tuple().exponent)
+            )
+            return (
+                (q1 - spread).quantize(quantum, rounding=ROUND_CEILING),
+                (q3 + spread).quantize(quantum, rounding=ROUND_FLOOR),
+            )
+
+    iqr = q3 - q1
+
+    if iqr == 0:
+        return None
+
+    return (q1 - 1.5 * iqr, q3 + 1.5 * iqr)
+
+
+_DUCKDB_MAX_DECIMAL_WIDTH = 38
+
+
+def _sql_numeric_literal(value: Any) -> str:
+    """
+    Render a bound as a SQL numeric expression; non-Decimal values via
+    repr() exactly as before.
+
+    A Decimal bound that fits DECIMAL(38, scale) - |value| <
+    10**(38 - scale) - is emitted as an explicit
+    ``CAST('<fixed-point text>' AS DECIMAL(38, scale))``. A bare
+    literal isn't enough: DuckDB 1.5.5 types an unadorned decimal
+    literal by its digit count *including a leading zero*, so a
+    38-digit fraction such as 0.50000000000000000000000000000000000001
+    (39 digits counting the "0") parses as DOUBLE, and comparing a
+    DECIMAL(38,38) column against it can misclassify values (an actual
+    outlier was missed). Comparing DECIMAL(p, scale) against
+    DECIMAL(38, scale) stays exact.
+
+    A bound outside DECIMAL(38, scale)'s range can't be cast (DuckDB
+    raises ConversionException), so it keeps the plain fixed-point
+    literal (never exponent form), which DuckDB may type as HUGEINT or
+    DOUBLE. That comparison still classifies every stored value
+    correctly: such a bound lies strictly beyond every storable value,
+    and rounding to DOUBLE is monotonic, so no stored value can compare
+    past it.
+    """
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        scale = max(0, -value.as_tuple().exponent)
+
+        if scale <= _DUCKDB_MAX_DECIMAL_WIDTH and value.copy_abs() < Decimal(1).scaleb(
+            _DUCKDB_MAX_DECIMAL_WIDTH - scale
+        ):
+            return f"CAST('{text}' AS DECIMAL({_DUCKDB_MAX_DECIMAL_WIDTH},{scale}))"
+
+        return text
+
+    return repr(value)
 
 
 # =========================================================
@@ -170,9 +276,17 @@ class DuckDBQualityEngine(QualityEngine):
         column_statistics = storage.column_statistics()
 
         # -----------------------------------------------------
-        # IQR outlier bounds - one aggregate query computing Q1/Q3
-        # for every numeric column at once, then a second aggregate
-        # counting values outside the derived bounds.
+        # IQR outlier bounds - exact Q1/Q3 computed in batches of
+        # _QUANTILE_BATCH_SIZE numeric columns (one aggregate query per
+        # batch), then one aggregate counting values outside the
+        # derived bounds for every bounded column at once.
+        #
+        # R3: each column uses the list form
+        # quantile_cont(col, [0.25, 0.75]) - one exact aggregate state
+        # per column instead of two - verified on DuckDB 1.5.5 to
+        # return values (and types) identical to the two scalar
+        # quantile_cont(col, 0.25)/quantile_cont(col, 0.75) calls,
+        # including NULL for an all-null column.
         # -----------------------------------------------------
 
         numeric_columns = [
@@ -182,39 +296,44 @@ class DuckDBQualityEngine(QualityEngine):
         outlier_counts: dict[str, int] = {}
 
         if numeric_columns:
-            quantile_parts = []
+            bounds: dict[str, tuple[Any, Any]] = {}
+            quartiles: list[tuple[str, Any, Any]] = []
 
-            for index, column in enumerate(numeric_columns):
-                quoted = _quote_identifier(column)
-                quantile_parts.append(f"quantile_cont({quoted}, 0.25) AS q1_{index}")
-                quantile_parts.append(f"quantile_cont({quoted}, 0.75) AS q3_{index}")
+            for batch_start in range(0, len(numeric_columns), _QUANTILE_BATCH_SIZE):
+                batch = numeric_columns[batch_start : batch_start + _QUANTILE_BATCH_SIZE]
+                quantile_parts = [
+                    f"quantile_cont({_quote_identifier(column)}, [0.25, 0.75]) AS q_{offset}"
+                    for offset, column in enumerate(batch)
+                ]
 
-            quantile_row = storage.execute_one(
-                f"SELECT {', '.join(quantile_parts)} FROM {table}"
-            )
+                quantile_row = storage.execute_one(
+                    f"SELECT {', '.join(quantile_parts)} FROM {table}"
+                )
 
-            bounds: dict[str, tuple[float, float]] = {}
+                for column, pair in zip(batch, quantile_row):
+                    q1, q3 = (None, None) if pair is None else pair
+                    quartiles.append((column, q1, q3))
 
-            for index, column in enumerate(numeric_columns):
-                q1, q3 = quantile_row[index * 2], quantile_row[index * 2 + 1]
-
+            for column, q1, q3 in quartiles:
                 if q1 is None or q3 is None:
                     continue
 
-                iqr = q3 - q1
+                column_bounds = _iqr_bounds(q1, q3)
 
-                if iqr == 0:
+                if column_bounds is None:
                     continue
 
-                bounds[column] = (q1 - 1.5 * iqr, q3 + 1.5 * iqr)
+                bounds[column] = column_bounds
 
             if bounds:
                 outlier_parts = []
 
                 for column, (lower, upper) in bounds.items():
                     quoted = _quote_identifier(column)
+                    lower_sql = _sql_numeric_literal(lower)
+                    upper_sql = _sql_numeric_literal(upper)
                     outlier_parts.append(
-                        f"COUNT(*) FILTER (WHERE {quoted} < {lower!r} OR {quoted} > {upper!r}) "
+                        f"COUNT(*) FILTER (WHERE {quoted} < {lower_sql} OR {quoted} > {upper_sql}) "
                         f"AS {_quote_identifier('outliers_' + column)}"
                     )
 
