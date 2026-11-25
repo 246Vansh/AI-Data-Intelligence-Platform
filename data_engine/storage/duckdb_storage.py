@@ -4,8 +4,10 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -13,6 +15,12 @@ import duckdb
 import pandas as pd
 
 from data_engine.storage.base import DatasetStorage, StorageClosedError
+from data_engine.storage.deadline import QueryTimeoutError, remaining_seconds
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 logger = logging.getLogger(__name__)
 
@@ -208,9 +216,224 @@ def _read_distinct_row_partition_count() -> int:
     return value
 
 
+# =========================================================
+# R6: spill-directory ownership and startup cleanup
+#
+# Every instance's private spill directory is
+# <DUCKDB_TEMP_ROOT>/duckdb_spill_dataset_<32 hex>. close() removes it,
+# but a process that exits without closing its datasets (crash, kill,
+# tests, scripts) leaves it behind - thousands had accumulated on the
+# development host. To make abandoned directories distinguishable from
+# live ones - including live ones owned by *another* process sharing
+# the same temp root - each instance holds an OS-level exclusive lock
+# on <dir>/.owner.lock for its whole lifetime. The OS releases that
+# lock when the owning process dies, however it dies, so "lock can be
+# acquired" reliably means "no live owner".
+# =========================================================
+
+_SPILL_DIR_NAME_RE = re.compile(r"^duckdb_spill_dataset_[0-9a-f]{32}$")
+_SPILL_OWNER_LOCK_NAME = ".owner.lock"
+
+# Never touch a directory modified this recently, whatever its lock
+# state: closes the window between another process creating its
+# directory and taking the owner lock.
+_SPILL_CLEANUP_MIN_AGE_SECONDS = 5 * 60
+
+# Directories created before owner locks existed carry no lock file, so
+# liveness can't be proven; they're removed only once nothing in them
+# has changed for this long. Deleting an idle live one would still be
+# harmless (DuckDB recreates its temp directory on demand, verified on
+# 1.5.5), this age is an extra margin.
+_LEGACY_SPILL_MIN_AGE_SECONDS = 24 * 60 * 60
+
+if os.name == "nt":
+    _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _lock_fd_nonblocking(fd: int) -> None:
+    """Take an exclusive, non-blocking OS lock on fd; OSError if held."""
+    if os.name == "nt":
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_fd(fd: int) -> None:
+    if os.name == "nt":
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _acquire_spill_owner_lock(temp_dir: str) -> int:
+    """
+    Create/open <temp_dir>/.owner.lock and hold an exclusive lock on it.
+    Returns the open file descriptor; OSError if another handle (this
+    process or another) already holds it.
+    """
+    fd = os.open(
+        os.path.join(temp_dir, _SPILL_OWNER_LOCK_NAME),
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+    )
+    try:
+        _lock_fd_nonblocking(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _release_spill_owner_lock(fd: int | None) -> None:
+    """Best-effort unlock + close; never raises."""
+    if fd is None:
+        return
+    try:
+        _unlock_fd(fd)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _remove_spill_dir(temp_dir: str | None, owner_lock_fd: int | None) -> None:
+    """
+    Release the owner lock, then remove the directory. The lock must be
+    released first: Windows can't delete a file with an open handle.
+    """
+    _release_spill_owner_lock(owner_lock_fd)
+    if temp_dir is not None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _is_link_or_reparse_point(entry: os.DirEntry) -> bool:
+    if entry.is_symlink():
+        return True
+    if os.name == "nt":
+        try:
+            attributes = entry.stat(follow_symlinks=False).st_file_attributes
+        except OSError:
+            return True
+        return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _scan_spill_dir(path: str) -> tuple[bool, float] | None:
+    """
+    Walk a candidate spill directory without following links. Returns
+    (has_owner_lock_file, newest_mtime_seen), or None if anything in it
+    is a symlink/junction/reparse point or can't be inspected - such a
+    directory is never deleted.
+    """
+    newest = os.lstat(path).st_mtime
+    has_lock = False
+    pending = [path]
+
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if _is_link_or_reparse_point(entry):
+                    return None
+                info = entry.stat(follow_symlinks=False)
+                newest = max(newest, info.st_mtime)
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                elif not entry.is_file(follow_symlinks=False):
+                    return None
+                elif current == path and entry.name == _SPILL_OWNER_LOCK_NAME:
+                    has_lock = True
+
+    return has_lock, newest
+
+
+def cleanup_abandoned_spill_directories(
+    root: str | None = None,
+    *,
+    min_age_seconds: float = _SPILL_CLEANUP_MIN_AGE_SECONDS,
+    legacy_min_age_seconds: float = _LEGACY_SPILL_MIN_AGE_SECONDS,
+    now: float | None = None,
+) -> dict[str, int]:
+    """
+    R6: remove spill directories whose owner is gone. Never raises.
+
+    Only direct children of ``root`` (default: the configured
+    DUCKDB_TEMP_ROOT) named exactly ``duckdb_spill_dataset_<32 hex>``
+    that are real directories are considered - nothing else in the temp
+    root (other applications' files, uploads, Parquet datasets, which
+    live elsewhere anyway) can ever match. A candidate is skipped when:
+
+      - it, or anything inside it, is a symlink/junction/reparse point;
+      - it was modified within ``min_age_seconds``;
+      - it has an owner lock file that is currently held (a live
+        DuckDBStorage in this or any other process);
+      - it has no owner lock file (pre-R6 directory) and something in
+        it changed within ``legacy_min_age_seconds``.
+
+    Returns counts of removed / skipped / failed directories.
+    """
+    root = root or _read_duckdb_temp_root()
+    now = time.time() if now is None else now
+    counts = {"removed": 0, "skipped_active": 0, "skipped_recent": 0, "skipped_unsafe": 0, "failed": 0}
+
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        logger.warning("Spill cleanup skipped: cannot list %r.", root, exc_info=True)
+        return counts
+
+    for entry in entries:
+        if not _SPILL_DIR_NAME_RE.match(entry.name):
+            continue
+
+        try:
+            if _is_link_or_reparse_point(entry) or not entry.is_dir(follow_symlinks=False):
+                counts["skipped_unsafe"] += 1
+                continue
+
+            if now - entry.stat(follow_symlinks=False).st_mtime < min_age_seconds:
+                counts["skipped_recent"] += 1
+                continue
+
+            scanned = _scan_spill_dir(entry.path)
+
+            if scanned is None:
+                counts["skipped_unsafe"] += 1
+                continue
+
+            has_lock, newest_mtime = scanned
+
+            if has_lock:
+                try:
+                    fd = _acquire_spill_owner_lock(entry.path)
+                except OSError:
+                    counts["skipped_active"] += 1
+                    continue
+                # Owner is gone. Release before deleting (Windows).
+                _release_spill_owner_lock(fd)
+            elif now - newest_mtime < legacy_min_age_seconds:
+                counts["skipped_recent"] += 1
+                continue
+
+            shutil.rmtree(entry.path)
+            counts["removed"] += 1
+
+        except OSError:
+            counts["failed"] += 1
+            logger.debug("Could not clean spill directory %r.", entry.path, exc_info=True)
+
+    if any(counts.values()):
+        logger.info("Spill directory cleanup in %r: %s", root, counts)
+
+    return counts
+
+
 def _configure_connection_and_temp_dir(
     connection: duckdb.DuckDBPyConnection, table_name: str
-) -> str:
+) -> tuple[str, int]:
     """
     Apply the configured memory_limit and a private, per-instance
     temp_directory to a freshly opened connection, before any table or
@@ -224,6 +447,11 @@ def _configure_connection_and_temp_dir(
     is removed before the error propagates - the caller never learned
     its path, so it could not clean it up. Closing the connection
     stays the caller's job.
+
+    R6: also takes the directory's owner lock (see
+    cleanup_abandoned_spill_directories) and returns its file
+    descriptor with the path; the caller releases it via
+    _remove_spill_dir().
     """
     memory_limit = str(_read_duckdb_memory_limit()).replace("'", "''")
     threads = _read_duckdb_threads()
@@ -232,8 +460,10 @@ def _configure_connection_and_temp_dir(
     os.makedirs(temp_dir, exist_ok=True)
 
     escaped_temp_dir = temp_dir.replace("'", "''")
+    owner_lock_fd = None
 
     try:
+        owner_lock_fd = _acquire_spill_owner_lock(temp_dir)
         connection.execute(f"PRAGMA memory_limit='{memory_limit}'")
         connection.execute(f"PRAGMA temp_directory='{escaped_temp_dir}'")
         # Both values are validated above: an int >= 1, and a size
@@ -241,10 +471,10 @@ def _configure_connection_and_temp_dir(
         connection.execute(f"SET threads={threads}")
         connection.execute(f"SET max_temp_directory_size='{max_temp_directory_size}'")
     except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        _remove_spill_dir(temp_dir, owner_lock_fd)
         raise
 
-    return temp_dir
+    return temp_dir, owner_lock_fd
 
 
 def _quote_identifier(name: str) -> str:
@@ -367,6 +597,7 @@ class DuckDBStorage(DatasetStorage):
 
         self._lock = threading.RLock()
         self._closed = False
+        self._init_query_interruption()
 
         # Step 33: memoized exact distinct-row-count, shared between
         # profiling and quality - see distinct_row_count() below.
@@ -391,14 +622,15 @@ class DuckDBStorage(DatasetStorage):
         self._table_name = f"dataset_{uuid.uuid4().hex}"
 
         # None until the helper returns: if the helper itself fails it
-        # has already removed its own directory.
+        # has already removed its own directory and released its lock.
         self._temp_dir = None
+        self._spill_owner_lock_fd = None
 
         try:
             # Step 30 / R2: explicit memory_limit, threads, spill cap
             # and private spill directory, applied before any table
             # exists on this connection.
-            self._temp_dir = _configure_connection_and_temp_dir(
+            self._temp_dir, self._spill_owner_lock_fd = _configure_connection_and_temp_dir(
                 self._connection, self._table_name
             )
 
@@ -411,8 +643,7 @@ class DuckDBStorage(DatasetStorage):
             # Same cleanup as from_parquet(): the instance never reaches
             # a caller, so nobody else would close it.
             self._connection.close()
-            if self._temp_dir is not None:
-                shutil.rmtree(self._temp_dir, ignore_errors=True)
+            _remove_spill_dir(self._temp_dir, self._spill_owner_lock_fd)
             raise
 
         self._columns = list(dataframe.columns)
@@ -463,6 +694,7 @@ class DuckDBStorage(DatasetStorage):
 
         instance._lock = threading.RLock()
         instance._closed = False
+        instance._init_query_interruption()
 
         # Step 33: memoized exact distinct-row-count, shared between
         # profiling and quality - see distinct_row_count() below.
@@ -484,15 +716,19 @@ class DuckDBStorage(DatasetStorage):
         escaped_parquet_path = str(parquet_path).replace("'", "''")
 
         # None until the helper returns: if the helper itself fails it
-        # has already removed its own directory.
+        # has already removed its own directory and released its lock.
         instance._temp_dir = None
+        instance._spill_owner_lock_fd = None
 
         try:
             # Step 30 / R2: explicit memory_limit, threads, spill cap
             # and private spill directory, applied before the view
             # exists on this connection - same helper, same guarantees
             # as the DataFrame-backed constructor.
-            instance._temp_dir = _configure_connection_and_temp_dir(
+            (
+                instance._temp_dir,
+                instance._spill_owner_lock_fd,
+            ) = _configure_connection_and_temp_dir(
                 instance._connection, instance._table_name
             )
 
@@ -515,8 +751,7 @@ class DuckDBStorage(DatasetStorage):
             # Not yet returned to anyone, so nobody else will close it:
             # release the connection and spill directory here.
             instance._connection.close()
-            if instance._temp_dir is not None:
-                shutil.rmtree(instance._temp_dir, ignore_errors=True)
+            _remove_spill_dir(instance._temp_dir, instance._spill_owner_lock_fd)
             raise
 
         instance._row_count = row_count
@@ -528,6 +763,118 @@ class DuckDBStorage(DatasetStorage):
             raise StorageClosedError(
                 "This DuckDBStorage instance has already been closed."
             )
+
+    # -----------------------------------------------------
+    # R4: interruptible query execution
+    #
+    # Two things may stop a running query on this connection:
+    #   - the active query deadline (data_engine.storage.deadline),
+    #     enforced by a per-query timer;
+    #   - close(), so deleting a dataset or shutting down never waits
+    #     for a long scan to finish on its own.
+    # Both go through _interrupt_if_active(), which interrupts only
+    # while the *same* query is still registered as active: the token
+    # is cleared under _interrupt_guard before the instance lock is
+    # released, so a late timer can never interrupt a later, unrelated
+    # query on this connection. Other instances (other datasets) have
+    # their own connections and are never touched. A query is reported
+    # as timed out/closed only after DuckDB itself raised
+    # InterruptException for it, i.e. after it actually stopped; the
+    # connection stays usable afterwards (verified on DuckDB 1.5.5).
+    # -----------------------------------------------------
+
+    def _init_query_interruption(self) -> None:
+        self._interrupt_guard = threading.Lock()
+        self._active_query_token: object | None = None
+        self._active_query_reasons: set | None = None
+        self._closing = False
+
+    # DuckDB drops an interrupt that arrives before the query has
+    # actually started executing (the flag is reset at query start), and
+    # a query is registered as active a moment before execute() begins.
+    # So interrupts are re-issued at this interval until the query they
+    # target is no longer active; re-interrupting is harmless.
+    _INTERRUPT_RETRY_SECONDS = 0.05
+
+    def _interrupt_if_active(self, token: object, reasons: set, reason: str) -> bool:
+        """Interrupt only if `token`'s query is still the active one."""
+        with self._interrupt_guard:
+            if self._active_query_token is not token:
+                return False
+            reasons.add(reason)
+            self._connection.interrupt()
+            return True
+
+    def _interrupt_until_stopped(self, token: object, reasons: set, reason: str) -> None:
+        """Deadline timer body: keep interrupting until the query ends."""
+        while self._interrupt_if_active(token, reasons, reason):
+            time.sleep(self._INTERRUPT_RETRY_SECONDS)
+
+    def _interrupt_active_query_for_close(self) -> None:
+        with self._interrupt_guard:
+            if self._active_query_token is not None:
+                self._active_query_reasons.add("closing")
+                self._connection.interrupt()
+
+    def _run_interruptible(self, run):
+        """
+        Run ``run()`` (which executes on self._connection). Caller must
+        hold self._lock and have checked _raise_if_closed().
+        """
+        if self._closing:
+            raise StorageClosedError(
+                "This DuckDBStorage instance is being closed."
+            )
+
+        remaining = remaining_seconds()
+
+        if remaining is not None and remaining <= 0:
+            raise QueryTimeoutError("The operation exceeded its time limit.")
+
+        token = object()
+        reasons: set[str] = set()
+
+        with self._interrupt_guard:
+            self._active_query_token = token
+            # close() may have started between the check above and
+            # registering this query; it then found nothing to
+            # interrupt, so refuse to start instead.
+            if self._closing:
+                self._active_query_token = None
+                raise StorageClosedError(
+                    "This DuckDBStorage instance is being closed."
+                )
+            self._active_query_reasons = reasons
+
+        timer = None
+
+        if remaining is not None:
+            timer = threading.Timer(
+                remaining,
+                self._interrupt_until_stopped,
+                args=(token, reasons, "deadline"),
+            )
+            timer.daemon = True
+            timer.start()
+
+        try:
+            return run()
+        except duckdb.InterruptException as exc:
+            if "closing" in reasons:
+                raise StorageClosedError(
+                    "This DuckDBStorage instance was closed while a query was running."
+                ) from exc
+            if "deadline" in reasons:
+                raise QueryTimeoutError(
+                    "The query exceeded its time limit and was stopped."
+                ) from exc
+            raise
+        finally:
+            with self._interrupt_guard:
+                self._active_query_token = None
+                self._active_query_reasons = None
+            if timer is not None:
+                timer.cancel()
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
@@ -574,8 +921,12 @@ class DuckDBStorage(DatasetStorage):
         with self._lock:
             self._raise_if_closed()
             if params is None:
-                return self._connection.execute(query).fetchdf()
-            return self._connection.execute(query, params).fetchdf()
+                return self._run_interruptible(
+                    lambda: self._connection.execute(query).fetchdf()
+                )
+            return self._run_interruptible(
+                lambda: self._connection.execute(query, params).fetchdf()
+            )
 
     def execute_one(self, query: str, params: list | None = None):
         """
@@ -587,8 +938,12 @@ class DuckDBStorage(DatasetStorage):
         with self._lock:
             self._raise_if_closed()
             if params is None:
-                return self._connection.execute(query).fetchone()
-            return self._connection.execute(query, params).fetchone()
+                return self._run_interruptible(
+                    lambda: self._connection.execute(query).fetchone()
+                )
+            return self._run_interruptible(
+                lambda: self._connection.execute(query, params).fetchone()
+            )
 
     def distinct_row_count(self, compute) -> int:
         """
@@ -826,7 +1181,9 @@ class DuckDBStorage(DatasetStorage):
         """
         with self._lock:
             self._raise_if_closed()
-            return self._connection.table(self._table_name).to_df()
+            return self._run_interruptible(
+                lambda: self._connection.table(self._table_name).to_df()
+            )
 
     def row_count(self) -> int:
         """
@@ -859,6 +1216,15 @@ class DuckDBStorage(DatasetStorage):
         returns, every subsequent read on this instance raises instead
         of touching the closed connection.
 
+        R4/R6: a query running through execute_df()/execute_one()/
+        to_dataframe() is interrupted first instead of being waited
+        out, so deleting a dataset or shutting down never blocks for
+        the length of a long scan. That query's caller gets
+        StorageClosedError - the same "dataset is gone" error it would
+        get had the close landed before its query - and any further
+        query in the same multi-query operation is refused the same
+        way. Only this instance's own connection is interrupted.
+
         Step 30: DuckDB itself deletes its own spill files from
         temp_directory when the connection closes, but leaves the
         directory itself behind - so this also removes the private
@@ -867,11 +1233,28 @@ class DuckDBStorage(DatasetStorage):
         (e.g. if the directory was already removed by something else)
         rather than turning close() into a new failure point.
         """
-        with self._lock:
+        with self._interrupt_guard:
+            if not self._closed:
+                self._closing = True
+
+        # Interrupt whatever query holds the lock - repeatedly, since an
+        # interrupt landing just before a query starts is dropped by
+        # DuckDB - until the lock is free. Once _closing is set no new
+        # query starts, so this converges as soon as the current one
+        # (or the multi-query operation around it) unwinds.
+        while True:
+            self._interrupt_active_query_for_close()
+            if self._lock.acquire(timeout=self._INTERRUPT_RETRY_SECONDS):
+                break
+
+        try:
             if self._closed:
                 return
 
             self._connection.close()
             self._closed = True
 
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            _remove_spill_dir(self._temp_dir, self._spill_owner_lock_fd)
+            self._spill_owner_lock_fd = None
+        finally:
+            self._lock.release()

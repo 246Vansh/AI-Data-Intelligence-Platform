@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(ENV_FILE, override=False)
 
+import backend.jobs as jobs
 from backend.auth.config import load_auth_settings
 from backend.auth.routes import router as auth_router
 from backend.cors import ALLOWED_ORIGINS
@@ -48,6 +50,7 @@ from data_engine.dataset_manifest import (
 )
 from data_engine.dataset_registry import DatasetRegistry, dataset_registry
 from data_engine.storage import UnsupportedStorageTypeError, open_storage
+from data_engine.storage.duckdb_storage import cleanup_abandoned_spill_directories
 
 
 logger = logging.getLogger(__name__)
@@ -167,11 +170,87 @@ def _cleanup_expired_sessions() -> None:
         logger.warning("Startup session cleanup skipped: %s", type(exc).__name__)
 
 
+def _cleanup_spill_directories() -> None:
+    """
+    R6: remove DuckDB spill directories abandoned by processes that
+    exited without closing their datasets. Runs before recovery opens
+    any storage. Only directories whose owner is provably gone (or
+    pre-R6 ones idle for a day) are touched - see
+    cleanup_abandoned_spill_directories. Set DUCKDB_SPILL_CLEANUP=0 to
+    skip. Never raises and never fails startup.
+    """
+
+    if os.environ.get("DUCKDB_SPILL_CLEANUP", "1").strip() == "0":
+        return
+
+    try:
+        cleanup_abandoned_spill_directories()
+    except Exception as exc:  # noqa: BLE001 - must not block startup
+        logger.warning("Startup spill cleanup skipped: %s", type(exc).__name__)
+
+
+def _read_shutdown_wait_seconds() -> float:
+    try:
+        value = float(os.environ.get("ANALYSIS_SHUTDOWN_TIMEOUT_SECONDS", "10"))
+    except ValueError:
+        return 10.0
+    return value if value >= 0 else 10.0
+
+
+def _shutdown_analysis_and_storage(
+    manager: "jobs.JobManager | None" = None,
+    registry: DatasetRegistry | None = None,
+    wait_seconds: float | None = None,
+) -> None:
+    """
+    R6: orderly shutdown. Never raises.
+
+      1. Stop accepting analysis work and cancel everything queued.
+      2. Close every registered dataset's storage - interrupting any
+         DuckDB query still running, so those tasks end promptly with
+         a "dataset closed" error. Files on disk are never touched;
+         the next startup recovers them.
+      3. Wait (bounded) for running tasks to finish. Work that can't be
+         interrupted (an in-flight AI request) may outlive the wait;
+         that is logged, not waited on forever.
+    """
+
+    # Resolved at call time (not as defaults) so tests can substitute
+    # either module attribute.
+    manager = manager if manager is not None else jobs.job_manager
+    registry = registry if registry is not None else dataset_registry
+    wait_seconds = _read_shutdown_wait_seconds() if wait_seconds is None else wait_seconds
+
+    try:
+        manager.begin_shutdown()
+    except Exception:
+        logger.exception("Failed to stop the analysis pool cleanly.")
+
+    try:
+        closed = registry.close_all()
+        if closed:
+            logger.info("Closed %d dataset storage(s) at shutdown.", closed)
+    except Exception:
+        logger.exception("Failed to close dataset storages at shutdown.")
+
+    try:
+        if not manager.wait_for_running(wait_seconds):
+            logger.warning(
+                "Analysis tasks still running %.0fs after shutdown began.",
+                wait_seconds,
+            )
+    except Exception:
+        logger.exception("Failed waiting for analysis tasks at shutdown.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _cleanup_spill_directories()
+    jobs.job_manager.start()
     _recover_datasets()
     _cleanup_expired_sessions()
     yield
+    await asyncio.to_thread(_shutdown_analysis_and_storage)
 
 
 app = FastAPI(

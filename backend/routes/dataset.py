@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import re
@@ -12,24 +11,24 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 import backend.jobs as jobs
 from backend.dependencies import (
     AuthenticatedUser,
+    analysis_queue_full,
+    analysis_timed_out,
     authorize_dataset,
     dataset_not_found,
     get_current_user,
     get_current_dataset,
     has_dataset_loaded,
 )
+from backend.shared_builds import await_shared, shared_cache_build
 from data_engine.dataset import Dataset
-from data_engine.dataset_manager import (
-    dataset_manager,
-    get_cached_on_dataset,
-)
+from data_engine.dataset_manager import dataset_manager
 from data_engine.dataset_registry import dataset_registry
 from data_engine.connectors import ConnectorValidationError, CSVConnector
 from data_engine.profiling import basic_statistics_for_dataset
 from data_engine.metadata_engine import metadata_for_dataset
 from data_engine.quality import check_quality_for_dataset
 from data_engine.preview import preview_dataset
-from data_engine.storage import StorageClosedError
+from data_engine.storage import QueryTimeoutError, StorageClosedError
 
 
 logger = logging.getLogger(__name__)
@@ -157,14 +156,29 @@ async def _cached_on_analysis_pool(dataset: Dataset, key: str, builder):
     `jobs.job_manager` is resolved at call time so tests can substitute
     it; exceptions (e.g. StorageClosedError) propagate unchanged
     through the Future to the caller's _missing_if_closed().
+
+    R5: concurrent misses for the same dataset and key share one
+    in-flight build (see backend.shared_builds.shared_cache_build) - only the first takes a
+    worker; the others await its Future on the event loop instead of
+    occupying a second worker blocked on dataset.cache_lock. A caller
+    disconnecting never cancels the shared build other callers wait on.
+
+    R4: a full pool answers 503 (nothing queued); a build stopped by
+    the task deadline answers 504.
     """
 
     if key in dataset.cache:
         return dataset.cache[key]
 
-    return await asyncio.wrap_future(
-        jobs.job_manager.run(lambda: get_cached_on_dataset(dataset, key, builder))
-    )
+    try:
+        future = shared_cache_build(dataset, key, builder)
+    except jobs.QueueFullError as exc:
+        raise analysis_queue_full(exc) from exc
+
+    try:
+        return await await_shared(future)
+    except QueryTimeoutError as exc:
+        raise analysis_timed_out() from exc
 
 
 # =========================================================

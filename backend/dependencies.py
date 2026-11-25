@@ -151,6 +151,35 @@ def get_current_user(request: Request = None) -> AuthenticatedUser:
 # =========================================================
 
 
+def analysis_queue_full(exc: Exception) -> HTTPException:
+    """
+    R4: the bounded analysis pool rejected the work (backend.jobs.
+    QueueFullError) - nothing was queued, so the client may simply
+    retry. 503 + Retry-After, never a 500.
+    """
+
+    retry_after = getattr(exc, "retry_after", 5)
+
+    return HTTPException(
+        status_code=503,
+        detail="The analysis service is busy. Please retry shortly.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def analysis_timed_out() -> HTTPException:
+    """
+    R4: the operation's deadline expired and its running query was
+    confirmed stopped (data_engine.storage.QueryTimeoutError). Same
+    detail as the analysis job's TIMEOUT_JOB_ERROR.
+    """
+
+    return HTTPException(
+        status_code=504,
+        detail="The analysis exceeded the server's time limit and was stopped.",
+    )
+
+
 def dataset_not_found(dataset_id: str) -> HTTPException:
     """
     The one 404 every dataset-scoped route returns for a dataset_id the

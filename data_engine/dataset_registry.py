@@ -162,6 +162,37 @@ class DatasetRegistry:
                     exc_info=True,
                 )
 
+    def close_all(self) -> int:
+        """
+        R6: application shutdown - unregister every dataset and close
+        its storage (interrupting any query still running on it),
+        WITHOUT deleting anything on disk: Parquet artifacts and
+        manifests stay so the next startup's recovery finds them. This
+        is what separates it from delete(), which is for removing a
+        dataset for good.
+
+        Same sequencing as delete(): entries are popped under the lock,
+        storages are closed outside it, and a close failure is logged,
+        never raised, so one bad storage can't stop the rest closing.
+        Returns the number of datasets unregistered.
+        """
+
+        with self._lock:
+            datasets = list(self._datasets.values())
+            self._datasets.clear()
+
+        for dataset in datasets:
+            try:
+                dataset.storage.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close storage for dataset_id=%r during shutdown.",
+                    dataset.dataset_id,
+                    exc_info=True,
+                )
+
+        return len(datasets)
+
     def list(self) -> list[Dataset]:
         """
         Return every currently registered Dataset.

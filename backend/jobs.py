@@ -17,9 +17,12 @@ import os
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+
+from data_engine.storage import QueryTimeoutError, query_deadline
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,24 @@ def _read_positive_int_env(name: str, default: int) -> int:
 # backend/routes/dataset.py (the project has no config system yet).
 DEFAULT_MAX_WORKERS = _read_positive_int_env("ANALYSIS_JOB_WORKERS", 2)
 DEFAULT_MAX_RETAINED_JOBS = _read_positive_int_env("ANALYSIS_JOB_RETENTION", 1000)
+
+# R4: queue protection. Tasks admitted but not yet finished (running +
+# waiting) are capped at max_workers + ANALYSIS_JOB_MAX_QUEUE; past
+# that, submit()/run() raise QueueFullError (the routes answer 503)
+# instead of growing ThreadPoolExecutor's unbounded queue forever.
+DEFAULT_MAX_QUEUE = _read_positive_int_env("ANALYSIS_JOB_MAX_QUEUE", 32)
+
+# R4: every task on the pool runs under this query deadline (seconds
+# from when it starts running, not from when it was queued). DuckDB
+# queries still running at the deadline are interrupted, so a slow
+# analysis can't hold a worker indefinitely. Sized well above the
+# slowest measured single operations (~15s per quality/statistics op at
+# 10M rows) and above the AI planner's own worst case (60s x 3
+# attempts).
+DEFAULT_TASK_TIMEOUT_SECONDS = _read_positive_int_env("ANALYSIS_JOB_TIMEOUT_SECONDS", 300)
+
+# Retry-After hint (seconds) for a rejected submission.
+QUEUE_FULL_RETRY_AFTER_SECONDS = 5
 
 
 def _utc_now() -> str:
@@ -98,20 +119,99 @@ GENERIC_JOB_ERROR = {
     "detail": "The analysis job failed due to an internal error.",
 }
 
+TIMEOUT_JOB_ERROR = {
+    "status_code": 504,
+    "detail": "The analysis exceeded the server's time limit and was stopped.",
+}
+
+SHUTDOWN_JOB_ERROR = {
+    "status_code": 503,
+    "detail": "The server shut down before the analysis job could run.",
+}
+
+
+class QueueFullError(RuntimeError):
+    """
+    R4: the analysis pool is at capacity (or shutting down) and the
+    work was NOT queued. Safe to retry later; routes answer 503 with a
+    Retry-After header.
+    """
+
+    def __init__(self, message: str, retry_after: int = QUEUE_FULL_RETRY_AFTER_SECONDS):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 class JobManager:
     def __init__(
         self,
         max_workers: int = DEFAULT_MAX_WORKERS,
         max_retained_jobs: int = DEFAULT_MAX_RETAINED_JOBS,
+        max_queue: int = DEFAULT_MAX_QUEUE,
+        task_timeout_seconds: float | None = DEFAULT_TASK_TIMEOUT_SECONDS,
     ):
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="analysis-job",
-        )
+        self._max_workers = max_workers
         self._max_retained_jobs = max_retained_jobs
+        self._capacity = max_workers + max_queue
+        self._task_timeout_seconds = task_timeout_seconds
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        # Futures admitted and not yet done - the admission count, and
+        # what shutdown waits on.
+        self._pending: set[Future] = set()
+        self._executor = self._new_executor()
+        self._accepting = True
+
+    def _new_executor(self) -> ThreadPoolExecutor:
+        return ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="analysis-job",
+        )
+
+    # -----------------------------------------------------
+    # Admission (R4)
+    # -----------------------------------------------------
+
+    def _bounded(self, work: Callable[[], Any]) -> Callable[[], Any]:
+        timeout = self._task_timeout_seconds
+
+        def _call():
+            with query_deadline(timeout):
+                return work()
+
+        return _call
+
+    def _admit_and_submit(self, fn: Callable, *args) -> Future:
+        """
+        Submit fn(*args) if the pool has capacity, else raise
+        QueueFullError without queueing anything. The capacity check
+        and the submission happen under one lock, so concurrent callers
+        can never overshoot the cap.
+        """
+        with self._lock:
+            if not self._accepting:
+                raise QueueFullError("The analysis service is shutting down.")
+
+            if len(self._pending) >= self._capacity:
+                raise QueueFullError("The analysis queue is full.")
+
+            try:
+                future = self._executor.submit(fn, *args)
+            except RuntimeError as exc:  # executor shut down underneath us
+                raise QueueFullError("The analysis service is shutting down.") from exc
+
+            self._pending.add(future)
+
+        future.add_done_callback(self._release)
+        return future
+
+    def _release(self, future: Future) -> None:
+        with self._lock:
+            self._pending.discard(future)
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
 
     def submit(
         self,
@@ -122,6 +222,11 @@ class JobManager:
         """
         Queue `work` and return a snapshot of the new job. owner_id and
         dataset_id are fixed at creation and never change afterwards.
+
+        R4: raises QueueFullError (and records no job) when the pool is
+        at capacity. The work runs under the task deadline; a DuckDB
+        query still running when it expires is interrupted and the job
+        fails with a 504 error.
         """
 
         job = Job(
@@ -135,7 +240,14 @@ class JobManager:
             self._evict_finished_locked()
             snapshot = job.to_dict()
 
-        self._executor.submit(self._run, job, work)
+        try:
+            future = self._admit_and_submit(self._run, job, self._bounded(work))
+        except QueueFullError:
+            with self._lock:
+                self._jobs.pop(job.job_id, None)
+            raise
+
+        future.add_done_callback(lambda done: self._fail_if_cancelled(job, done))
         return snapshot
 
     def run(self, work: Callable[[], Any]) -> Future:
@@ -148,9 +260,13 @@ class JobManager:
         the sync route drawing on the web server's general threadpool.
         Exceptions raised by `work` propagate unchanged through the
         Future; cancelling it before a worker picks it up drops the work.
+
+        R4: raises QueueFullError when the pool is at capacity, and the
+        work runs under the task deadline (QueryTimeoutError propagates
+        through the Future like any other exception).
         """
 
-        return self._executor.submit(work)
+        return self._admit_and_submit(self._bounded(work))
 
     def get(self, job_id: str, owner_id: str) -> dict | None:
         """
@@ -167,8 +283,57 @@ class JobManager:
 
             return job.to_dict()
 
+    # -----------------------------------------------------
+    # Lifecycle (R6)
+    # -----------------------------------------------------
+
+    def start(self) -> None:
+        """
+        Accept work again after shutdown()/begin_shutdown(), with a
+        fresh executor. No-op while already accepting. Lets the
+        process-wide manager survive repeated app lifespans (tests,
+        reloads).
+        """
+        with self._lock:
+            if self._accepting:
+                return
+            self._executor = self._new_executor()
+            self._accepting = True
+
+    def begin_shutdown(self) -> None:
+        """
+        Stop accepting work and cancel everything still queued (their
+        callers see a cancelled Future; tracked jobs are marked failed
+        with a 503 error). Running work is left to finish or to be
+        interrupted - see wait_for_running().
+        """
+        with self._lock:
+            self._accepting = False
+            executor = self._executor
+
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    def wait_for_running(self, timeout: float | None) -> bool:
+        """Wait up to `timeout` seconds for admitted work; True if all done."""
+        with self._lock:
+            pending = list(self._pending)
+
+        if not pending:
+            return True
+
+        _, not_done = wait_for_futures(pending, timeout=timeout)
+        return not not_done
+
     def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=wait)
+        with self._lock:
+            self._accepting = False
+            executor = self._executor
+
+        executor.shutdown(wait=wait)
+
+    def _fail_if_cancelled(self, job: Job, future: Future) -> None:
+        if future.cancelled():
+            self._transition(job, JOB_FAILED, error=dict(SHUTDOWN_JOB_ERROR))
 
     def _run(self, job: Job, work: Callable[[], Any]) -> None:
         self._transition(job, JOB_RUNNING)
@@ -182,6 +347,16 @@ class JobManager:
                 JOB_FAILED,
                 error={"status_code": exc.status_code, "detail": exc.detail},
             )
+
+        except QueryTimeoutError:
+            # Only raised once the query was confirmed stopped (or was
+            # never started because the deadline had already passed).
+            logger.warning(
+                "Analysis job %s exceeded its time limit (dataset_id=%r).",
+                job.job_id,
+                job.dataset_id,
+            )
+            self._transition(job, JOB_FAILED, error=dict(TIMEOUT_JOB_ERROR))
 
         except Exception:
             logger.exception(

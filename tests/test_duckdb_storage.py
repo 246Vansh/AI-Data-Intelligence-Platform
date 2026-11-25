@@ -15,6 +15,7 @@ Generic synthetic data only (no domain/Walmart references). Verifies:
 import inspect
 import os
 import re
+import shutil
 import threading
 
 import duckdb
@@ -805,8 +806,12 @@ def test_close_is_idempotent_and_safe_even_if_temp_directory_already_gone():
     temp_dir = storage._temp_dir
 
     # Simulate the directory having already been removed by something
-    # else before close() runs - cleanup must not raise.
-    os.rmdir(temp_dir)
+    # else before close() runs - cleanup must not raise. R6: the
+    # directory now holds the instance's owner lock file, whose open
+    # handle Windows won't let anything delete, so release it first.
+    duckdb_storage_module._release_spill_owner_lock(storage._spill_owner_lock_fd)
+    storage._spill_owner_lock_fd = None
+    shutil.rmtree(temp_dir)
 
     storage.close()
     storage.close()  # calling twice must remain a no-op, not an error

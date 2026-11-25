@@ -24,14 +24,17 @@ from data_engine.json_safety import sanitize_json, sanitize_records
 
 from backend.dependencies import (
     AuthenticatedUser,
+    analysis_queue_full,
+    analysis_timed_out,
     authorize_dataset,
     dataset_not_found,
     get_current_user,
 )
+from backend.shared_builds import await_shared, shared_cache_build
 from data_engine.dataset_manager import get_cached_on_dataset
 from data_engine.dataset_registry import dataset_registry
 from data_engine.metadata_engine import planning_metadata_for_dataset
-from data_engine.storage import StorageClosedError
+from data_engine.storage import QueryTimeoutError, StorageClosedError, check_deadline
 
 from data_engine.plan_validator import validate_plan
 
@@ -41,6 +44,7 @@ from data_engine.visualization import create_visualization_spec
 
 from ai.planner import create_analysis_plan
 from ai.adapter import AnalysisClarificationError
+from ai.planner_models import PlannerTimeoutError
 
 from ai.fast_planner import FastPlanner
 from ai.follow_up import references_previous, resolve_follow_up
@@ -219,11 +223,71 @@ async def analyze_dataset_endpoint(
 
     `jobs.job_manager` and `analyze_dataset` are resolved at call time
     so tests can substitute either.
+
+    R5: planning metadata is built (or joined, if another request is
+    already building it) before the pipeline is queued - see
+    _prewarm_planning_metadata - so concurrent analyses of one dataset
+    don't each hold a worker blocked on its cache lock.
+
+    R4: a full pool answers 503 with Retry-After; nothing is queued.
     """
 
-    return await asyncio.wrap_future(
-        jobs.job_manager.run(lambda: analyze_dataset(request, user))
-    )
+    await _prewarm_planning_metadata(request, user)
+
+    try:
+        future = jobs.job_manager.run(lambda: analyze_dataset(request, user))
+    except jobs.QueueFullError as exc:
+        raise analysis_queue_full(exc) from exc
+
+    return await asyncio.wrap_future(future)
+
+
+async def _prewarm_planning_metadata(request, user) -> None:
+    """
+    R5: make sure the dataset's "planning_metadata" cache entry exists
+    before the pipeline takes a worker, using the shared in-flight
+    build (backend.shared_builds), so a second concurrent request waits
+    on the event loop instead of on a worker.
+
+    Strictly an optimisation that never changes a response: whenever
+    the pipeline would answer with an error of its own first (empty
+    question, context for another dataset, unknown/foreign/deleted
+    dataset) or the build fails, this returns quietly and the pipeline
+    produces exactly the response it always did - including retrying
+    the build and reporting "Metadata generation failed." itself. Only
+    a full pool (503) and a stopped-at-deadline build (504) are
+    answered here, as the pipeline would answer them.
+    """
+
+    if not request.question.strip():
+        return
+
+    context = request.analysis_context
+
+    if context is not None and context.dataset_id != request.dataset_id:
+        return
+
+    try:
+        dataset = authorize_dataset(dataset_registry, request.dataset_id, user)
+    except Exception:
+        return
+
+    if "planning_metadata" in dataset.cache:
+        return
+
+    try:
+        future = shared_cache_build(
+            dataset, "planning_metadata", planning_metadata_for_dataset
+        )
+    except jobs.QueueFullError as exc:
+        raise analysis_queue_full(exc) from exc
+
+    try:
+        await await_shared(future)
+    except QueryTimeoutError as exc:
+        raise analysis_timed_out() from exc
+    except Exception:
+        return
 
 
 def analyze_dataset(
@@ -311,6 +375,9 @@ def analyze_dataset(
     except StorageClosedError as exc:
         # Deleted after authorization, while this request was running.
         raise dataset_not_found(request.dataset_id) from exc
+
+    except QueryTimeoutError as exc:
+        raise analysis_timed_out() from exc
 
     except Exception as exc:
         logger.exception("Metadata generation failed")
@@ -430,10 +497,24 @@ def analyze_dataset(
                 "ai_planning",
                 timings,
             ):
+                # R4: don't start a (paid, up to minutes-long) AI call
+                # once the task deadline has already passed.
+                check_deadline()
+
                 plan = create_analysis_plan(
                     user_question=question,
                     metadata=metadata,
                 )
+
+        except QueryTimeoutError as exc:
+            raise analysis_timed_out() from exc
+
+        except PlannerTimeoutError as exc:
+            logger.warning("AI planner request timed out")
+            raise HTTPException(
+                status_code=504,
+                detail="The AI planner did not respond in time. Please try again.",
+            ) from exc
 
         except AnalysisClarificationError as exc:
             raise HTTPException(
@@ -547,6 +628,9 @@ def analyze_dataset(
 
     except StorageClosedError as exc:
         raise dataset_not_found(request.dataset_id) from exc
+
+    except QueryTimeoutError as exc:
+        raise analysis_timed_out() from exc
 
     except Exception as exc:
         logger.exception("Unexpected analysis execution error")

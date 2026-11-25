@@ -2,9 +2,10 @@ import os
 import json
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
-from ai.planner_models import AnalysisPlanResponse
+from ai.planner_models import AnalysisPlanResponse, PlannerTimeoutError
+from ai.providers.client_settings import read_max_retries, read_request_timeout
 from ai.prompts import SYSTEM_PROMPT
 
 
@@ -30,16 +31,11 @@ class OpenAIProvider:
         # thread hostage long enough that the pool fills up and even
         # unrelated requests (e.g. GET /) stop getting served at
         # all. Bound it to something sane instead.
-        request_timeout = float(
-            os.getenv(
-                "AI_REQUEST_TIMEOUT_SECONDS",
-                "60",
-            )
-        )
-
+        # R4: validated, with retries explicit (see client_settings).
         self.client = OpenAI(
             api_key=api_key,
-            timeout=request_timeout,
+            timeout=read_request_timeout(),
+            max_retries=read_max_retries(),
         )
 
     def create_analysis_plan(
@@ -65,20 +61,24 @@ User question:
 {user_question}
 """
 
-        response = self.client.responses.parse(
-            model="gpt-5.6",
-            input=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-            text_format=AnalysisPlanResponse,
-        )
+        try:
+            response = self.client.responses.parse(
+                model="gpt-5.6",
+                input=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    },
+                ],
+                text_format=AnalysisPlanResponse,
+            )
+        except APITimeoutError as exc:
+            # R4: after the SDK's own retries - see client_settings.
+            raise PlannerTimeoutError("The AI planner request timed out.") from exc
 
         if response.output_parsed is None:
             raise ValueError(

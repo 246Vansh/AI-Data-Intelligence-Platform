@@ -3,6 +3,14 @@ from typing import Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 
+class PlannerTimeoutError(TimeoutError):
+    """
+    R4: the AI planner's HTTP request timed out (after the SDK's own
+    retries). Provider-neutral, so the API layer can answer 504 without
+    importing any vendor SDK.
+    """
+
+
 # =========================================================
 # FILTER PLAN
 # =========================================================

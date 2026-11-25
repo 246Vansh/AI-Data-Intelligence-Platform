@@ -5,9 +5,10 @@ import time
 import textwrap
 
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from anthropic import Anthropic, APITimeoutError
 
-from ai.planner_models import AnalysisPlanResponse
+from ai.planner_models import AnalysisPlanResponse, PlannerTimeoutError
+from ai.providers.client_settings import read_max_retries, read_request_timeout
 from ai.prompts import SYSTEM_PROMPT
 
 
@@ -84,16 +85,11 @@ class ClaudeProvider:
         # hold a thread hostage long enough that the pool fills up
         # and even unrelated requests (e.g. GET /) stop getting
         # served at all. Bound it to something sane instead.
-        request_timeout = float(
-            os.getenv(
-                "AI_REQUEST_TIMEOUT_SECONDS",
-                "60",
-            )
-        )
-
+        # R4: validated, with retries explicit (see client_settings).
         self.client = Anthropic(
             api_key=api_key,
-            timeout=request_timeout,
+            timeout=read_request_timeout(),
+            max_retries=read_max_retries(),
         )
 
     # =====================================================
@@ -185,33 +181,37 @@ class ClaudeProvider:
         # The question block is never cached; it changes per call.
         # =================================================
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": metadata_block,
-                            "cache_control": {"type": "ephemeral"},
-                        },
-                        {
-                            "type": "text",
-                            "text": question_block,
-                        },
-                    ],
-                }
-            ],
-        )
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=[
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": metadata_block,
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {
+                                "type": "text",
+                                "text": question_block,
+                            },
+                        ],
+                    }
+                ],
+            )
+        except APITimeoutError as exc:
+            # R4: after the SDK's own retries - see client_settings.
+            raise PlannerTimeoutError("The AI planner request timed out.") from exc
 
         api_end = time.perf_counter()
 

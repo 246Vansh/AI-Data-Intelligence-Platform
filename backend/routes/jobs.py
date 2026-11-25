@@ -4,6 +4,7 @@ import backend.jobs as jobs
 import backend.routes.analysis as analysis_route
 from backend.dependencies import (
     AuthenticatedUser,
+    analysis_queue_full,
     authorize_dataset,
     get_current_user,
 )
@@ -44,11 +45,16 @@ def create_analysis_job(
     # dataset deleted in between also fails cleanly.
     authorize_dataset(analysis_route.dataset_registry, request.dataset_id, user)
 
-    return jobs.job_manager.submit(
-        owner_id=user.user_id,
-        dataset_id=request.dataset_id,
-        work=lambda: _run_analysis(request, user),
-    )
+    # R4: a full pool rejects the job up front (503 + Retry-After) -
+    # no job record is created, so nothing is left "queued" forever.
+    try:
+        return jobs.job_manager.submit(
+            owner_id=user.user_id,
+            dataset_id=request.dataset_id,
+            work=lambda: _run_analysis(request, user),
+        )
+    except jobs.QueueFullError as exc:
+        raise analysis_queue_full(exc) from exc
 
 
 @router.get("/{job_id}")
